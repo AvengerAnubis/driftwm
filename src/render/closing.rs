@@ -24,17 +24,16 @@ use super::{OutputRenderElements, WindowTransformElement, shaders};
 /// invisible; a tighter epsilon leaves a long, dead tail past the motion).
 const DONE_EPSILON: f64 = 0.01;
 
-/// Fraction of an effect's duration the alpha ramp occupies, front-loaded so the
-/// window is opaque for the rest of it: opening reaches full opacity by this much
-/// progress, closing stays opaque until this much remains. A linear ramp leaves
-/// the window dwelling translucent through most of the motion, which reads as a
-/// much stronger fade than intended. Shared by open, close, and both crossfades.
-pub(crate) const FADE_PORTION: f64 = 0.6;
-
-/// Alpha of a closing/departing effect at `progress`, front-loaded per
-/// [`FADE_PORTION`].
+/// Alpha of a closing or departing effect at `progress`: `1 - p²`. Shared by the
+/// close fade and both suspend crossfades.
+///
+/// Eased rather than linear so the window holds near-opaque while most of the
+/// shrink plays (0.91 at p=0.3) instead of dwelling translucent, which reads as a
+/// far stronger fade than intended. A smooth quadratic rather than a clamped ramp
+/// leaves no saturation corner, and it reaches 0 exactly at p=1.
 fn fade_out_alpha(progress: f64) -> f32 {
-    (((1.0 - progress) / FADE_PORTION).clamp(0.0, 1.0)) as f32
+    let p = progress.clamp(0.0, 1.0);
+    (1.0 - p * p) as f32
 }
 
 /// One surface of a captured window tree: an Rc-cloned GL texture and where it

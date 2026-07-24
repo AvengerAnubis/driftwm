@@ -250,9 +250,10 @@ impl WindowAnimations {
                 AnimatedVisual {
                     loc,
                     size,
-                    // Front-loaded so the window spends most of the animation
-                    // opaque and moving, not dwelling translucent.
-                    alpha: (p / crate::render::FADE_PORTION).min(1.0) as f32,
+                    // `1 - (1-p)²`: rises fast so the window isn't translucent
+                    // through most of the grow-in, then smoothly asymptotes to
+                    // full opacity at p=1 — eased, with no saturation corner.
+                    alpha: (1.0 - (1.0 - p) * (1.0 - p)) as f32,
                 }
             }
             AnimationKind::Geometry { visual, .. } => AnimatedVisual {

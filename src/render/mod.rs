@@ -21,8 +21,8 @@ pub(crate) use blur::compile_blur_shaders;
 pub use blur::{BlurCache, SharedBlur};
 pub use capture::{render_capture_frames, render_screencopy, render_toplevel_captures};
 pub(crate) use closing::{
-    AdoptionFade, CloseChrome, ClosePixels, ClosingSnapshot, FADE_PORTION, capture_close_pixels,
-    snapshot_canvas, snapshot_screen,
+    AdoptionFade, CloseChrome, ClosePixels, ClosingSnapshot, capture_close_pixels, snapshot_canvas,
+    snapshot_screen,
 };
 pub use cursor::build_cursor_elements;
 pub use elements::{
