@@ -356,6 +356,35 @@ fn toml_navigation_friction_is_migration_error_not_fatal() {
 }
 
 #[test]
+fn toml_navigation_animation_speed_is_migration_error_not_fatal() {
+    // `[navigation] animation_speed` was renamed to `camera_speed`, but
+    // deny_unknown_fields would otherwise make a stale value fail the whole
+    // parse — it must degrade to a migration message instead. The value is
+    // discarded (not carried over): window effects are tuned separately.
+    let toml = r#"
+        [navigation]
+        animation_speed = 0.8
+        nudge_step = 42
+    "#;
+    let (config, warnings) =
+        Config::from_toml_collect(toml).expect("animation_speed should not fail the parse");
+    assert_eq!(
+        config.nudge_step, 42,
+        "rest of the config should still apply"
+    );
+    assert!(
+        (config.camera_speed - 0.3).abs() < f64::EPSILON,
+        "camera_speed falls back to default (value not carried over)"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("animation_speed") && w.contains("camera_speed")),
+        "expected an animation_speed→camera_speed migration message, got {warnings:?}"
+    );
+}
+
+#[test]
 fn toml_snap_renamed_keys_are_migration_errors_not_fatal() {
     // `same_edge`/`edge_center` were renamed to `corners`/`centers`, but
     // deny_unknown_fields would otherwise make a stale value fail the whole

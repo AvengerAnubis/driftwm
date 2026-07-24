@@ -130,6 +130,7 @@ pub(super) fn push_suspended_element(
     loc: Point<i32, Logical>,
     focused: bool,
     launching: bool,
+    alpha: f32,
     config: &DecorationConfig,
     decoration_scale: i32,
     decorations: &mut HashMap<DecorationKey, WindowDecoration>,
@@ -153,6 +154,9 @@ pub(super) fn push_suspended_element(
     let render_loc: Point<f64, Logical> =
         Point::from((loc.x as f64 - camera.x, loc.y as f64 - camera.y));
     let loc_phys: Point<i32, Physical> = render_loc.to_physical_precise_round(scale);
+    // `None` keeps the opaque fast path when fully drawn; the adoption crossfade
+    // passes alpha < 1 so the departing stand-in fades over the live window.
+    let elem_alpha = (alpha < 1.0).then_some(alpha);
 
     let bar_h_phys = (bar_height as f64 * scale.y).round();
     let bar_h_logical = bar_h_phys / scale.y;
@@ -179,7 +183,7 @@ pub(super) fn push_suspended_element(
                 renderer,
                 label_phys,
                 buf,
-                None,
+                elem_alpha,
                 None,
                 None,
                 Kind::Unspecified,
@@ -206,7 +210,7 @@ pub(super) fn push_suspended_element(
                 renderer,
                 body_phys,
                 buf,
-                None,
+                elem_alpha,
                 None,
                 None,
                 Kind::Unspecified,
@@ -235,7 +239,7 @@ pub(super) fn push_suspended_element(
         renderer,
         bar_physical,
         &deco.title_bar,
-        None,
+        elem_alpha,
         None,
         None,
         Kind::Unspecified,
@@ -276,9 +280,10 @@ pub(super) fn push_suspended_element(
             border_width,
             border_color,
             focused,
-            1.0,
+            alpha as f64,
             scale,
             zoom,
+            None,
         );
     }
 
@@ -301,9 +306,10 @@ pub(super) fn push_suspended_element(
             shader,
             body_logical,
             (corner_radius + border_width) as f32,
-            1.0,
+            alpha as f64,
             scale,
             zoom,
+            None,
         );
     }
 }

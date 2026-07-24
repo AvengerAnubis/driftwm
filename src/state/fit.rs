@@ -92,6 +92,7 @@ impl DriftWm {
             visual_center: center,
         } = self.compute_fit_geometry(window);
 
+        self.animate_window_geometry(window, target_size);
         window.enter_fit_configure(target_size);
         self.map_window(window.clone(), new_loc, false);
         // After the map — set_fit needs the window's stage entry, which the
@@ -140,6 +141,7 @@ impl DriftWm {
         // then re-center using the real post-unfit size.
         let pre_exit_size = window.geometry().size;
 
+        self.animate_window_geometry(window, saved_size);
         window.exit_fit_configure(saved_size);
         self.map_window(window.clone(), new_loc, false);
 
@@ -258,7 +260,9 @@ impl DriftWm {
             .filter(|w| w != window)
             .collect()
         };
+        let old_member_locs = self.cluster_member_positions(&cluster_members);
         self.shift_cluster_around_primary(window, old_rect, new_rect);
+        self.animate_cluster_shift(old_member_locs);
         self.fit_window(window);
         for member in &cluster_members {
             self.refresh_stable_snap_rect(member);
@@ -300,13 +304,44 @@ impl DriftWm {
             .filter(|w| w != window)
             .collect()
         };
+        let old_member_locs = self.cluster_member_positions(&cluster_members);
         self.shift_cluster_around_primary(window, old_rect, new_rect);
+        self.animate_cluster_shift(old_member_locs);
         self.unfit_window(window);
         for member in &cluster_members {
             self.refresh_stable_snap_rect(member);
         }
         // Primary's cache is refreshed by the pending_recenter completion
         // in `handlers/compositor.rs` once the client acks the exit configure.
+    }
+
+    /// Snapshot each client cluster member's pre-shift canvas position, so the
+    /// shift can be animated after the stage moves them.
+    fn cluster_member_positions(
+        &self,
+        members: &[StageWindow],
+    ) -> Vec<(Window, smithay::utils::Point<i32, smithay::utils::Logical>)> {
+        members
+            .iter()
+            .filter_map(|m| {
+                let client = m.client()?.clone();
+                let loc = self.stage.position_of(m)?;
+                Some((client, loc))
+            })
+            .collect()
+    }
+
+    /// Animate each client cluster member from its captured pre-shift position
+    /// to its new (already-applied) stage position.
+    fn animate_cluster_shift(
+        &mut self,
+        old_locs: Vec<(Window, smithay::utils::Point<i32, smithay::utils::Logical>)>,
+    ) {
+        for (member, old_loc) in old_locs {
+            if self.stage.position_of(&member) != Some(old_loc) {
+                self.animate_window_move_from(&member, old_loc);
+            }
+        }
     }
 
     pub fn toggle_fit_window_snapped(&mut self, window: &Window) {

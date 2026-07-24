@@ -85,6 +85,7 @@ fn push_layer_chrome(
             [r, r, r, r],
             zoom,
             output_scale,
+            None,
         );
     } else {
         push_plain(target, surface_elements);
@@ -108,6 +109,7 @@ fn push_layer_chrome(
             opacity,
             scale,
             zoom,
+            None,
         );
     }
 
@@ -133,6 +135,7 @@ fn push_layer_chrome(
             opacity,
             scale,
             zoom,
+            None,
         );
     }
 
@@ -266,7 +269,7 @@ pub(super) fn build_canvas_layer_elements(
             scale,
             output_scale,
             zoom,
-            |target, elems| super::push_plain_elements(target, elems, zoom),
+            |target, elems| super::push_plain_elements(target, elems, zoom, None),
         );
     }
 

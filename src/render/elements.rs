@@ -337,6 +337,113 @@ impl<E: RenderElement<GlesRenderer>> RenderElement<GlesRenderer> for PixelSnapRe
     }
 }
 
+/// Per-window affine transform applied on top of the camera zoom, so the
+/// canvas transform and the window-local lifecycle/geometry animation stay
+/// independent. `origin` and `offset` are physical; `scale` is the visual
+/// stretch. Wraps the already-zoomed element.
+#[derive(Debug)]
+pub struct WindowTransformElement<E> {
+    element: E,
+    origin: Point<f64, Physical>,
+    offset: Point<f64, Physical>,
+    scale: Scale<f64>,
+}
+
+impl<E> WindowTransformElement<E> {
+    pub fn new(
+        element: E,
+        origin: Point<f64, Physical>,
+        offset: Point<f64, Physical>,
+        scale: Scale<f64>,
+    ) -> Self {
+        Self {
+            element,
+            origin,
+            offset,
+            scale,
+        }
+    }
+
+    fn transform_rect(&self, rect: Rectangle<i32, Physical>) -> Rectangle<i32, Physical> {
+        let x0 = self.origin.x + (rect.loc.x as f64 - self.origin.x) * self.scale.x + self.offset.x;
+        let y0 = self.origin.y + (rect.loc.y as f64 - self.origin.y) * self.scale.y + self.offset.y;
+        let x1 = self.origin.x
+            + ((rect.loc.x + rect.size.w) as f64 - self.origin.x) * self.scale.x
+            + self.offset.x;
+        let y1 = self.origin.y
+            + ((rect.loc.y + rect.size.h) as f64 - self.origin.y) * self.scale.y
+            + self.offset.y;
+        Rectangle::new(
+            Point::from((x0.round() as i32, y0.round() as i32)),
+            Size::from((
+                (x1.round() as i32 - x0.round() as i32).max(0),
+                (y1.round() as i32 - y0.round() as i32).max(0),
+            )),
+        )
+    }
+}
+
+impl<E: Element> Element for WindowTransformElement<E> {
+    fn id(&self) -> &Id {
+        self.element.id()
+    }
+    fn current_commit(&self) -> CommitCounter {
+        self.element.current_commit()
+    }
+    fn src(&self) -> Rectangle<f64, smithay::utils::Buffer> {
+        self.element.src()
+    }
+    fn transform(&self) -> Transform {
+        self.element.transform()
+    }
+    fn geometry(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.transform_rect(self.element.geometry(scale))
+    }
+    fn damage_since(
+        &self,
+        scale: Scale<f64>,
+        commit: Option<CommitCounter>,
+    ) -> DamageSet<i32, Physical> {
+        // Element-relative damage upscaled by the local stretch; the damage
+        // tracker's geometry/alpha diffing supplies the per-frame motion damage.
+        self.element
+            .damage_since(scale, commit)
+            .into_iter()
+            .map(|rect| rect.to_f64().upscale(self.scale).to_i32_up())
+            .collect()
+    }
+    fn opaque_regions(&self, _scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
+        // Animated alpha and fractional transforms make conservative opaque
+        // tracking safer than a small occlusion optimization.
+        OpaqueRegions::default()
+    }
+    fn alpha(&self) -> f32 {
+        self.element.alpha()
+    }
+    fn kind(&self) -> Kind {
+        self.element.kind()
+    }
+}
+
+impl<E: RenderElement<GlesRenderer>> RenderElement<GlesRenderer> for WindowTransformElement<E> {
+    fn draw(
+        &self,
+        frame: &mut GlesFrame<'_, '_>,
+        src: Rectangle<f64, smithay::utils::Buffer>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+        opaque_regions: &[Rectangle<i32, Physical>],
+        cache: Option<&smithay::utils::user_data::UserDataMap>,
+    ) -> Result<(), GlesError> {
+        self.element
+            .draw(frame, src, dst, damage, opaque_regions, cache)
+    }
+
+    fn underlying_storage(&self, renderer: &mut GlesRenderer) -> Option<UnderlyingStorage<'_>> {
+        self.element.underlying_storage(renderer)
+    }
+}
+
 render_elements! {
     pub OutputRenderElements<=GlesRenderer>;
     Background=RescaleRenderElement<PixelShaderElement>,
@@ -348,6 +455,11 @@ render_elements! {
     Decoration=PixelSnapRescaleElement<MemoryRenderBufferRenderElement<GlesRenderer>>,
     Window=PixelSnapRescaleElement<WaylandSurfaceRenderElement<GlesRenderer>>,
     CsdWindow=PixelSnapRescaleElement<RoundedCornerElement>,
+    AnimatedDecoration=WindowTransformElement<PixelSnapRescaleElement<MemoryRenderBufferRenderElement<GlesRenderer>>>,
+    AnimatedWindow=WindowTransformElement<PixelSnapRescaleElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
+    AnimatedCsdWindow=WindowTransformElement<PixelSnapRescaleElement<RoundedCornerElement>>,
+    AnimatedChrome=WindowTransformElement<RescaleRenderElement<PixelShaderElement>>,
+    ClosingWindow=WindowTransformElement<TextureRenderElement<GlesTexture>>,
     Layer=WaylandSurfaceRenderElement<GlesRenderer>,
     Cursor=MemoryRenderBufferRenderElement<GlesRenderer>,
     CursorSurface=smithay::backend::renderer::element::Wrap<WaylandSurfaceRenderElement<GlesRenderer>>,

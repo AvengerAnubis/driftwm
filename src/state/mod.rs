@@ -18,6 +18,7 @@ mod session_store;
 mod stage_window;
 mod suspended;
 mod viewport;
+mod window_animation;
 pub use cluster_snapshot::{ClusterMember, ClusterResizeSnapshot};
 pub use cursor::{CursorFrames, CursorState};
 pub use errors::ErrorSource;
@@ -501,6 +502,19 @@ pub struct DriftWm {
     /// (downscaling stays crisp; only upscaling blurs).
     pub decoration_scale: i32,
     pub render: RenderCache,
+    /// Per-window open/close/move/resize/fullscreen animation bookkeeping,
+    /// keyed by stable `ElementId`. Render-only; the stage stays authoritative.
+    pub(crate) window_animations: window_animation::WindowAnimations,
+    /// Flattened textures of closed windows, faded out after teardown.
+    pub(crate) closing_snapshots: Vec<crate::render::ClosingSnapshot>,
+    /// Departing stand-ins fading over the window that adopted their slot.
+    pub(crate) adoption_fades: Vec<crate::render::AdoptionFade>,
+    /// Content textures captured at unmap/teardown, keyed by root surface id,
+    /// consumed when the close animation flattens.
+    pub(crate) close_pixels: std::collections::HashMap<
+        smithay::reexports::wayland_server::backend::ObjectId,
+        crate::render::ClosePixels,
+    >,
 
     pub dmabuf_state: DmabufState,
     pub dmabuf_global: Option<DmabufGlobal>,
@@ -1109,6 +1123,12 @@ impl DriftWm {
     /// half (camera restore) is NOT handled here — a caller unmapping a
     /// fullscreen window must tear that down first, as `toplevel_destroyed` does.
     pub fn unmap_window(&mut self, window: &Window) {
+        // Belt and braces: the dead-id sweep in `refresh_and_flush_clients` also
+        // covers this, but drop eagerly so a re-map can't briefly resolve a
+        // stale animation entry.
+        if let Some(id) = self.stage.id_of(window) {
+            self.window_animations.remove(id);
+        }
         self.stage.remove(window);
         membership::send_output_leaves(window);
     }
@@ -1135,6 +1155,9 @@ impl DriftWm {
         // that never reached that consume (the wl_surface-level cleanup safety
         // net) can't strand a snapshot past its surface.
         self.unmap_snapshots.remove(&id);
+        // Captured close pixels are consumed at teardown; drop any that outlive
+        // their surface (never-closed hide-to-tray captures, skipped animations).
+        self.close_pixels.remove(&id);
         self.pending_center.remove(surface);
         self.pending_size.remove(surface);
         self.pending_fit.remove(surface);
@@ -1753,12 +1776,92 @@ impl DriftWm {
     }
 
     pub fn output_has_active_animations(&self, output: &Output) -> bool {
-        let os = output_state(output);
-        os.camera_target.is_some()
-            || os.zoom_target.is_some()
-            || os.edge_pan_velocity.is_some()
-            || os.momentum.velocity.x != 0.0
-            || os.momentum.velocity.y != 0.0
+        // Read camera/zoom and drop the guard before any rect math: the window
+        // animation scoping below re-reads no output_state, but the guard would
+        // otherwise deadlock if it did (output_state panics on re-entrant lock).
+        let (camera_active, camera, zoom) = {
+            let os = output_state(output);
+            (
+                os.camera_target.is_some()
+                    || os.zoom_target.is_some()
+                    || os.edge_pan_velocity.is_some()
+                    || os.momentum.velocity.x != 0.0
+                    || os.momentum.velocity.y != 0.0,
+                os.camera,
+                os.zoom,
+            )
+        };
+        camera_active || self.output_shows_window_animations(output, camera, zoom)
+    }
+
+    /// Whether any window animation, closing snapshot, or adoption fade has a
+    /// visual rect intersecting `output`'s viewport. Caller passes the output's
+    /// already-read camera/zoom so this never re-locks `output_state`.
+    fn output_shows_window_animations(
+        &self,
+        output: &Output,
+        camera: Point<f64, Logical>,
+        zoom: f64,
+    ) -> bool {
+        let name = output.name();
+        let viewport = output_logical_size(output);
+        let visible = driftwm::canvas::visible_canvas_rect(camera.to_i32_round(), viewport, zoom);
+
+        for snapshot in &self.closing_snapshots {
+            match snapshot.pinned_output() {
+                Some(o) => {
+                    if o == name {
+                        return true;
+                    }
+                }
+                None => {
+                    if visible.overlaps(snapshot.canvas_rect().to_i32_round()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        for fade in &self.adoption_fades {
+            let rect = Rectangle::new(fade.loc, fade.suspended.size.get());
+            if visible.overlaps(rect) {
+                return true;
+            }
+        }
+        for (id, geo) in self.window_animations.scoping_entries() {
+            match geo {
+                Some((window_animation::AnimSpace::Screen(o), _)) => {
+                    if o == name {
+                        return true;
+                    }
+                }
+                Some((window_animation::AnimSpace::Canvas, rect)) => {
+                    if visible.overlaps(rect.to_i32_round()) {
+                        return true;
+                    }
+                }
+                None => {
+                    if let Some(rect) = self.animation_open_canvas_rect(id)
+                        && visible.overlaps(rect)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Live canvas rect of an open-animation window (used for scoping only).
+    fn animation_open_canvas_rect(
+        &self,
+        id: driftwm::stage::ElementId,
+    ) -> Option<Rectangle<i32, Logical>> {
+        let window = self.stage.window_by_id(id)?;
+        let loc = self.stage.position_of(window)?;
+        Some(Rectangle::new(
+            loc,
+            driftwm::stage::StageElement::size(window),
+        ))
     }
 
     /// True when `output_name`'s animated background is due for its next tick
@@ -1782,15 +1885,17 @@ impl DriftWm {
     }
 
     /// Outputs whose animated background can actually render: active, not
-    /// fullscreen, not DPMS-off. Fullscreen and DPMS-off outputs stop
+    /// visually fullscreen, not DPMS-off. Fullscreen and DPMS-off outputs stop
     /// rendering the background, so their `background_last_animate` stamps
-    /// go stale and would otherwise read as permanently due. Shared by the
-    /// idle due-check, the tick-timer arming wait, and the per-frame
-    /// dirty-marking so all three agree on which outputs count.
+    /// go stale and would otherwise read as permanently due. A fullscreen-entry
+    /// transition keeps its canvas visible until the window covers it, so its
+    /// background stays eligible for that short interval. Shared by the idle
+    /// due-check, the tick-timer arming wait, and the per-frame dirty-marking so
+    /// all three agree on which outputs count.
     pub(crate) fn background_render_eligible_outputs(&self) -> impl Iterator<Item = &Output> {
-        self.active_outputs
-            .iter()
-            .filter(|o| !self.is_output_fullscreen(o) && !self.dpms_off_outputs.contains(o))
+        self.active_outputs.iter().filter(|o| {
+            !self.is_output_visually_fullscreen(o) && !self.dpms_off_outputs.contains(o)
+        })
     }
 
     /// Owned-name variant of [`Self::background_render_eligible_outputs`] for
@@ -1819,6 +1924,9 @@ impl DriftWm {
             || self.cursor.exec_cursor_show_at.is_some()
             || self.cursor.exec_cursor_deadline.is_some()
             || self.cursor.is_animated()
+            || self.window_animations.is_active()
+            || !self.closing_snapshots.is_empty()
+            || !self.adoption_fades.is_empty()
     }
 
     pub fn flush_middle_click(&mut self, press_time: u32, release_time: Option<u32>) {
@@ -2495,6 +2603,12 @@ impl DriftWm {
     /// main loop and the test server pump so the two can't drift apart.
     pub fn refresh_and_flush_clients(&mut self) {
         self.stage.retain_alive();
+        // Prune animation entries whose window left the stage — covers crash
+        // paths (no `unmap_window`) and lets the fixture baseline drain without
+        // a tick source.
+        let stage = &self.stage;
+        self.window_animations
+            .retain_ids(|id| stage.window_by_id(id).is_some());
         self.refresh_window_outputs();
         self.popups.cleanup();
         self.display_handle.flush_clients().ok();
@@ -2525,6 +2639,10 @@ impl DriftWm {
             ("stable_snap_rects", self.stable_snap_rects.len()),
             ("suspend_marks", self.suspend_marks.len()),
             ("real_close_marks", self.real_close_marks.len()),
+            ("window_animations", self.window_animations.len()),
+            ("closing_snapshots", self.closing_snapshots.len()),
+            ("adoption_fades", self.adoption_fades.len()),
+            ("close_pixels", self.close_pixels.len()),
             ("unmap_snapshots", self.unmap_snapshots.len()),
             ("pending_relaunches", self.pending_relaunches.len()),
             ("pending_adoptions", self.pending_adoptions.len()),

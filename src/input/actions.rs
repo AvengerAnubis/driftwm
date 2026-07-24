@@ -105,6 +105,7 @@ impl DriftWm {
                     );
                     let new_loc = loc + Point::from(offset);
                     self.map_window(window.clone(), new_loc, false);
+                    self.animate_window_move_from(&window, loc);
                 }
             }
             Action::PanViewport(dir) => {
@@ -692,6 +693,11 @@ impl DriftWm {
         else {
             return;
         };
+        // Pin/unpin flips the chase space (canvas ↔ screen); an in-flight entry
+        // would keep a stale-space visual, so drop it.
+        if let Some(id) = self.stage.id_of(&window) {
+            self.window_animations.remove(id);
+        }
         if let Some(site) = self.stage.take_pin(&window) {
             // Unpin: convert the fixed screen position back to a canvas
             // location at the current camera/zoom — no visual jump.

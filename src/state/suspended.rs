@@ -401,6 +401,24 @@ impl DriftWm {
         let client = StageWindow::Client(window.clone());
         let history_slot = self.stage.focus_history().iter().position(|w| *w == client);
 
+        // Crossfade the departing stand-in over the window that takes its slot
+        // (backend-gated — headless never accumulates render transients). Drop
+        // animation entries for both involved ids: the discarded fresh entry and
+        // the suspended entry the window inherits.
+        if self.backend.is_some() {
+            self.adoption_fades.push(crate::render::AdoptionFade {
+                suspended: s.clone(),
+                loc: pos,
+                progress: 0.0,
+            });
+        }
+        if let Some(id) = self.stage.id_of(&client) {
+            self.window_animations.remove(id);
+        }
+        if let Some(id) = self.stage.id_of(&suspended) {
+            self.window_animations.remove(id);
+        }
+
         // Compound replace: the fresh entry must leave before the suspended
         // entry is replaced, or the same window would sit in two z-slots and
         // trip the duplicate-window invariant.
@@ -694,6 +712,51 @@ impl DriftWm {
         );
     }
 
+    /// One entry point for the close-animation capture: on buffer removal the
+    /// OLD buffer's textures are still what surface state returns, so clone them
+    /// for the eventual flatten. Renderer-gated (the flatten needs one anyway),
+    /// and invalidated on remap — the unmap hook fires on every hide, not just
+    /// closes, so a hide-to-tray app must not pin stale textures.
+    pub fn capture_close_pixels_on_unmap(&mut self, surface: &WlSurface) {
+        enum Change {
+            Unmap,
+            Remap,
+            Other,
+        }
+        let change = with_states(surface, |states| {
+            match states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .pending()
+                .buffer
+            {
+                Some(BufferAssignment::Removed) => Change::Unmap,
+                Some(BufferAssignment::NewBuffer(_)) => Change::Remap,
+                None => Change::Other,
+            }
+        });
+        let id = surface.id();
+        match change {
+            Change::Remap => {
+                self.close_pixels.remove(&id);
+                return;
+            }
+            Change::Other => return,
+            Change::Unmap => {}
+        }
+        // First capture wins for this surface.
+        if self.close_pixels.contains_key(&id) {
+            return;
+        }
+        let Some(mut backend) = self.backend.take() else {
+            return;
+        };
+        if let Some(pixels) = crate::render::capture_close_pixels(backend.renderer(), surface) {
+            self.close_pixels.insert(id, pixels);
+        }
+        self.backend = Some(backend);
+    }
+
     /// Resolve a surface `app_id` to a launchable identity, using the warmed
     /// desktop-entry cache (built synchronously on the first miss if the warm
     /// hasn't landed). Refreshes on directory-mtime change (cheap).
@@ -899,6 +962,12 @@ impl DriftWm {
         let was_focused = self
             .window_focus_surface()
             .is_some_and(|t| focus_belongs_to_toplevel(&t.0, surface));
+
+        // Drop any window animation entry: `stage.replace` preserves the id, so
+        // the stand-in would otherwise inherit a stale client chase.
+        if let Some(id) = self.stage.id_of(window) {
+            self.window_animations.remove(id);
+        }
 
         let sid = SuspendedId(self.next_suspended_id);
         self.next_suspended_id += 1;

@@ -71,6 +71,26 @@ where
     }
 }
 
+/// Validate a lerp/scale factor in (0, 1]: reject `<= 0`/NaN back to `default`
+/// with a warning (0 would freeze motion), clamp `> 1` down to 1.
+pub(super) fn unit_range_or_default(
+    value: Option<f64>,
+    field: &str,
+    default: f64,
+    errors: &mut Warnings,
+) -> f64 {
+    match value {
+        Some(v) if v <= 0.0 || v.is_nan() => {
+            collect_warn(
+                errors,
+                format!("config: {field} {v} must be in (0, 1], using {default}"),
+            );
+            default
+        }
+        other => clamp_warn(other.unwrap_or(default), 0.0, 1.0, field, errors),
+    }
+}
+
 /// Floor a value at zero, warning when it was negative (or NaN). For knobs with
 /// a natural lower bound but no upper limit (speeds, steps, distances, sizes).
 pub(super) fn non_negative<T>(value: T, field: &str, errors: &mut Warnings) -> T
@@ -443,6 +463,18 @@ pub(super) fn parse_effects_config(raw: EffectsFileConfig, errors: &mut Warnings
         ),
         // 0 = off (frost freezes, stops re-sampling the animated wallpaper).
         animate_blur_fps: raw.animate_blur_fps.unwrap_or(20).min(144),
+        animation_speed: unit_range_or_default(
+            raw.animation_speed,
+            "effects.animation_speed",
+            0.3,
+            errors,
+        ),
+        animation_scale: unit_range_or_default(
+            raw.animation_scale,
+            "effects.animation_scale",
+            0.95,
+            errors,
+        ),
     }
 }
 

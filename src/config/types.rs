@@ -884,6 +884,12 @@ pub struct EffectsConfig {
     /// wallpapers evolve slowly; re-blurring at a fraction of the output
     /// rate looks continuous through frosted glass at a fraction of the cost.
     pub animate_blur_fps: u32,
+    /// Base lerp factor for window open/close/move/resize animations
+    /// (frame-rate independent), in (0, 1]. Lower = smoother; 1 = instant.
+    pub animation_speed: f64,
+    /// Open/close scale amplitude: windows grow in from this scale and shrink
+    /// out to it, in (0, 1]. 1 = pure fade, no scaling.
+    pub animation_scale: f64,
 }
 
 impl Default for EffectsConfig {
@@ -892,6 +898,8 @@ impl Default for EffectsConfig {
             blur_radius: 2,
             blur_strength: 1.1,
             animate_blur_fps: 20,
+            animation_speed: 0.3,
+            animation_scale: 0.95,
         }
     }
 }

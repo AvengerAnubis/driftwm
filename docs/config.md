@@ -288,7 +288,7 @@ Default: `0.5`
 
 momentum coast: 0 = off, 0.5 = default, 1 = floatiest
 
-### `animation_speed`
+### `camera_speed`
 
 Default: `0.3`
 
@@ -576,6 +576,18 @@ per-pass texel spread (default: 1.1)
 Default: `20`
 
 refresh rate of blur under an animated wallpaper (0-144, default 20; 0 = off, freezing the frost so it stops re-sampling the wallpaper). The background is blurred once into a shared full-output texture and each window slices its rect from it, so cost stays flat as windows are added; a window stacked over other windows falls back to an exact per-window blur at the same cadence. Animated wallpapers evolve slowly, so well below the output rate still looks continuous through frosted glass. Camera moves force a refresh.
+
+### `animation_speed`
+
+Default: `0.3`
+
+window open/close/move/resize lerp factor (higher = faster; 1 = instant)
+
+### `animation_scale`
+
+Default: `0.95`
+
+open/close grow/shrink amplitude (1 = fade only)
 
 ## `[background]`
 

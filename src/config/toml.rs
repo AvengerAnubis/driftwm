@@ -54,6 +54,8 @@ pub(super) struct EffectsFileConfig {
     pub blur_strength: Option<f64>,
     pub animate_blur: Option<bool>,
     pub animate_blur_fps: Option<u32>,
+    pub animation_speed: Option<f64>,
+    pub animation_scale: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -119,6 +121,9 @@ pub(super) struct CursorConfig {
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct NavigationConfig {
+    pub camera_speed: Option<f64>,
+    /// Renamed to `camera_speed`; kept only so a stale value yields a migration
+    /// error instead of failing the whole parse via `deny_unknown_fields`.
     pub animation_speed: Option<f64>,
     pub auto_navigate_on_close: Option<bool>,
     pub auto_navigate_on_click: Option<bool>,

@@ -1,22 +1,463 @@
 use std::time::{Duration, Instant};
 
+use smithay::desktop::Window;
 use smithay::input::pointer::CursorImageStatus;
-use smithay::utils::{Logical, Point};
+use smithay::reexports::wayland_server::Resource;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use driftwm::canvas::{self, CanvasPos};
+use driftwm::stage::{ElementId, StageElement};
+use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 
 use smithay::output::Output;
 
+use super::window_animation::{AnimSpace, AnimatedVisual, GeometryRole};
 use super::{DriftWm, FocusTarget, output_state};
 
 impl DriftWm {
     /// Frame-rate independent lerp factor for smooth animations.
     /// Returns how much of the remaining distance to cover this frame.
     fn animation_factor(&self, dt: Duration) -> f64 {
-        let base = self.config.animation_speed;
+        let base = self.config.camera_speed;
         let dt_secs = dt.as_secs_f64();
         1.0 - (1.0 - base).powf(dt_secs * 60.0)
+    }
+
+    /// Render-time animated stand-in for the window with stable id `id`, given
+    /// its live target rect (canvas rect for a normal window, screen rect for a
+    /// pinned one). Identity when nothing is animating.
+    pub(crate) fn animated_visual(
+        &self,
+        id: ElementId,
+        target_loc: Point<f64, Logical>,
+        target_size: Size<f64, Logical>,
+    ) -> AnimatedVisual {
+        self.window_animations.animated_visual(
+            id,
+            target_loc,
+            target_size,
+            self.config.effects.animation_scale,
+        )
+    }
+
+    fn window_geometry_grab_active(&self, window: &Window) -> bool {
+        window
+            .wl_surface()
+            .is_some_and(|s| self.window_under_interactive_grab(window, &s))
+    }
+
+    /// True if a canvas rect intersects some output that can actually draw it
+    /// (live, not DPMS-off). Animations intersecting no such output complete
+    /// instantly, so they never wedge the udev idle fast-path.
+    fn canvas_rect_drawable(&self, rect: Rectangle<i32, Logical>) -> bool {
+        self.space.outputs().any(|o| {
+            if self.dpms_off_outputs.contains(o) {
+                return false;
+            }
+            let (camera, zoom) = {
+                let os = output_state(o);
+                (os.camera, os.zoom)
+            };
+            let viewport = super::output_logical_size(o);
+            driftwm::canvas::visible_canvas_rect(camera.to_i32_round(), viewport, zoom)
+                .overlaps(rect)
+        })
+    }
+
+    fn output_name_drawable(&self, name: &str) -> bool {
+        self.space
+            .outputs()
+            .any(|o| o.name() == name && !self.dpms_off_outputs.contains(o))
+    }
+
+    /// Start the window-open scale+fade. No-op under an interactive grab or when
+    /// the window's rect intersects no drawable output (instant-complete).
+    pub(crate) fn start_window_open_animation(&mut self, window: &Window) {
+        let Some(id) = self.stage.id_of(window) else {
+            return;
+        };
+        if self.window_geometry_grab_active(window) {
+            return;
+        }
+        let loc = self.stage.position_of(window).unwrap_or_default();
+        if !self.canvas_rect_drawable(Rectangle::new(loc, StageElement::size(window))) {
+            return;
+        }
+        self.window_animations.start_open(id);
+    }
+
+    /// Shared start path for every geometry chase: resolve the id, honor the
+    /// interactive-grab guard, instant-complete (skip) when the seed rect
+    /// intersects no drawable output, else (re)start the chase. `replace_visual`
+    /// forces the seed onto an existing entry — the seeded (fullscreen) callers
+    /// convert coordinate frames, so keeping the old visual would jump at zoom≠1.
+    fn start_geometry_entry(
+        &mut self,
+        window: &Window,
+        seed: Rectangle<f64, Logical>,
+        space: AnimSpace,
+        requested_size: Option<Size<i32, Logical>>,
+        role: GeometryRole,
+        replace_visual: bool,
+    ) {
+        let Some(id) = self.stage.id_of(window) else {
+            return;
+        };
+        if self.window_geometry_grab_active(window) {
+            return;
+        }
+        let eligible = match &space {
+            AnimSpace::Screen(name) => self.output_name_drawable(name),
+            AnimSpace::Canvas => self.canvas_rect_drawable(seed.to_i32_round()),
+        };
+        if !eligible {
+            return;
+        }
+        let committed = window.geometry().size;
+        self.window_animations.start_geometry(
+            id,
+            seed,
+            space,
+            requested_size,
+            committed,
+            role,
+            replace_visual,
+        );
+    }
+
+    /// Seed rect for a fresh geometry entry: the window's current animated
+    /// visual, so an interruption or an open→geometry hand-off is continuous.
+    fn geometry_seed(
+        &self,
+        id: ElementId,
+        loc: Point<i32, Logical>,
+        size: Size<i32, Logical>,
+    ) -> Rectangle<f64, Logical> {
+        let v = self.animated_visual(id, loc.to_f64(), size.to_f64());
+        Rectangle::new(v.loc, v.size)
+    }
+
+    /// Canvas geometry animation toward a size configure (fill/fit). Must be
+    /// called while the stage still holds the pre-action rect; the chase target
+    /// is then the new live stage position.
+    pub(crate) fn animate_window_geometry(&mut self, window: &Window, to_size: Size<i32, Logical>) {
+        let Some(id) = self.stage.id_of(window) else {
+            return;
+        };
+        let old_loc = self.stage.position_of(window).unwrap_or_default();
+        let seed = self.geometry_seed(id, old_loc, window.geometry().size);
+        self.start_geometry_entry(
+            window,
+            seed,
+            AnimSpace::Canvas,
+            Some(to_size),
+            GeometryRole::Normal,
+            false,
+        );
+    }
+
+    /// Geometry animation with an explicit, frame-converted seed (fullscreen
+    /// enter/exit cross the locked-viewport ↔ camera ↔ pin-screen boundary).
+    pub(crate) fn begin_geometry_animation_seeded(
+        &mut self,
+        window: &Window,
+        seed: Rectangle<f64, Logical>,
+        space: AnimSpace,
+        requested_size: Option<Size<i32, Logical>>,
+        role: GeometryRole,
+    ) {
+        self.start_geometry_entry(window, seed, space, requested_size, role, true);
+    }
+
+    /// Position-only canvas animation from `from_loc` (nudge, cluster shift).
+    /// The stage already holds the new position; the seed pins the old one.
+    pub(crate) fn animate_window_move_from(
+        &mut self,
+        window: &Window,
+        from_loc: Point<i32, Logical>,
+    ) {
+        let Some(id) = self.stage.id_of(window) else {
+            return;
+        };
+        let size = window.geometry().size;
+        // Keep an in-flight entry's visual; otherwise seed at the old position.
+        let seed = self
+            .window_animations
+            .geometry_visual_rect(id)
+            .unwrap_or_else(|| {
+                let v = self.animated_visual(id, from_loc.to_f64(), size.to_f64());
+                Rectangle::new(v.loc, v.size)
+            });
+        self.start_geometry_entry(
+            window,
+            seed,
+            AnimSpace::Canvas,
+            None,
+            GeometryRole::Normal,
+            false,
+        );
+    }
+
+    /// Whether `output` is occluded by a *settled* fullscreen window. A
+    /// fullscreen-entry transition keeps the previous scene visible until the
+    /// window reaches the output bounds, so the canvas stays eligible until the
+    /// entry animation finishes.
+    pub(crate) fn is_output_visually_fullscreen(&self, output: &Output) -> bool {
+        if !self.is_output_fullscreen(output) {
+            return false;
+        }
+        self.fullscreen_window_on(output).is_none_or(|window| {
+            self.stage
+                .id_of(&window)
+                .is_none_or(|id| !self.window_animations.fullscreen_entry_active(id))
+        })
+    }
+
+    pub(crate) fn tick_window_animations(&mut self, dt: Duration) {
+        self.tick_window_animations_at(dt, Instant::now());
+    }
+
+    /// Advance every window animation, closing snapshot, and adoption fade.
+    /// `now` is injectable so tests drive endpoint-hold deadlines deterministically.
+    pub(crate) fn tick_window_animations_at(&mut self, dt: Duration, now: Instant) {
+        let speed = self.config.effects.animation_speed;
+        let frame_factor = 1.0 - (1.0 - speed).powf(dt.as_secs_f64() * 60.0);
+
+        // Mark the outputs that show an animation *this* tick before advancing,
+        // so the completing tick still presents the final resting frame and
+        // udev re-arms the next frame (rect-scoped; never mark_all_dirty).
+        let affected: Vec<Output> = self
+            .space
+            .outputs()
+            .filter(|o| {
+                let (camera, zoom) = {
+                    let os = output_state(o);
+                    (os.camera, os.zoom)
+                };
+                self.output_shows_window_animations(o, camera, zoom)
+            })
+            .cloned()
+            .collect();
+
+        for (id, geo) in self.window_animations.scoping_entries() {
+            // An entry whose window or pin has vanished mid-chase can never be
+            // ticked to convergence; drop it (same instant-complete outcome as
+            // ineligible) so it can't wedge `has_active_animations` true forever.
+            let resolved = self
+                .stage
+                .window_by_id(id)
+                .cloned()
+                .and_then(|element| element.client().cloned().map(|c| (element, c)));
+            let Some((element, client)) = resolved else {
+                self.window_animations.remove(id);
+                continue;
+            };
+            let live_size = client.geometry().size.to_f64();
+            let target = match &geo {
+                Some((AnimSpace::Screen(name), _)) => self
+                    .stage
+                    .pin_of(&element)
+                    .map(|site| (site.screen_pos.to_f64(), self.output_name_drawable(name))),
+                Some((AnimSpace::Canvas, visual)) => self.stage.position_of(&element).map(|loc| {
+                    (
+                        loc.to_f64(),
+                        self.canvas_rect_drawable(visual.to_i32_round()),
+                    )
+                }),
+                None => self.stage.position_of(&element).map(|loc| {
+                    let rect = Rectangle::new(loc, StageElement::size(&element));
+                    (loc.to_f64(), self.canvas_rect_drawable(rect))
+                }),
+            };
+            let Some((target_loc, eligible)) = target else {
+                self.window_animations.remove(id);
+                continue;
+            };
+            let keep = self.window_animations.tick_entry(
+                id,
+                target_loc,
+                live_size,
+                frame_factor,
+                now,
+                eligible,
+            );
+            if !keep {
+                self.window_animations.remove(id);
+            }
+        }
+
+        for snapshot in &mut self.closing_snapshots {
+            snapshot.tick(frame_factor);
+        }
+        self.closing_snapshots.retain(|s| !s.is_done());
+
+        let mut faded: Vec<crate::state::SuspendedId> = Vec::new();
+        for fade in &mut self.adoption_fades {
+            fade.tick(frame_factor);
+        }
+        self.adoption_fades.retain(|fade| {
+            if fade.is_done() {
+                faded.push(fade.suspended.id);
+                false
+            } else {
+                true
+            }
+        });
+        // The fade re-inserted suspended chrome the adopt purged; re-purge it.
+        for sid in faded {
+            let key = crate::decorations::DecorationKey::Suspended(sid);
+            self.decorations.remove(&key);
+            self.render.border_cache.remove(&key);
+            self.render.shadow_cache.remove(&key);
+        }
+
+        for output in affected {
+            self.redraws_needed.insert(output);
+        }
+    }
+
+    /// Resolve the outstanding request on a commit of an animated window.
+    pub(crate) fn resolve_window_animation_commit(&mut self, window: &Window) {
+        if let Some(id) = self.stage.id_of(window) {
+            self.window_animations
+                .on_window_commit(id, window.geometry().size);
+        }
+    }
+
+    /// Rasterization scale for a canvas rect: the max `output_scale·zoom` among
+    /// outputs whose viewport intersects it (floored at 1.0).
+    fn flatten_scale_for_canvas_rect(&self, rect: Rectangle<i32, Logical>) -> f64 {
+        self.space
+            .outputs()
+            .filter_map(|o| {
+                let (camera, zoom) = {
+                    let os = output_state(o);
+                    (os.camera, os.zoom)
+                };
+                let viewport = super::output_logical_size(o);
+                let visible =
+                    driftwm::canvas::visible_canvas_rect(camera.to_i32_round(), viewport, zoom);
+                visible
+                    .overlaps(rect)
+                    .then(|| o.current_scale().fractional_scale() * zoom)
+            })
+            .fold(1.0_f64, f64::max)
+    }
+
+    /// Flatten the captured content of a closing window into a queued snapshot
+    /// (backend-gated, consumes the captured close pixels). `fullscreen_output`
+    /// picks screen-space placement on that output (or the pin's output when
+    /// pinned) vs. canvas space otherwise. `alpha_only` fades in place at scale
+    /// 1, for the suspend-conversion crossfade.
+    pub(crate) fn snapshot_closing_window(
+        &mut self,
+        window: &Window,
+        surface: &WlSurface,
+        fullscreen_output: Option<&Output>,
+        alpha_only: bool,
+    ) {
+        // Off-screen closes never show — skip the flatten entirely.
+        let drawable = if let Some(output) = fullscreen_output {
+            self.output_name_drawable(&output.name())
+        } else if let Some(site) = self.stage.pin_of(window) {
+            self.output_name_drawable(&site.output)
+        } else {
+            let stage_pos = self.stage.position_of(window).unwrap_or_default();
+            self.canvas_rect_drawable(Rectangle::new(stage_pos, window.geometry().size))
+        };
+        if !drawable {
+            return;
+        }
+        // Backend-gated (the headless fixture never accumulates render transients).
+        let Some(mut backend) = self.backend.take() else {
+            return;
+        };
+        let id = surface.id();
+        if !self.close_pixels.contains_key(&id)
+            && let Some(px) = crate::render::capture_close_pixels(backend.renderer(), surface)
+        {
+            self.close_pixels.insert(id.clone(), px);
+        }
+        let Some(px) = self.close_pixels.remove(&id) else {
+            self.backend = Some(backend);
+            return;
+        };
+        let scale_amplitude = self.config.effects.animation_scale;
+        let geom_loc = window.geometry().loc;
+        let geom_size = window.geometry().size;
+        // Bake the SSD title bar (still cached pre-cleanup) with the body so it
+        // fades as one piece; fullscreen has no bar, and border/shadow stay
+        // excluded (caches purged, keyed by surface). Rect is surface-origin-local.
+        let bar_h = self.config.decorations.title_bar_height;
+        let deco_key = crate::decorations::DecorationKey::Surface(id.clone());
+        let ssd_bar = if fullscreen_output.is_none() {
+            self.decorations.get(&deco_key).map(|d| {
+                (
+                    &d.title_bar,
+                    Rectangle::new(
+                        Point::from((geom_loc.x as f64, (geom_loc.y - bar_h) as f64)),
+                        Size::from((geom_size.w as f64, bar_h as f64)),
+                    ),
+                )
+            })
+        } else {
+            None
+        };
+        let snapshot = if let Some(output) = fullscreen_output {
+            let flatten_scale = output.current_scale().fractional_scale();
+            crate::render::snapshot_screen(
+                backend.renderer(),
+                &px,
+                output.name(),
+                Point::from((-geom_loc.x, -geom_loc.y)),
+                flatten_scale,
+                scale_amplitude,
+                alpha_only,
+                ssd_bar,
+            )
+        } else if let Some(site) = self.stage.pin_of(window).cloned() {
+            let flatten_scale = self
+                .output_by_name(&site.output)
+                .map(|o| o.current_scale().fractional_scale())
+                .unwrap_or(1.0);
+            let screen_origin = Point::from((
+                site.screen_pos.x - geom_loc.x,
+                site.screen_pos.y - geom_loc.y,
+            ));
+            crate::render::snapshot_screen(
+                backend.renderer(),
+                &px,
+                site.output,
+                screen_origin,
+                flatten_scale,
+                scale_amplitude,
+                alpha_only,
+                ssd_bar,
+            )
+        } else {
+            let stage_pos = self.stage.position_of(window).unwrap_or_default();
+            let window_origin = Point::from((
+                (stage_pos.x - geom_loc.x) as f64,
+                (stage_pos.y - geom_loc.y) as f64,
+            ));
+            let flatten_scale =
+                self.flatten_scale_for_canvas_rect(Rectangle::new(stage_pos, geom_size));
+            crate::render::snapshot_canvas(
+                backend.renderer(),
+                &px,
+                window_origin,
+                flatten_scale,
+                scale_amplitude,
+                alpha_only,
+                ssd_bar,
+            )
+        };
+        self.backend = Some(backend);
+        if let Some(snapshot) = snapshot {
+            self.closing_snapshots.push(snapshot);
+        }
     }
 
     /// Fire held compositor action if repeat delay/rate has elapsed.
@@ -495,6 +936,7 @@ impl DriftWm {
         // Global (not per-output) ticks
         self.apply_key_repeat();
         self.check_exec_cursor_timeout();
+        self.tick_window_animations(dt);
         // Re-arm cursor edge-pan from the current cursor position before the
         // per-output velocities are applied below (disarms outputs the cursor
         // has left; keeps the active output's speed stable frame-to-frame).

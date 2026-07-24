@@ -22,7 +22,7 @@ use smithay::{
             protocol::{wl_output, wl_seat},
         },
     },
-    utils::{Logical, Point, Rectangle, Serial},
+    utils::{IsAlive, Logical, Point, Rectangle, Serial},
     wayland::{
         compositor::with_states,
         input_method::InputMethodSeat,
@@ -268,6 +268,9 @@ impl XdgShellHandler for DriftWm {
             && let Some(conv) =
                 self.resolve_suspend_conversion(&wl_surface, window, fullscreen_restore_rect)
         {
+            // Crossfade the dying window over the stand-in that takes its rect
+            // (fade in place, scale 1). Capture precedes the stage surgery.
+            self.snapshot_closing_window(window, &wl_surface, fs_output.as_ref(), true);
             self.convert_to_suspended(window, &wl_surface, conv);
             self.cleanup_surface_state(&wl_surface);
             return;
@@ -377,6 +380,14 @@ impl XdgShellHandler for DriftWm {
                         self.set_window_focus(None, serial);
                     }
                 }
+            }
+            // Flatten the dying window into a fade-out snapshot before it leaves
+            // the stage (fullscreen closes fade screen-space on the home output).
+            // Skip when the surface is already dead — `destroyed` (which fires
+            // first on a client disconnect) then owns the snapshot, so this
+            // can't stack a second double-alpha fade for the same window.
+            if wl_surface.alive() {
+                self.snapshot_closing_window(window, &wl_surface, fs_output.as_ref(), false);
             }
             self.unmap_window(window);
             // The window may have sat under the cursor; re-target pointer focus

@@ -182,6 +182,7 @@ pub(super) fn push_shadow_element(
     opacity: f64,
     output_scale: Scale<f64>,
     zoom: f64,
+    animation: Option<super::WindowRenderAnimation>,
 ) {
     use driftwm::config::DecorationConfig;
     let shadow_radius = DecorationConfig::SHADOW_RADIUS;
@@ -233,13 +234,23 @@ pub(super) fn push_shadow_element(
         elem.update_uniforms(fresh_uniforms);
     }
     elem.resize(shadow_area, None);
-    target.push(OutputRenderElements::Background(
-        RescaleRenderElement::from_element(
-            elem.clone(),
-            Point::<i32, Physical>::from((0, 0)),
-            zoom,
-        ),
-    ));
+    let elem = RescaleRenderElement::from_element(
+        elem.clone(),
+        Point::<i32, Physical>::from((0, 0)),
+        zoom,
+    );
+    if let Some(animation) = animation {
+        target.push(OutputRenderElements::AnimatedChrome(
+            super::WindowTransformElement::new(
+                elem,
+                animation.origin,
+                animation.offset,
+                animation.scale,
+            ),
+        ));
+    } else {
+        target.push(OutputRenderElements::Background(elem));
+    }
 }
 
 const BORDER_SHADER_SRC: &str = include_str!("../shaders/border.glsl");
@@ -370,6 +381,7 @@ pub(super) fn push_border_element(
     opacity: f64,
     output_scale: Scale<f64>,
     zoom: f64,
+    animation: Option<super::WindowRenderAnimation>,
 ) {
     if border_width_logical <= 0 {
         return;
@@ -434,13 +446,23 @@ pub(super) fn push_border_element(
         elem.update_uniforms(fresh_uniforms);
     }
     elem.resize(border_area, None);
-    target.push(OutputRenderElements::Background(
-        RescaleRenderElement::from_element(
-            elem.clone(),
-            Point::<i32, Physical>::from((0, 0)),
-            zoom,
-        ),
-    ));
+    let elem = RescaleRenderElement::from_element(
+        elem.clone(),
+        Point::<i32, Physical>::from((0, 0)),
+        zoom,
+    );
+    if let Some(animation) = animation {
+        target.push(OutputRenderElements::AnimatedChrome(
+            super::WindowTransformElement::new(
+                elem,
+                animation.origin,
+                animation.offset,
+                animation.scale,
+            ),
+        ));
+    } else {
+        target.push(OutputRenderElements::Background(elem));
+    }
 }
 
 const CORNER_CLIP_SRC: &str = include_str!("../shaders/corner_clip.glsl");

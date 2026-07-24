@@ -188,7 +188,7 @@ pub struct Config {
     pub edge_pan_latency_ms: u64,
     /// Base lerp factor for camera animation (frame-rate independent), in (0, 1].
     /// Lower = smoother; 1 = instant; 0 would freeze the camera.
-    pub animation_speed: f64,
+    pub camera_speed: f64,
     /// On close, pan the camera to the newly focused window (true). When false,
     /// focus only moves to an already-visible window — never off-screen.
     pub auto_navigate_on_close: bool,
@@ -898,10 +898,10 @@ impl Config {
         // Valid range is (0, 1]: at 0 the lerp factor stays 0 and the camera
         // never reaches its target, so reject it (and negatives/NaN) back to the
         // default rather than freezing. Above 1 just clamps to instant.
-        let animation_speed = match raw.navigation.animation_speed {
+        let camera_speed = match raw.navigation.camera_speed {
             Some(v) if v <= 0.0 || v.is_nan() => {
                 warn_and_collect!(
-                    "config: navigation.animation_speed {v} must be in (0, 1] (0 freezes the camera), using 0.3"
+                    "config: navigation.camera_speed {v} must be in (0, 1] (0 freezes the camera), using 0.3"
                 );
                 0.3
             }
@@ -909,10 +909,15 @@ impl Config {
                 other.unwrap_or(0.3),
                 0.0,
                 1.0,
-                "navigation.animation_speed",
+                "navigation.camera_speed",
                 &mut errors,
             ),
         };
+        if raw.navigation.animation_speed.is_some() {
+            warn_and_collect!(
+                "config: [navigation] animation_speed was renamed to camera_speed — window effects are tuned separately via [effects] animation_speed"
+            );
+        }
         if raw.navigation.friction.is_some() {
             warn_and_collect!(
                 "config: [navigation] friction was renamed to drift — use 0 (off) to 1 (floatiest), default 0.5"
@@ -1024,7 +1029,7 @@ impl Config {
                 &mut errors,
             ),
             edge_pan_latency_ms: raw.navigation.edge_pan.latency_ms.unwrap_or(120),
-            animation_speed,
+            camera_speed,
             auto_navigate_on_close: raw.navigation.auto_navigate_on_close.unwrap_or(true),
             auto_navigate_on_click: raw.navigation.auto_navigate_on_click.unwrap_or(false),
             cycle_hold,
@@ -1330,6 +1335,7 @@ mod tests {
         const REFERENCE: &str = include_str!("../../config.reference.toml");
         // Deprecated, migration-only — intentionally undocumented.
         const ALLOWLIST: &[&str] = &[
+            "navigation.animation_speed",
             "navigation.friction",
             "snap.same_edge",
             "snap.edge_center",
@@ -1448,14 +1454,76 @@ mod tests {
     }
 
     #[test]
-    fn animation_speed_zero_falls_back_to_default() {
+    fn camera_speed_zero_falls_back_to_default() {
         let toml_str = r#"
             [navigation]
-            animation_speed = 0.0
+            camera_speed = 0.0
         "#;
         let (config, warnings) = Config::from_toml_collect(toml_str).unwrap();
-        assert_eq!(config.animation_speed, 0.3);
-        assert!(warnings.iter().any(|w| w.contains("animation_speed")));
+        assert_eq!(config.camera_speed, 0.3);
+        assert!(warnings.iter().any(|w| w.contains("camera_speed")));
+    }
+
+    #[test]
+    fn effects_animation_speed_out_of_range_rejects_and_clamps() {
+        let (zero, warnings) = Config::from_toml_collect(
+            r#"
+            [effects]
+            animation_speed = 0.0
+        "#,
+        )
+        .unwrap();
+        assert_eq!(zero.effects.animation_speed, 0.3);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("effects.animation_speed"))
+        );
+
+        let (high, warnings) = Config::from_toml_collect(
+            r#"
+            [effects]
+            animation_speed = 5.0
+        "#,
+        )
+        .unwrap();
+        assert_eq!(high.effects.animation_speed, 1.0);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("effects.animation_speed"))
+        );
+    }
+
+    #[test]
+    fn effects_animation_scale_out_of_range_rejects_and_clamps() {
+        let (zero, warnings) = Config::from_toml_collect(
+            r#"
+            [effects]
+            animation_scale = 0.0
+        "#,
+        )
+        .unwrap();
+        assert_eq!(zero.effects.animation_scale, 0.95);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("effects.animation_scale"))
+        );
+
+        let (high, warnings) = Config::from_toml_collect(
+            r#"
+            [effects]
+            animation_scale = 2.0
+        "#,
+        )
+        .unwrap();
+        assert_eq!(high.effects.animation_scale, 1.0);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("effects.animation_scale"))
+        );
     }
 
     #[test]

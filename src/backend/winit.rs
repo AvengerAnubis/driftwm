@@ -177,6 +177,8 @@ pub fn init_winit(
             // --- Camera animation (window navigation) ---
             data.apply_camera_animation(dt);
 
+            data.tick_window_animations(dt);
+
             // --- Coalesced pointer motion (after input + animations) ---
             data.flush_pointer_resync();
 

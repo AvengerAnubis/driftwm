@@ -2,6 +2,7 @@ mod background;
 mod blur;
 mod capture;
 mod capture_background;
+mod closing;
 mod cursor;
 mod elements;
 mod error_bar;
@@ -19,9 +20,14 @@ pub use background::{BackgroundElement, init_background, update_background_eleme
 pub(crate) use blur::compile_blur_shaders;
 pub use blur::{BlurCache, SharedBlur};
 pub use capture::{render_capture_frames, render_screencopy, render_toplevel_captures};
+pub(crate) use closing::{
+    AdoptionFade, ClosePixels, ClosingSnapshot, capture_close_pixels, snapshot_canvas,
+    snapshot_screen,
+};
 pub use cursor::build_cursor_elements;
 pub use elements::{
     OutputRenderElements, PixelSnapRescaleElement, RoundedCornerElement, TileShaderElement,
+    WindowTransformElement,
 };
 pub use error_bar::ErrorBarCache;
 pub use lifecycle::{
@@ -42,6 +48,42 @@ pub(crate) use suspended::{ensure_body, ensure_label};
 use blur::{BlurLayer, BlurRequestData, process_blur_requests};
 use layers::{build_canvas_layer_elements, build_layer_elements};
 use shaders::{push_border_element, push_shadow_element};
+
+/// The per-window affine transform for an in-flight open/close/geometry
+/// animation, threaded through the chrome push helpers so the surface, border,
+/// shadow, and decoration all lerp together. Physical `origin`/`offset`; the
+/// `scale` is the visual stretch relative to the live rect.
+#[derive(Clone, Copy)]
+pub(super) struct WindowRenderAnimation {
+    origin: Point<f64, Physical>,
+    offset: Point<f64, Physical>,
+    scale: Scale<f64>,
+}
+
+impl WindowRenderAnimation {
+    /// Apply the same affine the element decorator applies, so the frost rect
+    /// follows the animated window instead of its (instant) logical position.
+    fn transform_phys_rect(&self, rect: Rectangle<i32, Physical>) -> Rectangle<i32, Physical> {
+        let x0 = self.origin.x + (rect.loc.x as f64 - self.origin.x) * self.scale.x + self.offset.x;
+        let y0 = self.origin.y + (rect.loc.y as f64 - self.origin.y) * self.scale.y + self.offset.y;
+        let x1 = self.origin.x
+            + ((rect.loc.x + rect.size.w) as f64 - self.origin.x) * self.scale.x
+            + self.offset.x;
+        let y1 = self.origin.y
+            + ((rect.loc.y + rect.size.h) as f64 - self.origin.y) * self.scale.y
+            + self.offset.y;
+        // Round each corner independently, matching `WindowTransformElement`'s
+        // own rounding, so the frost rect and the element rect can't disagree by
+        // a pixel.
+        Rectangle::new(
+            Point::from((x0.round() as i32, y0.round() as i32)),
+            Size::from((
+                (x1.round() as i32 - x0.round() as i32).max(0),
+                (y1.round() as i32 - y0.round() as i32).max(0),
+            )),
+        )
+    }
+}
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::{
@@ -115,6 +157,7 @@ fn push_corner_clipped_elements(
     corner_radius: [f32; 4],
     zoom: f64,
     output_scale: f64,
+    animation: Option<WindowRenderAnimation>,
 ) {
     let aa_scale = (output_scale * zoom) as f32;
     // Clamp radii so a tiny window doesn't get corners wider than half its
@@ -128,20 +171,30 @@ fn push_corner_clipped_elements(
         corner_radius[3].clamp(0.0, max_r),
     ];
     for elem in elems {
-        target.push(OutputRenderElements::CsdWindow(
-            PixelSnapRescaleElement::from_element(
-                RoundedCornerElement::new(
-                    elem,
-                    shader.clone(),
-                    geometry,
-                    clamped,
-                    output_scale,
-                    aa_scale,
-                ),
-                Point::<i32, Physical>::from((0, 0)),
-                zoom,
+        let elem = PixelSnapRescaleElement::from_element(
+            RoundedCornerElement::new(
+                elem,
+                shader.clone(),
+                geometry,
+                clamped,
+                output_scale,
+                aa_scale,
             ),
-        ));
+            Point::<i32, Physical>::from((0, 0)),
+            zoom,
+        );
+        if let Some(animation) = animation {
+            target.push(OutputRenderElements::AnimatedCsdWindow(
+                WindowTransformElement::new(
+                    elem,
+                    animation.origin,
+                    animation.offset,
+                    animation.scale,
+                ),
+            ));
+        } else {
+            target.push(OutputRenderElements::CsdWindow(elem));
+        }
     }
 }
 
@@ -149,13 +202,21 @@ fn push_plain_elements(
     target: &mut Vec<OutputRenderElements>,
     elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
     zoom: f64,
+    animation: Option<WindowRenderAnimation>,
 ) {
     target.extend(elems.into_iter().map(|elem| {
-        OutputRenderElements::Window(PixelSnapRescaleElement::from_element(
-            elem,
-            Point::<i32, Physical>::from((0, 0)),
-            zoom,
-        ))
+        let elem =
+            PixelSnapRescaleElement::from_element(elem, Point::<i32, Physical>::from((0, 0)), zoom);
+        if let Some(animation) = animation {
+            OutputRenderElements::AnimatedWindow(WindowTransformElement::new(
+                elem,
+                animation.origin,
+                animation.offset,
+                animation.scale,
+            ))
+        } else {
+            OutputRenderElements::Window(elem)
+        }
     }));
 }
 
@@ -232,6 +293,7 @@ pub(crate) fn compose_capture_elements(
                     loc,
                     focused,
                     launching,
+                    1.0,
                     &state.config.decorations,
                     state.decoration_scale,
                     &mut state.decorations,
@@ -379,7 +441,7 @@ pub(crate) fn compose_capture_elements(
 
         let target = if is_widget { &mut widgets } else { &mut normal };
         // Popups push first so they sit above the title bar and window content.
-        push_plain_elements(target, popup_elems, zoom);
+        push_plain_elements(target, popup_elems, zoom, None);
 
         if has_ssd {
             let bar_height = state.config.decorations.title_bar_height;
@@ -442,12 +504,13 @@ pub(crate) fn compose_capture_elements(
                         [0.0, 0.0, radius, radius],
                         zoom,
                         output_scale,
+                        None,
                     );
                 } else {
-                    push_plain_elements(target, elems, zoom);
+                    push_plain_elements(target, elems, zoom, None);
                 }
             } else {
-                push_plain_elements(target, elems, zoom);
+                push_plain_elements(target, elems, zoom, None);
             }
 
             if effective_bw > 0
@@ -470,6 +533,7 @@ pub(crate) fn compose_capture_elements(
                     opacity,
                     scale,
                     zoom,
+                    None,
                 );
             }
 
@@ -493,6 +557,7 @@ pub(crate) fn compose_capture_elements(
                     opacity,
                     scale,
                     zoom,
+                    None,
                 );
             }
         } else if let Some(ref shader) = state.render.corner_clip_shader {
@@ -516,6 +581,7 @@ pub(crate) fn compose_capture_elements(
                     [radius, radius, radius, radius],
                     zoom,
                     output_scale,
+                    None,
                 );
 
                 if effective_bw > 0
@@ -534,6 +600,7 @@ pub(crate) fn compose_capture_elements(
                         opacity,
                         scale,
                         zoom,
+                        None,
                     );
                 }
 
@@ -557,13 +624,14 @@ pub(crate) fn compose_capture_elements(
                         opacity,
                         scale,
                         zoom,
+                        None,
                     );
                 }
             } else {
-                push_plain_elements(target, elems, zoom);
+                push_plain_elements(target, elems, zoom, None);
             }
         } else {
-            push_plain_elements(target, elems, zoom);
+            push_plain_elements(target, elems, zoom, None);
         }
     }
 
@@ -608,7 +676,7 @@ pub fn compose_frame(
     }
 
     let name = output.name();
-    let output_fullscreen = state.is_output_fullscreen(output);
+    let output_fullscreen = state.is_output_visually_fullscreen(output);
     // The fullscreen window fully occludes its output: only it, the overlay
     // layer, and the cursor render; everything beneath is culled below. Pinned
     // windows count as top-tier toplevels and get covered like the top layer.
@@ -662,6 +730,9 @@ pub fn compose_frame(
     // Screen-pinned windows: own bucket, rendered above normal and below
     // Top/Overlay layer-shell (see all_elements assembly below).
     let mut zoomed_pinned: Vec<OutputRenderElements> = Vec::new();
+    // Closing snapshots + adoption fades: their own bucket above normal windows
+    // so they never shift the normal windows' blur element indices.
+    let mut zoomed_closing: Vec<OutputRenderElements> = Vec::new();
 
     let blur_enabled = state.render.blur_down_shader.is_some()
         && state.render.blur_up_shader.is_some()
@@ -710,6 +781,7 @@ pub fn compose_frame(
                     loc,
                     focused,
                     launching,
+                    1.0,
                     &state.config.decorations,
                     state.decoration_scale,
                     &mut state.decorations,
@@ -809,6 +881,44 @@ pub fn compose_frame(
             continue;
         };
 
+        // Per-window lifecycle/geometry animation. A pinned window's chase runs
+        // in screen space against its pin's content-box origin (`site.screen_pos`),
+        // but `render_loc` is that origin minus `geom_loc` (the surface origin),
+        // so add `geom_loc` back to align with what the Screen entry chases; a
+        // normal window's reference is its canvas stage location.
+        let anim_ref = if is_pinned {
+            render_loc + geom_loc.to_f64()
+        } else {
+            loc.to_f64()
+        };
+        let target_size = geom_size.to_f64();
+        let visual = state
+            .stage
+            .id_of(window)
+            .map(|id| state.animated_visual(id, anim_ref, target_size));
+        let (visual_alpha, window_animation) = match visual {
+            Some(v) if v.loc != anim_ref || v.size != target_size || v.alpha != 1.0 => {
+                let physical_zoom = output_scale * zoom;
+                let content_origin = Point::from((
+                    (render_loc.x + geom_loc.x as f64) * physical_zoom,
+                    (render_loc.y + geom_loc.y as f64) * physical_zoom,
+                ));
+                let animation = WindowRenderAnimation {
+                    origin: content_origin,
+                    offset: Point::from((
+                        (v.loc.x - anim_ref.x) * physical_zoom,
+                        (v.loc.y - anim_ref.y) * physical_zoom,
+                    )),
+                    scale: Scale::from((
+                        v.size.w / target_size.w.max(1.0),
+                        v.size.h / target_size.h.max(1.0),
+                    )),
+                };
+                (v.alpha, Some(animation))
+            }
+            _ => (1.0, None),
+        };
+
         #[cfg(feature = "profile-with-tracy")]
         {
             visible_windows += 1;
@@ -822,7 +932,7 @@ pub fn compose_frame(
         // Empty rect list = client explicitly opted out → treat as off.
         let client_blur = client_blur_rects.as_ref().is_some_and(|r| !r.is_empty());
         let wants_blur = blur_enabled && (applied.as_ref().is_some_and(|r| r.blur) || client_blur);
-        let opacity = applied.as_ref().and_then(|r| r.opacity).unwrap_or(1.0);
+        let opacity = applied.as_ref().and_then(|r| r.opacity).unwrap_or(1.0) * visual_alpha as f64;
 
         // Split elements: toplevel + subsurfaces get corner-clipped, popups
         // don't (they can legitimately extend outside the parent's geometry —
@@ -880,7 +990,7 @@ pub fn compose_frame(
 
         // Popups push first (earlier in vec = on-top in smithay z-order) so
         // they sit above the title bar and clipped window content.
-        push_plain_elements(target, popup_elems, zoom);
+        push_plain_elements(target, popup_elems, zoom, window_animation);
 
         if has_ssd {
             let bar_height = state.config.decorations.title_bar_height;
@@ -930,13 +1040,23 @@ pub fn compose_frame(
                     None,
                     Kind::Unspecified,
                 ) {
-                    target.push(OutputRenderElements::Decoration(
-                        PixelSnapRescaleElement::from_element(
-                            bar_elem,
-                            Point::<i32, Physical>::from((0, 0)),
-                            zoom,
-                        ),
-                    ));
+                    let bar_elem = PixelSnapRescaleElement::from_element(
+                        bar_elem,
+                        Point::<i32, Physical>::from((0, 0)),
+                        zoom,
+                    );
+                    if let Some(animation) = window_animation {
+                        target.push(OutputRenderElements::AnimatedDecoration(
+                            WindowTransformElement::new(
+                                bar_elem,
+                                animation.origin,
+                                animation.offset,
+                                animation.scale,
+                            ),
+                        ));
+                    } else {
+                        target.push(OutputRenderElements::Decoration(bar_elem));
+                    }
                 }
             }
 
@@ -960,12 +1080,13 @@ pub fn compose_frame(
                         [0.0, 0.0, radius, radius],
                         zoom,
                         output_scale,
+                        window_animation,
                     );
                 } else {
-                    push_plain_elements(target, elems, zoom);
+                    push_plain_elements(target, elems, zoom, window_animation);
                 }
             } else {
-                push_plain_elements(target, elems, zoom);
+                push_plain_elements(target, elems, zoom, window_animation);
             }
 
             // Border wraps title bar + content; drawn between window content
@@ -990,6 +1111,7 @@ pub fn compose_frame(
                     opacity,
                     scale,
                     zoom,
+                    window_animation,
                 );
             }
 
@@ -1017,6 +1139,7 @@ pub fn compose_frame(
                     opacity,
                     scale,
                     zoom,
+                    window_animation,
                 );
                 shadow_count = 1;
             }
@@ -1053,6 +1176,7 @@ pub fn compose_frame(
                     [radius, radius, radius, radius],
                     zoom,
                     output_scale,
+                    window_animation,
                 );
 
                 if effective_bw > 0
@@ -1071,6 +1195,7 @@ pub fn compose_frame(
                         opacity,
                         scale,
                         zoom,
+                        window_animation,
                     );
                 }
 
@@ -1096,15 +1221,16 @@ pub fn compose_frame(
                         opacity,
                         scale,
                         zoom,
+                        window_animation,
                     );
                     shadow_count = 1;
                 }
             } else {
                 // Bare (`decoration = "none"`) or fullscreen: pass through.
-                push_plain_elements(target, elems, zoom);
+                push_plain_elements(target, elems, zoom, window_animation);
             }
         } else {
-            push_plain_elements(target, elems, zoom);
+            push_plain_elements(target, elems, zoom, window_animation);
         }
 
         if wants_blur && (target.len() - elem_start - shadow_count) > 0 {
@@ -1143,6 +1269,11 @@ pub fn compose_frame(
                 screen_size,
             )
             .to_physical_precise_round(output_scale);
+            // Frost tracks the animated window's visual rect, not its instant
+            // logical position (accepted cost: a frosted animation re-blurs at
+            // frame rate, throttled by `animate_blur_fps` like a drag).
+            let screen_rect =
+                window_animation.map_or(screen_rect, |anim| anim.transform_phys_rect(screen_rect));
 
             // Convert client blur region: surface-local Logical → mask-local
             // Physical at composite_scale = zoom × output_scale.
@@ -1204,6 +1335,52 @@ pub fn compose_frame(
                     region_rects,
                 });
             }
+        }
+    }
+
+    // Closing snapshots + adoption fades draw above normal windows, but never on
+    // a visually-fullscreen output (no dying-window flash over a fullscreen app).
+    if !output_fullscreen {
+        zoomed_closing = closing::render_snapshots_for_output(
+            &state.closing_snapshots,
+            &name,
+            visible_rect,
+            camera,
+            zoom,
+            output_scale,
+        );
+        let fades: Vec<(
+            std::rc::Rc<crate::state::SuspendedWindow>,
+            Point<i32, Logical>,
+            f32,
+        )> = state
+            .adoption_fades
+            .iter()
+            .filter(|f| visible_rect.overlaps(Rectangle::new(f.loc, f.suspended.size.get())))
+            .map(|f| (f.suspended.clone(), f.loc, f.alpha()))
+            .collect();
+        for (s, loc, alpha) in fades {
+            let border_shader = state.render.border_shader.clone();
+            let shadow_shader = state.render.shadow_shader.clone();
+            suspended::push_suspended_element(
+                renderer,
+                &s,
+                loc,
+                false,
+                false,
+                alpha,
+                &state.config.decorations,
+                state.decoration_scale,
+                &mut state.decorations,
+                &mut state.render.border_cache,
+                &mut state.render.shadow_cache,
+                border_shader.as_ref(),
+                shadow_shader.as_ref(),
+                camera,
+                zoom,
+                scale,
+                &mut zoomed_closing,
+            );
         }
     }
 
@@ -1276,7 +1453,7 @@ pub fn compose_frame(
         vec![]
     };
 
-    let is_fullscreen = state.is_output_fullscreen(output);
+    let is_fullscreen = state.is_output_visually_fullscreen(output);
     #[cfg(feature = "profile-with-tracy")]
     let _layers_span = tracy_client::span!("compose::layers");
     let (overlay_elements, overlay_blur) = build_layer_elements(
@@ -1304,11 +1481,13 @@ pub fn compose_frame(
     #[cfg(feature = "profile-with-tracy")]
     drop(_layers_span);
 
-    // Prefix offsets locate each group in all_elements for blur insertion.
+    // Prefix offsets locate each group in all_elements for blur insertion. The
+    // closing bucket sits between pinned and normal, so `normal_prefix` counts
+    // it and the normal windows' blur indices stay correct.
     let overlay_prefix = cursor_elements.len();
     let top_prefix = overlay_prefix + overlay_elements.len();
     let pinned_prefix = top_prefix + top_elements.len();
-    let normal_prefix = pinned_prefix + zoomed_pinned.len();
+    let normal_prefix = pinned_prefix + zoomed_pinned.len() + zoomed_closing.len();
     let widget_prefix = normal_prefix + zoomed_normal.len() + canvas_layer_elements.len();
 
     // Layer surfaces first (front-to-back), then windows.
@@ -1322,6 +1501,7 @@ pub fn compose_frame(
             + overlay_elements.len()
             + top_elements.len()
             + zoomed_pinned.len()
+            + zoomed_closing.len()
             + zoomed_normal.len()
             + canvas_layer_elements.len()
             + zoomed_widgets.len()
@@ -1341,6 +1521,7 @@ pub fn compose_frame(
     all_elements.extend(overlay_elements);
     all_elements.extend(top_elements);
     all_elements.extend(zoomed_pinned);
+    all_elements.extend(zoomed_closing);
     all_elements.extend(zoomed_normal);
     all_elements.extend(canvas_layer_elements);
     all_elements.extend(zoomed_widgets);
@@ -1422,8 +1603,9 @@ fn build_output_outline_elements(
             continue;
         }
         // A fullscreen output shows a screen-space window, not a canvas
-        // viewport, so it has no outline to project onto other monitors.
-        if state.is_output_fullscreen(other) {
+        // viewport, so it has no outline to project onto other monitors (once
+        // the fullscreen-entry transition has covered the canvas).
+        if state.is_output_visually_fullscreen(other) {
             continue;
         }
 
