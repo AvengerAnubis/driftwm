@@ -26,6 +26,7 @@ mod configure_sequences;
 mod cycle_windows;
 mod ext_workspace;
 mod focus_timing;
+mod fullscreen_handoff;
 mod hot_corners;
 mod hotplug;
 mod hover_focus;

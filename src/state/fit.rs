@@ -53,21 +53,10 @@ impl DriftWm {
         ));
         let usable_center_x = usable.loc.x as f64 + usable.size.w as f64 / 2.0;
         let usable_center_y = usable.loc.y as f64 + usable.size.h as f64 / 2.0;
-        // Center on the restore size rather than live geometry. A fit pressed
-        // while fullscreen runs immediately after the exit guard, and the exit
-        // only *sends* the smaller configure — live geometry still reports the
-        // viewport size, which would park the camera half a fullscreen away from
-        // the real window (the same round-trip staleness `fit_window` already
-        // avoids for the size it saves).
-        let centering_size = self
-            .stage
-            .restore_size(window)
-            .unwrap_or_else(|| window.geometry().size);
-        let visual_center = self
-            .stage
-            .position_of(window)
-            .map(|loc| super::visual_frame_center(loc, centering_size, bar as f64))
-            .unwrap_or_default();
+        // `window_visual_center` sizes from the last configure, so a fit pressed
+        // while fullscreen centers on the restored window instead of the viewport
+        // the client is still reporting (see `configured_window_size`).
+        let visual_center = self.window_visual_center(window).unwrap_or_default();
         let target_camera = Point::from((
             visual_center.x - usable_center_x,
             visual_center.y - usable_center_y,
@@ -151,7 +140,10 @@ impl DriftWm {
             return;
         };
 
-        // Resize in-place around the preserved visual center.
+        // Resize in-place around the preserved visual center. Sized from the last
+        // configure, so an unfit dispatched out of a fullscreen exit centers on
+        // the restored (fit-sized) window, not the viewport still being reported.
+        // The insert below replaces any recenter the exit left owed.
         let center = self.window_visual_center(window).unwrap_or_default();
         let bar = self.window_ssd_bar(window);
         let new_loc = super::frame_loc_for_center(center, saved_size, bar);
@@ -303,7 +295,9 @@ impl DriftWm {
         let Some(old_loc) = self.stage.position_of(window) else {
             return;
         };
-        let old_size = window.geometry().size;
+        // Last configured, not last committed — the cluster deltas below must be
+        // measured against the rect the window is actually becoming.
+        let old_size = super::configured_window_size(window);
         let bar = self.window_ssd_bar(window);
         let bw = self.window_border_width(&wl_surface);
         // Mirror unfit_window's new_loc so per-edge deltas match.

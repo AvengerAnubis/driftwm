@@ -53,7 +53,6 @@ impl DriftWm {
             y_high: bottom_right.y,
         };
 
-        let current = self.snap_rect_for(&StageWindow::Client(window.clone()))?;
         #[allow(clippy::mutable_key_type)]
         let obstacles: Vec<SnapRect> = self
             .all_windows_with_snap_rects()
@@ -68,6 +67,20 @@ impl DriftWm {
         // rects, preserving the 0 = unconstrained sentinel.
         let bar = self.window_ssd_bar(window);
         let bw = self.window_border_width(&surface);
+
+        // Grow from the last configured size, not the last committed one: a fill
+        // dispatched while fullscreen runs right after the exit guard, and the
+        // exit only *sends* the smaller configure, so committed geometry still
+        // reports the viewport — a seed already spanning the whole usable area
+        // with nothing to grow into.
+        let cur_size = super::configured_window_size(window);
+        let cur_loc = self.stage.position_of(window)?;
+        let current = SnapRect {
+            x_low: cur_loc.x as f64 - bw as f64,
+            x_high: cur_loc.x as f64 + cur_size.w as f64 + bw as f64,
+            y_low: cur_loc.y as f64 - bar as f64 - bw as f64,
+            y_high: cur_loc.y as f64 + cur_size.h as f64 + bw as f64,
+        };
         let inflate = |v: i32, extra: i32| -> f64 { if v > 0 { (v + extra) as f64 } else { 0.0 } };
         let constraints = SizeConstraints::for_window(window);
         let min_size = (
@@ -103,9 +116,9 @@ impl DriftWm {
         ));
 
         // No-op: the window already fills its free space. Return without
-        // committing so `fill_window` won't record a restore point.
-        let cur_loc = self.stage.position_of(window)?;
-        if new_size == window.geometry().size && new_loc == cur_loc {
+        // committing so `fill_window` won't record a restore point. Compared
+        // against the same restore-authoritative size the seed used.
+        if new_size == cur_size && new_loc == cur_loc {
             return None;
         }
         Some(FillGeometry {
@@ -146,6 +159,12 @@ impl DriftWm {
         let Some(saved_pos) = self.stage.position_of(window) else {
             return;
         };
+
+        // A fill places the window absolutely, so a recenter still owed from the
+        // fullscreen/fill exit that preceded it must not fire: it would land on
+        // the client's next resize and drag the filled window to the pre-exit
+        // center (`enter_fullscreen` and `fit_window` drop it for the same reason).
+        self.pending_recenter.remove(&wl_surface.id());
 
         self.animate_window_geometry(window, new_size);
         self.send_size_configure(window, new_size);

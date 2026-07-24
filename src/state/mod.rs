@@ -2519,10 +2519,13 @@ impl DriftWm {
         driftwm::config::effective_border_width(applied.as_ref(), mode, &self.config.decorations)
     }
 
-    /// Visual center accounting for SSD title bar above content.
+    /// Visual center accounting for SSD title bar above content. Sized from
+    /// [`configured_window_size`], so a center taken right after a fullscreen
+    /// exit describes the restored window rather than the viewport the client is
+    /// still reporting.
     pub fn window_visual_center(&self, window: &Window) -> Option<Point<f64, Logical>> {
         let loc = self.stage.position_of(window)?;
-        let size = window.geometry().size;
+        let size = configured_window_size(window);
         let bar = self.window_ssd_bar(window) as f64;
         Some(visual_frame_center(loc, size, bar))
     }
@@ -2578,6 +2581,23 @@ pub(crate) fn visual_frame_center(
         loc.x as f64 + size.w as f64 / 2.0,
         loc.y as f64 - bar + (size.h as f64 + bar) / 2.0,
     ))
+}
+
+/// The size a window will have once it acks everything already configured: the
+/// last size we sent, else its committed geometry.
+///
+/// `Window::geometry()` reports the last *committed* buffer, which lags a
+/// configure round-trip. That lag is invisible most of the time but not after a
+/// fullscreen exit: the exit only sends the smaller configure, so a geometry
+/// action dispatched right behind it (the `execute_action` guard exits first)
+/// would size and center against the still-reported viewport. The server's
+/// pending state is what the window is becoming, so prefer it.
+pub(crate) fn configured_window_size(window: &Window) -> Size<i32, Logical> {
+    window
+        .toplevel()
+        .and_then(|toplevel| toplevel.with_pending_state(|state| state.size))
+        .filter(|size| size.w > 0 && size.h > 0)
+        .unwrap_or_else(|| window.geometry().size)
 }
 
 /// Content top-left that places a frame of `size` (plus its `bar` strip) so its

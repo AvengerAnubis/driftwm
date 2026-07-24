@@ -1,5 +1,6 @@
 use smithay::{
     input::keyboard::Layout,
+    reexports::wayland_server::Resource,
     utils::{Logical, Point, Size},
     wayland::seat::WaylandFocus,
 };
@@ -104,6 +105,11 @@ impl DriftWm {
                         (uy * step as f64).round() as i32,
                     );
                     let new_loc = loc + Point::from(offset);
+                    // The nudge is the window's new position, so a recenter owed
+                    // from a preceding fullscreen exit must not fire and undo it.
+                    if let Some(surface) = window.wl_surface() {
+                        self.pending_recenter.remove(&surface.id());
+                    }
                     self.map_window(window.clone(), new_loc, false);
                     self.animate_window_move_from(&window, loc);
                 }
@@ -393,6 +399,11 @@ impl DriftWm {
                             .unwrap_or_else(|| window.geometry().size);
                         let loc = canvas::rule_to_internal(rx, ry, size);
                         self.stage.clear_fill(&window);
+                        // The bookmark is the window's new position, so a recenter
+                        // owed from that exit must not fire and drag it back.
+                        if let Some(surface) = window.wl_surface() {
+                            self.pending_recenter.remove(&surface.id());
+                        }
                         self.map_window(window.clone(), loc, true);
                     }
                     Some(StageWindow::Suspended(s)) => {
@@ -694,9 +705,14 @@ impl DriftWm {
             return;
         };
         // Pin/unpin flips the chase space (canvas ↔ screen); an in-flight entry
-        // would keep a stale-space visual, so drop it.
+        // would keep a stale-space visual, so drop it. A recenter owed from a
+        // preceding fullscreen exit goes too — it would re-place the window after
+        // the pin decided where it lives.
         if let Some(id) = self.stage.id_of(&window) {
             self.window_animations.remove(id);
+        }
+        if let Some(surface) = window.wl_surface() {
+            self.pending_recenter.remove(&surface.id());
         }
         if let Some(site) = self.stage.take_pin(&window) {
             // Unpin: convert the fixed screen position back to a canvas
