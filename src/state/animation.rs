@@ -364,8 +364,12 @@ impl DriftWm {
         };
         let id = surface.id();
         if !self.close_pixels.contains_key(&id)
-            && let Some(px) =
-                crate::render::capture_close_pixels(backend.renderer(), surface, window.geometry())
+            && let Some(px) = crate::render::capture_close_pixels(
+                backend.renderer(),
+                surface,
+                window.geometry(),
+                Instant::now(),
+            )
         {
             self.close_pixels.insert(id.clone(), px);
         }
@@ -380,15 +384,19 @@ impl DriftWm {
         let geom_loc = px.geometry.loc;
         let geom_size = px.geometry.size;
 
-        // Off-screen closes never show — skip the flatten entirely.
-        let drawable = if let Some(output) = fullscreen_output {
-            self.output_name_drawable(&output.name())
-        } else if let Some(site) = self.stage.pin_of(window) {
-            self.output_name_drawable(&site.output)
-        } else {
-            let stage_pos = self.stage.position_of(window).unwrap_or_default();
-            self.canvas_rect_drawable(Rectangle::new(stage_pos, geom_size))
-        };
+        // Off-screen closes never show — skip the flatten entirely. Stale pixels
+        // don't either: the unmap hook fires on every hide, so a hide-to-tray app
+        // that quits much later must not fade in what it looked like back then.
+        let fresh = crate::render::close_pixels_fresh(px.captured_at, Instant::now());
+        let drawable = fresh
+            && if let Some(output) = fullscreen_output {
+                self.output_name_drawable(&output.name())
+            } else if let Some(site) = self.stage.pin_of(window) {
+                self.output_name_drawable(&site.output)
+            } else {
+                let stage_pos = self.stage.position_of(window).unwrap_or_default();
+                self.canvas_rect_drawable(Rectangle::new(stage_pos, geom_size))
+            };
         if !drawable {
             self.backend = Some(backend);
             return;

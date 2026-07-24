@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::memory::{
@@ -57,6 +58,22 @@ pub(crate) struct ClosePixels {
     /// the instant a client unmaps, and foot-family terminals unmap before
     /// destroying their toplevel — by teardown there is nothing left to read.
     pub geometry: Rectangle<i32, Logical>,
+    /// When these pixels were cloned, so a stale capture can be discarded.
+    pub captured_at: Instant,
+}
+
+/// How long captured close pixels stay usable.
+///
+/// The unmap hook fires on *every* null-buffer commit, not just the one before a
+/// destroy, and remap invalidation only covers hide-then-reshow. A hide-to-tray
+/// app that quits minutes later would otherwise fade minutes-stale pixels in at
+/// its old canvas spot. Unmap-then-destroy clients (the foot family) do both in
+/// one dispatch cycle, so a tight bound still covers them.
+pub(crate) const MAX_CLOSE_PIXEL_AGE: Duration = Duration::from_secs(1);
+
+/// Whether pixels captured at `captured_at` are still fresh enough to animate.
+pub(crate) fn close_pixels_fresh(captured_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(captured_at) <= MAX_CLOSE_PIXEL_AGE
 }
 
 /// Clone the already-imported textures of `surface`'s tree. A held
@@ -67,6 +84,7 @@ pub(crate) fn capture_close_pixels(
     renderer: &mut GlesRenderer,
     surface: &WlSurface,
     geometry: Rectangle<i32, Logical>,
+    now: Instant,
 ) -> Option<ClosePixels> {
     let mut surfaces: Vec<BakedSurface> = Vec::new();
     with_surface_tree_downward(
@@ -132,6 +150,7 @@ pub(crate) fn capture_close_pixels(
         surfaces,
         bounds,
         geometry,
+        captured_at: now,
     })
 }
 
@@ -586,5 +605,36 @@ impl AdoptionFade {
 
     pub fn alpha(&self) -> f32 {
         fade_out_alpha(self.progress)
+    }
+}
+
+#[cfg(test)]
+mod close_pixel_age_tests {
+    use super::*;
+
+    /// A capture consumed in the same dispatch cycle is always fresh — this is the
+    /// normal close, and the unmap-then-destroy sequence foot-family terminals use.
+    #[test]
+    fn a_same_tick_capture_is_fresh() {
+        let now = Instant::now();
+        assert!(close_pixels_fresh(now, now));
+        assert!(close_pixels_fresh(now, now + Duration::from_millis(16),));
+    }
+
+    /// A hide-to-tray app that quits long after unmapping must not fade in the
+    /// pixels it had back then.
+    #[test]
+    fn a_capture_older_than_the_bound_is_stale() {
+        let captured = Instant::now();
+        assert!(!close_pixels_fresh(
+            captured,
+            captured + MAX_CLOSE_PIXEL_AGE + Duration::from_millis(1),
+        ));
+        assert!(!close_pixels_fresh(
+            captured,
+            captured + Duration::from_secs(300),
+        ));
+        // The bound itself still counts as fresh.
+        assert!(close_pixels_fresh(captured, captured + MAX_CLOSE_PIXEL_AGE));
     }
 }

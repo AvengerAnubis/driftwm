@@ -778,9 +778,12 @@ impl DriftWm {
         let Some(mut backend) = self.backend.take() else {
             return;
         };
-        if let Some(pixels) =
-            crate::render::capture_close_pixels(backend.renderer(), surface, geometry)
-        {
+        if let Some(pixels) = crate::render::capture_close_pixels(
+            backend.renderer(),
+            surface,
+            geometry,
+            Instant::now(),
+        ) {
             self.close_pixels.insert(id, pixels);
         }
         self.backend = Some(backend);
