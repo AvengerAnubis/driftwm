@@ -6,7 +6,9 @@ use smithay::backend::renderer::element::memory::{
 };
 use smithay::backend::renderer::element::texture::{TextureBuffer, TextureRenderElement};
 use smithay::backend::renderer::element::{Kind, RenderElement};
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
+use smithay::backend::renderer::gles::{
+    GlesPixelProgram, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformValue,
+};
 use smithay::backend::renderer::utils::{RendererSurfaceStateUserData, import_surface};
 use smithay::backend::renderer::{Bind as _, Color32F, Frame as _, Offscreen, Renderer as _};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -16,7 +18,7 @@ use smithay::wayland::compositor::{TraversalAction, with_surface_tree_downward};
 
 use crate::state::SuspendedWindow;
 
-use super::{OutputRenderElements, WindowTransformElement};
+use super::{OutputRenderElements, WindowTransformElement, shaders};
 
 /// A progress-based effect ends when within this of 1.0 (a 1% alpha residue is
 /// invisible; a tighter epsilon leaves a long, dead tail past the motion).
@@ -150,61 +152,71 @@ impl ClosingSnapshot {
     }
 }
 
-/// The optional SSD title bar to bake with the body: its still-alive
-/// `MemoryRenderBuffer` and its rect in surface-origin-local logical coords
-/// (above the content). Border/shadow stay excluded — their caches are purged
-/// at teardown and keyed by surface (accepted).
-type SsdBar<'a> = Option<(&'a MemoryRenderBuffer, Rectangle<f64, Logical>)>;
+/// The live chrome to reproduce in the bake, so the fade starts from the same
+/// picture the window had instead of popping to bare square content. Everything
+/// here is still resolvable at teardown (the capture runs before
+/// `cleanup_surface_state`). Fullscreen windows pass `None`: they have no
+/// rounding, border, shadow, or bar live either.
+pub(crate) struct CloseChrome<'a> {
+    /// Window geometry rect in surface-origin-local logical coords — the clip
+    /// reference and the border's inner rect.
+    pub geometry: Rectangle<f64, Logical>,
+    /// Per-corner radii in logical px, `(tl, tr, br, bl)`; the top pair is 0
+    /// under an SSD bar, matching the live clip.
+    pub corner_radius: [f32; 4],
+    pub corner_clip: Option<&'a GlesTexProgram>,
+    pub border_shader: Option<&'a GlesPixelProgram>,
+    pub border_width: i32,
+    pub border_color: [u8; 4],
+    pub focused: bool,
+    pub shadow_shader: Option<&'a GlesPixelProgram>,
+    /// The still-alive SSD title-bar buffer and its surface-local rect.
+    pub bar: Option<(&'a MemoryRenderBuffer, Rectangle<f64, Logical>)>,
+}
 
-/// Rasterize captured content (+ optional SSD bar) into one offscreen texture.
-/// Returns the texture and its extent in surface-origin-local logical coords,
-/// or `None` if the offscreen can't be created.
-fn flatten(
-    renderer: &mut GlesRenderer,
-    pixels: &ClosePixels,
-    flatten_scale: f64,
-    ssd_bar: SsdBar<'_>,
-) -> Option<(TextureBuffer<GlesTexture>, Rectangle<f64, Logical>)> {
-    let scale = Scale::from(flatten_scale);
-    let bounds = match ssd_bar {
-        Some((_, bar_rect)) => pixels.bounds.merge(bar_rect),
-        None => pixels.bounds,
+/// Draw one element into the offscreen currently bound to `frame`, clipped to
+/// `phys_size`. Damage is the element's own rect, element-local.
+fn bake_draw(
+    frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
+    element: &dyn RenderElement<GlesRenderer>,
+    scale: Scale<f64>,
+    phys_size: Size<i32, Physical>,
+) {
+    let src = element.src();
+    let dst = element.geometry(scale);
+    let Some(mut local) = Rectangle::from_size(phys_size).intersection(dst) else {
+        return;
     };
-    let phys_size: Size<i32, Physical> = Size::from((
+    local.loc -= dst.loc;
+    let cache = UserDataMap::new();
+    let _ = element.draw(frame, src, dst, &[local], &[], Some(&cache));
+}
+
+fn phys_size_of(bounds: Rectangle<f64, Logical>, flatten_scale: f64) -> Size<i32, Physical> {
+    Size::from((
         (bounds.size.w * flatten_scale).ceil() as i32,
         (bounds.size.h * flatten_scale).ceil() as i32,
-    ));
+    ))
+}
+
+/// Rasterize the captured content textures into one offscreen covering exactly
+/// `bounds` (surface-origin-local). Surfaces overhanging `bounds` are cropped by
+/// the framebuffer, which is how the live corner clip discards a CSD client's
+/// own shadow outside geometry.
+fn bake_content(
+    renderer: &mut GlesRenderer,
+    pixels: &ClosePixels,
+    bounds: Rectangle<f64, Logical>,
+    flatten_scale: f64,
+) -> Option<(TextureBuffer<GlesTexture>, Size<i32, Physical>)> {
+    let scale = Scale::from(flatten_scale);
+    let phys_size = phys_size_of(bounds, flatten_scale);
     if phys_size.w <= 0 || phys_size.h <= 0 {
         return None;
     }
     let buffer_size = phys_size.to_logical(1).to_buffer(1, Transform::Normal);
     let mut texture =
         Offscreen::<GlesTexture>::create_buffer(renderer, Fourcc::Abgr8888, buffer_size).ok()?;
-    // Build the bar element (needs `renderer`) before the frame borrows it.
-    let bar_element = ssd_bar.and_then(|(buf, bar_rect)| {
-        let loc = bar_rect.loc - bounds.loc;
-        MemoryRenderBufferRenderElement::from_buffer(
-            renderer,
-            Point::<f64, Physical>::from((loc.x * flatten_scale, loc.y * flatten_scale)),
-            buf,
-            None,
-            None,
-            Some(bar_rect.size.to_i32_round()),
-            Kind::Unspecified,
-        )
-        .ok()
-    });
-    let draw = |frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
-                element: &dyn RenderElement<GlesRenderer>| {
-        let src = element.src();
-        let dst = element.geometry(scale);
-        let Some(mut local) = Rectangle::from_size(phys_size).intersection(dst) else {
-            return;
-        };
-        local.loc -= dst.loc;
-        let cache = UserDataMap::new();
-        let _ = element.draw(frame, src, dst, &[local], &[], Some(&cache));
-    };
     {
         let mut target = renderer.bind(&mut texture).ok()?;
         let mut frame = renderer
@@ -223,11 +235,153 @@ fn flatten(
                 Some(surface.dst),
                 Kind::Unspecified,
             );
-            draw(&mut frame, &element);
+            bake_draw(&mut frame, &element, scale, phys_size);
         }
-        // The bar sits above the content (disjoint), so it fades as one piece.
+        let _ = frame.finish();
+    }
+    let buffer = TextureBuffer::from_texture(renderer, texture, 1, Transform::Normal, None);
+    Some((buffer, phys_size))
+}
+
+/// Rasterize the whole closing picture — shadow, border, corner-clipped content,
+/// SSD bar — into one offscreen texture. Returns the texture and its extent in
+/// surface-origin-local logical coords. Without `chrome` (fullscreen) this is
+/// just the content, matching the live bare pass-through.
+fn flatten(
+    renderer: &mut GlesRenderer,
+    pixels: &ClosePixels,
+    flatten_scale: f64,
+    chrome: Option<&CloseChrome<'_>>,
+) -> Option<(TextureBuffer<GlesTexture>, Rectangle<f64, Logical>)> {
+    let scale = Scale::from(flatten_scale);
+    let Some(chrome) = chrome else {
+        let (buffer, _) = bake_content(renderer, pixels, pixels.bounds, flatten_scale)?;
+        return Some((buffer, pixels.bounds));
+    };
+
+    // Pass 1: content into a texture covering exactly the geometry rect, so the
+    // clip shader's buffer-UV → geometry mapping is the identity below.
+    let content_rect = chrome.geometry;
+    let (content_buffer, content_phys) =
+        bake_content(renderer, pixels, content_rect, flatten_scale)?;
+
+    // The body that casts the shadow and wears the border: content plus the SSD
+    // bar strip above it, exactly as the live path composes it.
+    let body = match chrome.bar {
+        Some((_, bar_rect)) => content_rect.merge(bar_rect),
+        None => content_rect,
+    };
+    let shadow_element = chrome.shadow_shader.map(|shader| {
+        shaders::bake_shadow_element(
+            shader,
+            body,
+            (chrome.corner_radius[2] + chrome.border_width as f32).max(0.0),
+            scale,
+        )
+    });
+    let border_element = chrome.border_shader.and_then(|shader| {
+        shaders::bake_border_element(
+            shader,
+            body,
+            chrome.corner_radius[2],
+            chrome.border_width,
+            chrome.border_color,
+            chrome.focused,
+            scale,
+        )
+    });
+
+    // Pass 2 bounds: everything the picture covers.
+    let mut bounds = body;
+    if let Some((_, area)) = shadow_element {
+        bounds = bounds.merge(area.to_f64());
+    }
+    if let Some((_, area)) = border_element {
+        bounds = bounds.merge(area.to_f64());
+    }
+    let phys_size = phys_size_of(bounds, flatten_scale);
+    if phys_size.w <= 0 || phys_size.h <= 0 {
+        return None;
+    }
+    let buffer_size = phys_size.to_logical(1).to_buffer(1, Transform::Normal);
+    let mut texture =
+        Offscreen::<GlesTexture>::create_buffer(renderer, Fourcc::Abgr8888, buffer_size).ok()?;
+
+    // Elements needing `renderer` are built before the frame borrows it. The
+    // content element is placed so its full extent lands on the geometry rect.
+    let content_offset = content_rect.loc - bounds.loc;
+    let content_element = TextureRenderElement::from_texture_buffer(
+        Point::<f64, Physical>::from((
+            content_offset.x * flatten_scale,
+            content_offset.y * flatten_scale,
+        )),
+        &content_buffer,
+        None,
+        None,
+        Some(content_phys.to_f64().to_logical(scale).to_i32_round()),
+        Kind::Unspecified,
+    );
+    let bar_element = chrome.bar.and_then(|(buf, bar_rect)| {
+        let loc = bar_rect.loc - bounds.loc;
+        MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            Point::<f64, Physical>::from((loc.x * flatten_scale, loc.y * flatten_scale)),
+            buf,
+            None,
+            None,
+            Some(bar_rect.size.to_i32_round()),
+            Kind::Unspecified,
+        )
+        .ok()
+    });
+    // Clamp radii like the live clip so a tiny window can't get corners wider
+    // than half its side.
+    let max_r = ((content_rect.size.w.min(content_rect.size.h) as f32) * 0.5).max(0.0);
+    let clamped = chrome.corner_radius.map(|r| r.clamp(0.0, max_r));
+    let clip_uniforms = vec![
+        Uniform::new("aa_scale", flatten_scale as f32),
+        Uniform::new(
+            "geo_size",
+            (content_rect.size.w as f32, content_rect.size.h as f32),
+        ),
+        Uniform::new(
+            "corner_radius",
+            (clamped[0], clamped[1], clamped[2], clamped[3]),
+        ),
+        // Identity: the content texture covers exactly the geometry rect, so its
+        // buffer UV already *is* geometry-normalized.
+        Uniform::new(
+            "input_to_geo",
+            UniformValue::Matrix3x3 {
+                matrices: vec![[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]],
+                transpose: false,
+            },
+        ),
+    ];
+    {
+        let mut target = renderer.bind(&mut texture).ok()?;
+        let mut frame = renderer
+            .render(&mut target, phys_size, Transform::Normal)
+            .ok()?;
+        let _ = frame.clear(Color32F::TRANSPARENT, &[Rectangle::from_size(phys_size)]);
+        // Painter's order: shadow, border, content, bar (the reverse of the live
+        // front-to-back element vec).
+        if let Some((ref element, _)) = shadow_element {
+            bake_draw(&mut frame, element, scale, phys_size);
+        }
+        if let Some((ref element, _)) = border_element {
+            bake_draw(&mut frame, element, scale, phys_size);
+        }
+        match chrome.corner_clip {
+            Some(clip) => {
+                frame.override_default_tex_program(clip.clone(), clip_uniforms);
+                bake_draw(&mut frame, &content_element, scale, phys_size);
+                frame.clear_tex_program_override();
+            }
+            None => bake_draw(&mut frame, &content_element, scale, phys_size),
+        }
         if let Some(ref element) = bar_element {
-            draw(&mut frame, element);
+            bake_draw(&mut frame, element, scale, phys_size);
         }
         let _ = frame.finish();
     }
@@ -244,9 +398,9 @@ pub(crate) fn snapshot_canvas(
     flatten_scale: f64,
     scale_amplitude: f64,
     alpha_only: bool,
-    ssd_bar: SsdBar<'_>,
+    chrome: Option<&CloseChrome<'_>>,
 ) -> Option<ClosingSnapshot> {
-    let (buffer, bounds) = flatten(renderer, pixels, flatten_scale.max(1.0), ssd_bar)?;
+    let (buffer, bounds) = flatten(renderer, pixels, flatten_scale.max(1.0), chrome)?;
     let canvas_rect = Rectangle::new(window_origin + bounds.loc, bounds.size);
     Some(ClosingSnapshot {
         buffer,
@@ -269,9 +423,9 @@ pub(crate) fn snapshot_screen(
     flatten_scale: f64,
     scale_amplitude: f64,
     alpha_only: bool,
-    ssd_bar: SsdBar<'_>,
+    chrome: Option<&CloseChrome<'_>>,
 ) -> Option<ClosingSnapshot> {
-    let (buffer, bounds) = flatten(renderer, pixels, flatten_scale.max(1.0), ssd_bar)?;
+    let (buffer, bounds) = flatten(renderer, pixels, flatten_scale.max(1.0), chrome)?;
     let loc = Point::from((
         screen_origin.x + bounds.loc.x.round() as i32,
         screen_origin.y + bounds.loc.y.round() as i32,

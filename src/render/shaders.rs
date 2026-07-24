@@ -158,6 +158,118 @@ fn shadow_uniforms_precise(
     (uniforms, key)
 }
 
+/// The rect a shadow rasterizes into: the casting body inflated by the blur
+/// radius on every side. Shared by the live push and the close-fade bake so the
+/// two can't drift.
+fn shadow_area_for(body_logical: Rectangle<f64, Logical>) -> Rectangle<i32, Logical> {
+    let pad = driftwm::config::DecorationConfig::SHADOW_RADIUS.ceil() as i32;
+    let body_x = body_logical.loc.x.round() as i32;
+    let body_y = body_logical.loc.y.round() as i32;
+    let body_w = body_logical.size.w.round() as i32;
+    let body_h = body_logical.size.h.round() as i32;
+    Rectangle::new(
+        Point::<i32, Logical>::from((body_x - pad, body_y - pad)),
+        Size::<i32, Logical>::from((body_w + 2 * pad, body_h + 2 * pad)),
+    )
+}
+
+/// The rect a border stroke rasterizes into: the inner rect plus one physical
+/// pixel of slack around the snapped stroke width (see `push_border_element`).
+/// Returns the area and the snapped stroke width in physical pixels.
+fn border_area_for(
+    inner_logical: Rectangle<f64, Logical>,
+    border_width_logical: i32,
+    total_scale: f64,
+) -> (Rectangle<i32, Logical>, f32) {
+    let inner_x = inner_logical.loc.x.round() as i32;
+    let inner_y = inner_logical.loc.y.round() as i32;
+    let inner_w = inner_logical.size.w.round() as i32;
+    let inner_h = inner_logical.size.h.round() as i32;
+    let border_w_phys = ((border_width_logical as f64) * total_scale)
+        .round()
+        .max(1.0) as f32;
+    let pad = (((border_w_phys as f64) + 1.0) / total_scale).ceil() as i32;
+    (
+        Rectangle::new(
+            Point::<i32, Logical>::from((inner_x - pad, inner_y - pad)),
+            Size::<i32, Logical>::from((inner_w + 2 * pad, inner_h + 2 * pad)),
+        ),
+        border_w_phys,
+    )
+}
+
+/// A fresh, uncached shadow element in bake-local logical coords for the
+/// close-fade snapshot, plus the rect it covers. Zoom is 1 and alpha 1: the whole
+/// baked texture is scaled and faded as one piece at render time, so pre-applying
+/// either would double up.
+pub(super) fn bake_shadow_element(
+    shader: &GlesPixelProgram,
+    body_logical: Rectangle<f64, Logical>,
+    corner_radius_logical: f32,
+    output_scale: Scale<f64>,
+) -> (PixelShaderElement, Rectangle<i32, Logical>) {
+    let shadow_radius = driftwm::config::DecorationConfig::SHADOW_RADIUS;
+    let shadow_area = shadow_area_for(body_logical);
+    let (uniforms, _key) = shadow_uniforms_precise(
+        body_logical.to_physical_precise_round(output_scale),
+        shadow_area,
+        output_scale,
+        1.0,
+        shadow_radius,
+        corner_radius_logical * output_scale.x as f32,
+    );
+    (
+        PixelShaderElement::new(
+            shader.clone(),
+            shadow_area,
+            None,
+            1.0,
+            uniforms,
+            Kind::Unspecified,
+        ),
+        shadow_area,
+    )
+}
+
+/// A fresh, uncached border element in bake-local logical coords (see
+/// [`bake_shadow_element`] for why zoom and alpha are pinned at 1).
+pub(super) fn bake_border_element(
+    shader: &GlesPixelProgram,
+    inner_logical: Rectangle<f64, Logical>,
+    inner_radius_logical: f32,
+    border_width_logical: i32,
+    color: [u8; 4],
+    focused: bool,
+    output_scale: Scale<f64>,
+) -> Option<(PixelShaderElement, Rectangle<i32, Logical>)> {
+    if border_width_logical <= 0 {
+        return None;
+    }
+    let (border_area, border_w_phys) =
+        border_area_for(inner_logical, border_width_logical, output_scale.x);
+    let (uniforms, _key) = border_uniforms_precise(
+        inner_logical.to_physical_precise_round(output_scale),
+        border_area,
+        output_scale,
+        1.0,
+        inner_radius_logical * output_scale.x as f32,
+        border_w_phys,
+        color,
+        focused,
+    );
+    Some((
+        PixelShaderElement::new(
+            shader.clone(),
+            border_area,
+            None,
+            1.0,
+            uniforms,
+            Kind::Unspecified,
+        ),
+        border_area,
+    ))
+}
+
 /// Build (or reuse) a cached shadow `PixelShaderElement` for a window body and
 /// push it into `target` wrapped in a `RescaleRenderElement`.
 ///
@@ -186,16 +298,7 @@ pub(super) fn push_shadow_element(
 ) {
     use driftwm::config::DecorationConfig;
     let shadow_radius = DecorationConfig::SHADOW_RADIUS;
-    let pad = shadow_radius.ceil() as i32;
-
-    let body_x = body_logical.loc.x.round() as i32;
-    let body_y = body_logical.loc.y.round() as i32;
-    let body_w = body_logical.size.w.round() as i32;
-    let body_h = body_logical.size.h.round() as i32;
-    let shadow_area = Rectangle::new(
-        Point::<i32, Logical>::from((body_x - pad, body_y - pad)),
-        Size::<i32, Logical>::from((body_w + 2 * pad, body_h + 2 * pad)),
-    );
+    let shadow_area = shadow_area_for(body_logical);
 
     let body_pre_zoom: Rectangle<i32, Physical> =
         body_logical.to_physical_precise_round(output_scale);
@@ -386,12 +489,6 @@ pub(super) fn push_border_element(
     if border_width_logical <= 0 {
         return;
     }
-    let bw = border_width_logical;
-    let inner_x = inner_logical.loc.x.round() as i32;
-    let inner_y = inner_logical.loc.y.round() as i32;
-    let inner_w = inner_logical.size.w.round() as i32;
-    let inner_h = inner_logical.size.h.round() as i32;
-
     // Snap stroke width to whole physical pixels (1px floor) so every side
     // paints the same integer count of pixels regardless of fractional scale
     // or zoom. Then size the element with one extra physical pixel of slack:
@@ -399,13 +496,8 @@ pub(super) fn push_border_element(
     // extent by ±1 px, so without slack the stroke band falls partially
     // outside the rasterized rect on one side and gets clipped (the cause
     // of the 1-px-vs-2-px asymmetry).
-    let total_scale = output_scale.x * zoom;
-    let border_w_phys = ((bw as f64) * total_scale).round().max(1.0) as f32;
-    let pad_logical = (((border_w_phys as f64) + 1.0) / total_scale).ceil() as i32;
-    let border_area = Rectangle::new(
-        Point::<i32, Logical>::from((inner_x - pad_logical, inner_y - pad_logical)),
-        Size::<i32, Logical>::from((inner_w + 2 * pad_logical, inner_h + 2 * pad_logical)),
-    );
+    let (border_area, border_w_phys) =
+        border_area_for(inner_logical, border_width_logical, output_scale.x * zoom);
 
     let inner_pre_zoom: Rectangle<i32, Physical> =
         inner_logical.to_physical_precise_round(output_scale);

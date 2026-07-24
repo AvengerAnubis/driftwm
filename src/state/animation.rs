@@ -387,24 +387,89 @@ impl DriftWm {
         let scale_amplitude = self.config.effects.animation_scale;
         let geom_loc = window.geometry().loc;
         let geom_size = window.geometry().size;
-        // Bake the SSD title bar (still cached pre-cleanup) with the body so it
-        // fades as one piece; fullscreen has no bar, and border/shadow stay
-        // excluded (caches purged, keyed by surface). Rect is surface-origin-local.
-        let bar_h = self.config.decorations.title_bar_height;
-        let deco_key = crate::decorations::DecorationKey::Surface(id.clone());
-        let ssd_bar = if fullscreen_output.is_none() {
-            self.decorations.get(&deco_key).map(|d| {
-                (
-                    &d.title_bar,
-                    Rectangle::new(
-                        Point::from((geom_loc.x as f64, (geom_loc.y - bar_h) as f64)),
-                        Size::from((geom_size.w as f64, bar_h as f64)),
-                    ),
-                )
-            })
-        } else {
+        // Resolve the live chrome so the fade starts from the picture the window
+        // actually had. Everything is still intact here (pre-`cleanup_surface_state`),
+        // and the rects are surface-origin-local for the bake. A fullscreen window
+        // has no chrome live, so it bakes bare.
+        let corner_clip = self.render.corner_clip_shader.clone();
+        let border_shader = self.render.border_shader.clone();
+        let shadow_shader = self.render.shadow_shader.clone();
+        let chrome = if fullscreen_output.is_some() {
             None
+        } else {
+            let applied = driftwm::config::applied_rule(surface);
+            let mode = driftwm::config::effective_decoration_mode(
+                applied.as_ref().and_then(|r| r.decoration.as_ref()),
+                &self.config.decorations.default_mode,
+            );
+            // `decoration = "none"` hard-vetoes compositor chrome live, so the
+            // bake must stay bare too (no clip, no border, no shadow).
+            if matches!(mode, driftwm::config::DecorationMode::None) {
+                None
+            } else {
+                let bw = driftwm::config::effective_border_width(
+                    applied.as_ref(),
+                    mode,
+                    &self.config.decorations,
+                );
+                let radius = driftwm::config::effective_corner_radius(
+                    applied.as_ref(),
+                    mode,
+                    &self.config.decorations,
+                ) as f32;
+                let focused = self
+                    .seat
+                    .get_keyboard()
+                    .and_then(|kb| kb.current_focus())
+                    .is_some_and(|f| f.0 == *surface);
+                let border_color = if focused {
+                    driftwm::config::effective_border_color_focused(
+                        applied.as_ref(),
+                        &self.config.decorations,
+                    )
+                } else {
+                    driftwm::config::effective_border_color(
+                        applied.as_ref(),
+                        &self.config.decorations,
+                    )
+                };
+                let shadow_on = driftwm::config::effective_shadow_enabled(
+                    applied.as_ref(),
+                    mode,
+                    &self.config.decorations,
+                );
+                let bar_h = self.config.decorations.title_bar_height;
+                let deco_key = crate::decorations::DecorationKey::Surface(id.clone());
+                let bar = self.decorations.get(&deco_key).map(|d| {
+                    (
+                        &d.title_bar,
+                        Rectangle::new(
+                            Point::from((geom_loc.x as f64, (geom_loc.y - bar_h) as f64)),
+                            Size::from((geom_size.w as f64, bar_h as f64)),
+                        ),
+                    )
+                });
+                // Under an SSD bar only the bottom corners round — the bar covers
+                // the top edge, same as the live clip.
+                let corner_radius = if bar.is_some() {
+                    [0.0, 0.0, radius, radius]
+                } else {
+                    [radius, radius, radius, radius]
+                };
+                Some(crate::render::CloseChrome {
+                    geometry: Rectangle::new(geom_loc.to_f64(), geom_size.to_f64()),
+                    corner_radius,
+                    corner_clip: corner_clip.as_ref(),
+                    border_shader: border_shader.as_ref(),
+                    border_width: bw,
+                    border_color,
+                    focused,
+                    shadow_shader: shadow_on.then_some(shadow_shader.as_ref()).flatten(),
+                    bar,
+                })
+            }
         };
+        let chrome = chrome.as_ref();
         let snapshot = if let Some(output) = fullscreen_output {
             let flatten_scale = output.current_scale().fractional_scale();
             crate::render::snapshot_screen(
@@ -415,7 +480,7 @@ impl DriftWm {
                 flatten_scale,
                 scale_amplitude,
                 alpha_only,
-                ssd_bar,
+                chrome,
             )
         } else if let Some(site) = self.stage.pin_of(window).cloned() {
             let flatten_scale = self
@@ -434,7 +499,7 @@ impl DriftWm {
                 flatten_scale,
                 scale_amplitude,
                 alpha_only,
-                ssd_bar,
+                chrome,
             )
         } else {
             let stage_pos = self.stage.position_of(window).unwrap_or_default();
@@ -451,7 +516,7 @@ impl DriftWm {
                 flatten_scale,
                 scale_amplitude,
                 alpha_only,
-                ssd_bar,
+                chrome,
             )
         };
         self.backend = Some(backend);
