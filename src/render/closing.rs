@@ -131,6 +131,8 @@ pub(crate) fn capture_close_pixels(
 /// place it through their own camera/zoom.
 pub(crate) struct ClosingSnapshot {
     buffer: TextureBuffer<GlesTexture>,
+    /// Texel extent of `buffer`, which is wrapped at scale 1 — see [`texel_src`].
+    texels: Size<i32, Physical>,
     /// Full extent in canvas coordinates. Meaningful only for a normal
     /// (non-pinned) close; a pinned/fullscreen snapshot leaves this default and
     /// scopes by `pinned` instead (its rect lives in screen space).
@@ -205,6 +207,28 @@ fn bake_draw(
     let _ = element.draw(frame, src, dst, &[local], &[], Some(&cache));
 }
 
+/// A rasterized snapshot: the offscreen texture, its extent in
+/// surface-origin-local logical coords, and its texel size (needed because the
+/// wrapper is at buffer scale 1 — see [`texel_src`]).
+type Baked = (
+    TextureBuffer<GlesTexture>,
+    Rectangle<f64, Logical>,
+    Size<i32, Physical>,
+);
+
+/// The whole extent of an offscreen we rasterized ourselves, as the `src` a
+/// `TextureRenderElement` wants.
+///
+/// Our offscreens hold `logical × flatten_scale` texels but are wrapped at
+/// buffer scale 1, so for them one "logical" unit *is* one texel and `src` has to
+/// be given in texels. Leaving `src` at `None` makes smithay fall back to the
+/// element's logical size — the destination extent — which on a HiDPI or
+/// zoomed-in bake samples only the top-left `1/flatten_scale²` of the texture and
+/// stretches it over the full destination.
+fn texel_src(texels: Size<i32, Physical>) -> Rectangle<f64, Logical> {
+    Rectangle::from_size(Size::from((texels.w as f64, texels.h as f64)))
+}
+
 fn phys_size_of(bounds: Rectangle<f64, Logical>, flatten_scale: f64) -> Size<i32, Physical> {
     Size::from((
         (bounds.size.w * flatten_scale).ceil() as i32,
@@ -265,11 +289,11 @@ fn flatten(
     pixels: &ClosePixels,
     flatten_scale: f64,
     chrome: Option<&CloseChrome<'_>>,
-) -> Option<(TextureBuffer<GlesTexture>, Rectangle<f64, Logical>)> {
+) -> Option<Baked> {
     let scale = Scale::from(flatten_scale);
     let Some(chrome) = chrome else {
-        let (buffer, _) = bake_content(renderer, pixels, pixels.bounds, flatten_scale)?;
-        return Some((buffer, pixels.bounds));
+        let (buffer, texels) = bake_content(renderer, pixels, pixels.bounds, flatten_scale)?;
+        return Some((buffer, pixels.bounds, texels));
     };
 
     // Pass 1: content into a texture covering exactly the geometry rect, so the
@@ -330,7 +354,7 @@ fn flatten(
         )),
         &content_buffer,
         None,
-        None,
+        Some(texel_src(content_phys)),
         Some(content_phys.to_f64().to_logical(scale).to_i32_round()),
         Kind::Unspecified,
     );
@@ -399,7 +423,7 @@ fn flatten(
         let _ = frame.finish();
     }
     let buffer = TextureBuffer::from_texture(renderer, texture, 1, Transform::Normal, None);
-    Some((buffer, bounds))
+    Some((buffer, bounds, phys_size))
 }
 
 /// Build a closing snapshot for a normal (canvas) window from captured pixels.
@@ -413,10 +437,11 @@ pub(crate) fn snapshot_canvas(
     alpha_only: bool,
     chrome: Option<&CloseChrome<'_>>,
 ) -> Option<ClosingSnapshot> {
-    let (buffer, bounds) = flatten(renderer, pixels, flatten_scale.max(1.0), chrome)?;
+    let (buffer, bounds, texels) = flatten(renderer, pixels, flatten_scale.max(1.0), chrome)?;
     let canvas_rect = Rectangle::new(window_origin + bounds.loc, bounds.size);
     Some(ClosingSnapshot {
         buffer,
+        texels,
         canvas_rect,
         pinned: None,
         alpha_only,
@@ -438,7 +463,7 @@ pub(crate) fn snapshot_screen(
     alpha_only: bool,
     chrome: Option<&CloseChrome<'_>>,
 ) -> Option<ClosingSnapshot> {
-    let (buffer, bounds) = flatten(renderer, pixels, flatten_scale.max(1.0), chrome)?;
+    let (buffer, bounds, texels) = flatten(renderer, pixels, flatten_scale.max(1.0), chrome)?;
     let loc = Point::from((
         screen_origin.x + bounds.loc.x.round() as i32,
         screen_origin.y + bounds.loc.y.round() as i32,
@@ -446,6 +471,7 @@ pub(crate) fn snapshot_screen(
     let screen_rect = Rectangle::new(loc, bounds.size.to_i32_round());
     Some(ClosingSnapshot {
         buffer,
+        texels,
         canvas_rect: Rectangle::default(),
         pinned: Some((output, screen_rect)),
         alpha_only,
@@ -502,7 +528,7 @@ impl ClosingSnapshot {
             loc_phys,
             &self.buffer,
             Some(alpha),
-            None,
+            Some(texel_src(self.texels)),
             Some(screen_size.to_i32_round()),
             Kind::Unspecified,
         );
