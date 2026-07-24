@@ -1044,3 +1044,38 @@ fn off_screen_animations_complete_instantly() {
         "the entry was completed instantly when it left every viewport"
     );
 }
+
+/// Foot-family terminals unmap (null-buffer commit) before destroying their
+/// toplevel. That commit collapses the window's live geometry, so a close
+/// animation that sized itself from `window.geometry()` at teardown time got a
+/// zero-sized rect and silently dropped the fade. The pixels are captured in the
+/// pre-commit hook — while the rect is still readable — so the rect has to be
+/// recorded there too. This pins the hazard: live geometry is already gone by the
+/// time the destroy handler runs. (The snapshot itself is backend-gated, so the
+/// spawn can't be asserted headlessly.)
+#[test]
+fn an_unmapped_window_no_longer_reports_its_geometry() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "foot", (400, 300));
+    let window = window_by_app_id(&mut f, "foot").unwrap();
+    assert_eq!(
+        window.geometry().size,
+        Size::from((400, 300)),
+        "a mapped window reports its size"
+    );
+
+    // The unmap commit, exactly as foot sequences it before destroying.
+    f.client(id).window(&surface).attach_null();
+    f.client(id).window(&surface).commit();
+    f.roundtrip(id);
+    f.dispatch();
+
+    let live = window.geometry().size;
+    assert!(
+        live.w <= 0 || live.h <= 0,
+        "an unmapped window reports no usable geometry (got {live:?}) — a close \
+         animation must use the rect captured at unmap, not this"
+    );
+}

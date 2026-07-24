@@ -358,25 +358,14 @@ impl DriftWm {
         fullscreen_output: Option<&Output>,
         alpha_only: bool,
     ) {
-        // Off-screen closes never show — skip the flatten entirely.
-        let drawable = if let Some(output) = fullscreen_output {
-            self.output_name_drawable(&output.name())
-        } else if let Some(site) = self.stage.pin_of(window) {
-            self.output_name_drawable(&site.output)
-        } else {
-            let stage_pos = self.stage.position_of(window).unwrap_or_default();
-            self.canvas_rect_drawable(Rectangle::new(stage_pos, window.geometry().size))
-        };
-        if !drawable {
-            return;
-        }
         // Backend-gated (the headless fixture never accumulates render transients).
         let Some(mut backend) = self.backend.take() else {
             return;
         };
         let id = surface.id();
         if !self.close_pixels.contains_key(&id)
-            && let Some(px) = crate::render::capture_close_pixels(backend.renderer(), surface)
+            && let Some(px) =
+                crate::render::capture_close_pixels(backend.renderer(), surface, window.geometry())
         {
             self.close_pixels.insert(id.clone(), px);
         }
@@ -385,8 +374,25 @@ impl DriftWm {
             return;
         };
         let scale_amplitude = self.config.effects.animation_scale;
-        let geom_loc = window.geometry().loc;
-        let geom_size = window.geometry().size;
+        // The rect recorded with the pixels, never live geometry: a client that
+        // unmapped before destroying its toplevel already reports a zero-sized
+        // window, which would collapse the bake and silently drop the animation.
+        let geom_loc = px.geometry.loc;
+        let geom_size = px.geometry.size;
+
+        // Off-screen closes never show — skip the flatten entirely.
+        let drawable = if let Some(output) = fullscreen_output {
+            self.output_name_drawable(&output.name())
+        } else if let Some(site) = self.stage.pin_of(window) {
+            self.output_name_drawable(&site.output)
+        } else {
+            let stage_pos = self.stage.position_of(window).unwrap_or_default();
+            self.canvas_rect_drawable(Rectangle::new(stage_pos, geom_size))
+        };
+        if !drawable {
+            self.backend = Some(backend);
+            return;
+        }
         // Resolve the live chrome so the fade starts from the picture the window
         // actually had. Everything is still intact here (pre-`cleanup_surface_state`),
         // and the rects are surface-origin-local for the bake. A fullscreen window

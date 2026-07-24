@@ -52,6 +52,11 @@ pub(crate) struct ClosePixels {
     surfaces: Vec<BakedSurface>,
     /// Logical bounds of the captured content, relative to the window origin.
     bounds: Rectangle<f64, Logical>,
+    /// The window's geometry rect at capture time, in the same surface-local
+    /// space as `bounds`. Recorded here because live geometry collapses to zero
+    /// the instant a client unmaps, and foot-family terminals unmap before
+    /// destroying their toplevel — by teardown there is nothing left to read.
+    pub geometry: Rectangle<i32, Logical>,
 }
 
 /// Clone the already-imported textures of `surface`'s tree. A held
@@ -61,6 +66,7 @@ pub(crate) struct ClosePixels {
 pub(crate) fn capture_close_pixels(
     renderer: &mut GlesRenderer,
     surface: &WlSurface,
+    geometry: Rectangle<i32, Logical>,
 ) -> Option<ClosePixels> {
     let mut surfaces: Vec<BakedSurface> = Vec::new();
     with_surface_tree_downward(
@@ -122,7 +128,11 @@ pub(crate) fn capture_close_pixels(
         .map(|s| Rectangle::new(s.location, s.dst.to_f64()))
         .reduce(|a, b| a.merge(b))
         .filter(|b| b.size.w > 0.0 && b.size.h > 0.0)?;
-    Some(ClosePixels { surfaces, bounds })
+    Some(ClosePixels {
+        surfaces,
+        bounds,
+        geometry,
+    })
 }
 
 /// A short-lived flattened snapshot of a closed window, animated as one texture

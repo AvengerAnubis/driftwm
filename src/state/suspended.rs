@@ -754,10 +754,17 @@ impl DriftWm {
         if self.close_pixels.contains_key(&id) {
             return;
         }
+        // Record the geometry alongside the pixels: this is the last moment it is
+        // readable, since the null-buffer commit this hook precedes collapses it.
+        let Some(geometry) = self.window_for_surface(surface).map(|w| w.geometry()) else {
+            return;
+        };
         let Some(mut backend) = self.backend.take() else {
             return;
         };
-        if let Some(pixels) = crate::render::capture_close_pixels(backend.renderer(), surface) {
+        if let Some(pixels) =
+            crate::render::capture_close_pixels(backend.renderer(), surface, geometry)
+        {
             self.close_pixels.insert(id, pixels);
         }
         self.backend = Some(backend);
