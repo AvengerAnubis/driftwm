@@ -225,19 +225,6 @@ type Baked = (
     Size<i32, Physical>,
 );
 
-/// The whole extent of an offscreen we rasterized ourselves, as the `src` a
-/// `TextureRenderElement` wants.
-///
-/// Our offscreens hold `logical × flatten_scale` texels but are wrapped at
-/// buffer scale 1, so for them one "logical" unit *is* one texel and `src` has to
-/// be given in texels. Leaving `src` at `None` makes smithay fall back to the
-/// element's logical size — the destination extent — which on a HiDPI or
-/// zoomed-in bake samples only the top-left `1/flatten_scale²` of the texture and
-/// stretches it over the full destination.
-fn texel_src(texels: Size<i32, Physical>) -> Rectangle<f64, Logical> {
-    Rectangle::from_size(Size::from((texels.w as f64, texels.h as f64)))
-}
-
 fn phys_size_of(bounds: Rectangle<f64, Logical>, flatten_scale: f64) -> Size<i32, Physical> {
     Size::from((
         (bounds.size.w * flatten_scale).ceil() as i32,
@@ -363,7 +350,7 @@ fn flatten(
         )),
         &content_buffer,
         None,
-        Some(texel_src(content_phys)),
+        Some(super::texel_src(content_phys)),
         Some(content_phys.to_f64().to_logical(scale).to_i32_round()),
         Kind::Unspecified,
     );
@@ -537,7 +524,7 @@ impl ClosingSnapshot {
             loc_phys,
             &self.buffer,
             Some(alpha),
-            Some(texel_src(self.texels)),
+            Some(super::texel_src(self.texels)),
             Some(screen_size.to_i32_round()),
             Kind::Unspecified,
         );

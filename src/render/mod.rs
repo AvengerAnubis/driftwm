@@ -60,6 +60,19 @@ pub(super) struct WindowRenderAnimation {
     scale: Scale<f64>,
 }
 
+/// The whole extent of a texture we rasterized ourselves, as the `src` a
+/// `TextureRenderElement` wants.
+///
+/// Our offscreens hold `logical * scale` texels but are wrapped at buffer scale
+/// 1, so for them one "logical" unit *is* one texel and `src` has to be given in
+/// texels. Leaving `src` at `None` makes smithay fall back to the element's
+/// logical size — the *destination* extent — which on a HiDPI or zoomed-in
+/// surface samples only the top-left `1/scale`-squared of the texture and
+/// stretches it over the whole destination.
+pub(super) fn texel_src(texels: Size<i32, Physical>) -> Rectangle<f64, Logical> {
+    Rectangle::from_size(Size::from((texels.w as f64, texels.h as f64)))
+}
+
 /// One adoption crossfade's render inputs, lifted out of `state` before the
 /// per-fade mutable borrows. `focused`/`launching` are frozen at fade creation.
 struct FadeRender {
@@ -1713,4 +1726,42 @@ fn build_output_outline_elements(
     }
 
     elements
+}
+
+#[cfg(test)]
+mod texel_src_tests {
+    use super::*;
+
+    /// The whole point of [`texel_src`]: for a scale-1-wrapped offscreen the src
+    /// must span every texel, which on a 2x surface is twice the destination
+    /// extent per axis. Passing the destination (what `src: None` falls back to)
+    /// would sample a quarter of the texture and magnify it.
+    #[test]
+    fn texel_src_spans_the_whole_texture_not_the_destination() {
+        let logical: Size<i32, Logical> = Size::from((800, 600));
+        let scale = 2.0;
+        let texels: Size<i32, Physical> = Size::from((
+            (logical.w as f64 * scale) as i32,
+            (logical.h as f64 * scale) as i32,
+        ));
+
+        let src = texel_src(texels);
+        assert_eq!(src.loc, Point::from((0.0, 0.0)));
+        assert_eq!(src.size.w, texels.w as f64, "src covers every texel across");
+        assert_eq!(src.size.h, texels.h as f64, "src covers every texel down");
+        assert_ne!(
+            src.size.w, logical.w as f64,
+            "src must not collapse to the destination extent — that is the bug"
+        );
+    }
+
+    /// Fractional scales round-trip too (the reason src is carried in texels
+    /// rather than derived from an integer buffer scale).
+    #[test]
+    fn texel_src_handles_a_fractional_scale() {
+        let texels: Size<i32, Physical> = Size::from((1200, 900));
+        let src = texel_src(texels);
+        assert_eq!(src.size.w, 1200.0);
+        assert_eq!(src.size.h, 900.0);
+    }
 }

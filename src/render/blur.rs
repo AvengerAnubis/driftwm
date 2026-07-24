@@ -951,7 +951,11 @@ pub(crate) fn process_blur_requests(
             1,
             Transform::Normal,
             None,
-            None,
+            // The blur texture is `win_size` *physical* texels but is wrapped at
+            // buffer scale 1, so its src must be the full texel extent. Leaving
+            // it `None` samples only the top-left 1/scale-squared and magnifies
+            // the frost on any HiDPI or zoomed output.
+            Some(super::texel_src(win_size)),
             Some(Size::from((
                 (win_size.w as f64 / output_scale) as i32,
                 (win_size.h as f64 / output_scale) as i32,
