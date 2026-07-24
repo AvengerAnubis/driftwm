@@ -200,8 +200,7 @@ impl DriftWm {
         // Restore the position now, before the client acks, so the animation has a
         // single target and travels the filled rect → restored rect as one leg.
         // Deferring it left the chase shrinking the window anchored at the filled
-        // rect's top-left, then jumping when the settle fired. Leaving fullscreen
-        // restores its saved location the same way.
+        // rect's top-left, then jumping when the settle fired.
         self.map_window(window.clone(), saved_pos, false);
 
         if saved_size == pre_exit_size {

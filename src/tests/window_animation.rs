@@ -848,10 +848,9 @@ fn conversion_drops_the_window_animation_entry() {
     }
 }
 
-/// Adoption leaves no window-animation entry (no open on the adopted window, and
-/// both involved ids' stale entries dropped, replaced by the fresh hold that
-/// keeps the adopted window filling the slot), and no render transient
-/// materializes headless — the crossfade counter stays 0.
+/// Adoption drops both stale window-animation entries and replaces them with a
+/// single hold on the adopted window's slot; no render transient materializes
+/// headless, so the crossfade counter stays 0.
 #[test]
 fn adoption_drops_entries_and_creates_no_render_transient() {
     let tmp = TempDir::new();
@@ -1062,13 +1061,10 @@ fn off_screen_animations_complete_instantly() {
 }
 
 /// Foot-family terminals unmap (null-buffer commit) before destroying their
-/// toplevel. That commit collapses the window's live geometry, so a close
-/// animation that sized itself from `window.geometry()` at teardown time got a
-/// zero-sized rect and silently dropped the fade. The pixels are captured in the
-/// pre-commit hook — while the rect is still readable — so the rect has to be
-/// recorded there too. This pins the hazard: live geometry is already gone by the
-/// time the destroy handler runs. (The snapshot itself is backend-gated, so the
-/// spawn can't be asserted headlessly.)
+/// toplevel, which collapses the window's live geometry — a close animation
+/// sized from `window.geometry()` at teardown got a zero-sized rect and
+/// silently dropped the fade. This pins that hazard directly, since the render
+/// path itself is backend-gated and can't be asserted headlessly.
 #[test]
 fn an_unmapped_window_no_longer_reports_its_geometry() {
     let mut f = Fixture::new();
@@ -1096,11 +1092,11 @@ fn an_unmapped_window_no_longer_reports_its_geometry() {
     );
 }
 
-/// Unfill animates as one leg from the filled rect to the restored rect, the way
-/// leaving fullscreen does. The restore position has to be applied up front: if
-/// only the size half is animated while the stage still holds the fill position,
-/// the window shrinks anchored at the fill rect's top-left and only jumps to its
-/// real position later, when the settle fires on the client's resized commit.
+/// Unfill animates as one leg from the filled rect to the restored rect. The
+/// restore position has to be applied up front: if the stage still holds the
+/// fill position while only the size animates, the window shrinks anchored at
+/// the fill rect's top-left and jumps to its real position only when the
+/// settle fires on the client's resized commit.
 #[test]
 fn unfill_animates_straight_to_the_restored_rect() {
     let mut f = Fixture::new();
@@ -1161,11 +1157,10 @@ fn unfill_animates_straight_to_the_restored_rect() {
     }
 }
 
-/// An adopted window must occupy the stand-in's slot from the first frame. The
-/// client is still committing buffers at whatever size it mapped with, so without
-/// a geometry entry holding the adopted rect it draws undersized underneath the
-/// fading stand-in chrome — a visible mismatch that reads as a flicker rather
-/// than a crossfade.
+/// An adopted window must occupy the stand-in's slot from the first frame,
+/// since the client is still committing buffers at its own mapped size until
+/// it acks the resize — without a geometry hold it draws undersized beneath
+/// the fading stand-in chrome, reading as a flicker rather than a crossfade.
 #[test]
 fn adoption_holds_the_adopted_rect_until_the_client_catches_up() {
     let tmp = TempDir::new();

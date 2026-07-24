@@ -480,13 +480,12 @@ impl DriftWm {
         }
         self.refresh_pointer_focus();
 
-        // Hold the adopted rect from the first frame. The client is still
-        // committing buffers at whatever size it mapped with and only resizes once
-        // it acks the configure the caller is about to send, so without this it
-        // draws undersized beneath the fading stand-in chrome — the mismatch reads
-        // as a flicker instead of a crossfade. Seeding from == target means the
-        // endpoint hold does the work: the slot is filled until the ack lands, then
-        // the chase bends to the real geometry.
+        // Hold the adopted rect from the first frame: the client is still
+        // committing buffers at whatever size it mapped with until it acks the
+        // configure the caller is about to send, so without this it draws
+        // undersized beneath the fading stand-in chrome — a flicker instead of a
+        // crossfade. Seeding the chase with from == target holds the slot until
+        // the ack lands, then it bends to the real geometry.
         self.begin_geometry_animation_seeded(
             window,
             Rectangle::new(adopt_pos.to_f64(), adopt_size.to_f64()),

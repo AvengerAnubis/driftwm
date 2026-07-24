@@ -957,10 +957,8 @@ pub(crate) fn process_blur_requests(
             // the frost on any HiDPI or zoomed output.
             Some(super::texel_src(win_size)),
             // Round, don't truncate: the destination has to invert back to the
-            // texture's own `win_size` extent, and truncating left the element up
-            // to a pixel short at fractional scales, squeezing the frost at one
-            // edge. Nothing else round-trips like this — the window and decoration
-            // elements are positioned in physical directly.
+            // texture's own `win_size` extent, and truncating left it up to a
+            // pixel short at fractional scales, squeezing the frost at one edge.
             Some(Size::from((
                 (win_size.w as f64 / output_scale).round() as i32,
                 (win_size.h as f64 / output_scale).round() as i32,
