@@ -466,7 +466,7 @@ pub(super) fn parse_effects_config(raw: EffectsFileConfig, errors: &mut Warnings
         animation_speed: unit_range_or_default(
             raw.animation_speed,
             "effects.animation_speed",
-            0.3,
+            0.5,
             errors,
         ),
         animation_scale: unit_range_or_default(

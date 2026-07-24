@@ -579,7 +579,7 @@ refresh rate of blur under an animated wallpaper (0-144, default 20; 0 = off, fr
 
 ### `animation_speed`
 
-Default: `0.3`
+Default: `0.5`
 
 window open/close/move/resize lerp factor (higher = faster; 1 = instant)
 

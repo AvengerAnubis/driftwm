@@ -1473,7 +1473,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        assert_eq!(zero.effects.animation_speed, 0.3);
+        assert_eq!(zero.effects.animation_speed, 0.5);
         assert!(
             warnings
                 .iter()

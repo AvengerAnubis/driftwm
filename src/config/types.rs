@@ -898,7 +898,7 @@ impl Default for EffectsConfig {
             blur_radius: 2,
             blur_strength: 1.1,
             animate_blur_fps: 20,
-            animation_speed: 0.3,
+            animation_speed: 0.5,
             animation_scale: 0.95,
         }
     }
