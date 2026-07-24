@@ -406,9 +406,15 @@ impl DriftWm {
         // animation entries for both involved ids: the discarded fresh entry and
         // the suspended entry the window inherits.
         if self.backend.is_some() {
+            // Read before the relaunch is cancelled and focus moves below, so the
+            // fade keeps the chrome the user was actually looking at.
+            let launching = self.is_suspended_launching(sid);
+            let focused = self.gated_suspended_focus() == Some(sid);
             self.adoption_fades.push(crate::render::AdoptionFade {
                 suspended: s.clone(),
                 loc: pos,
+                launching,
+                focused,
                 progress: 0.0,
             });
         }

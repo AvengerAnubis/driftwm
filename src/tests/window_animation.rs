@@ -23,6 +23,8 @@ use driftwm::stage::ElementId;
 use smithay::desktop::Window;
 use wayland_client::protocol::wl_surface::WlSurface as ClientSurface;
 
+use crate::state::SuspendedId;
+
 use super::client::ClientId;
 use super::real::TempDir;
 use super::{Fixture, map_window, window_by_app_id};
@@ -79,9 +81,13 @@ fn tick_until_settled(f: &mut Fixture) {
     panic!("window animations did not converge within {MAX_TICKS} ticks");
 }
 
-/// Relaunch a suspended "myapp" stand-in and adopt a freshly-mapped window into
-/// its slot via the activation-token path. Returns the returning client.
-fn adopt_relaunched(f: &mut Fixture, tmp: &TempDir) -> (ClientId, ClientSurface) {
+/// Put a suspended "myapp" stand-in into the pending-relaunch state (the
+/// "launching…" label) and hand back its id plus a client that has already
+/// presented the relaunch token — one sized commit away from adopting the slot.
+fn arrange_pending_relaunch(
+    f: &mut Fixture,
+    tmp: &TempDir,
+) -> (SuspendedId, ClientId, ClientSurface) {
     std::fs::write(
         tmp.path().join("myapp.desktop"),
         "[Desktop Entry]\nType=Application\nName=myapp\nExec=myapp\n",
@@ -110,6 +116,14 @@ fn adopt_relaunched(f: &mut Fixture, tmp: &TempDir) -> (ClientId, ClientSurface)
     f.client(cid).state.activation_token = Some(token);
     f.client(cid).activate(&surface);
     f.roundtrip(cid);
+
+    (sid, cid, surface)
+}
+
+/// Relaunch a suspended "myapp" stand-in and adopt a freshly-mapped window into
+/// its slot via the activation-token path. Returns the returning client.
+fn adopt_relaunched(f: &mut Fixture, tmp: &TempDir) -> (ClientId, ClientSurface) {
+    let (_sid, cid, surface) = arrange_pending_relaunch(f, tmp);
 
     // First sized commit adopts the stand-in's slot.
     let w = f.client(cid).window(&surface);
@@ -804,6 +818,43 @@ fn adoption_drops_entries_and_creates_no_render_transient() {
     );
     assert_eq!(counters["closing_snapshots"], 0);
     assert_eq!(counters["close_pixels"], 0);
+}
+
+/// The stand-in's "launching…" label state is live while the relaunch is pending
+/// and gone the moment the window adopts the slot. The adoption crossfade renders
+/// the departed stand-in's chrome, so it must capture this state when the fade is
+/// created — a live lookup at render time reads the post-adopt value, re-keys the
+/// cached label buffer, and the fade visibly swaps to the plain name before
+/// fading. This pins the ordering the capture depends on; the frozen pixels
+/// themselves are render-only (the fade is backend-gated, none exists headless).
+#[test]
+fn adoption_clears_the_launching_state_the_fade_captures() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+
+    let (sid, cid, surface) = arrange_pending_relaunch(&mut f, &tmp);
+    assert!(
+        f.state().is_suspended_launching(sid),
+        "the stand-in shows the launching label while the relaunch is pending"
+    );
+
+    // The adopting sized commit ends the relaunch.
+    let w = f.client(cid).window(&surface);
+    w.set_size(300, 200);
+    w.attach_new_buffer();
+    w.ack_last_and_commit();
+    f.double_roundtrip(cid);
+
+    assert!(
+        window_by_app_id(&mut f, "myapp").is_some(),
+        "the window adopted the slot"
+    );
+    assert!(
+        !f.state().is_suspended_launching(sid),
+        "adoption ended the relaunch, so a render-time lookup would read plain — \
+         the fade has to have captured the launching state at creation"
+    );
 }
 
 /// A client that dies without a clean unmap (crash) leaves an animation entry

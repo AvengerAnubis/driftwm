@@ -376,6 +376,13 @@ pub(crate) fn render_snapshots_for_output(
 pub(crate) struct AdoptionFade {
     pub suspended: Rc<SuspendedWindow>,
     pub loc: Point<i32, Logical>,
+    /// The stand-in's launching and focused states as displayed when the fade
+    /// was created. Frozen because adoption ends the pending relaunch and moves
+    /// focus off the stand-in: both feed the chrome cache keys, so resolving
+    /// them live would re-rasterize the label and re-color the bar/border, and
+    /// the fade would visibly change before fading out.
+    pub launching: bool,
+    pub focused: bool,
     pub progress: f64,
 }
 

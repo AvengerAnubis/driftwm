@@ -60,6 +60,16 @@ pub(super) struct WindowRenderAnimation {
     scale: Scale<f64>,
 }
 
+/// One adoption crossfade's render inputs, lifted out of `state` before the
+/// per-fade mutable borrows. `focused`/`launching` are frozen at fade creation.
+struct FadeRender {
+    suspended: std::rc::Rc<crate::state::SuspendedWindow>,
+    loc: Point<i32, Logical>,
+    focused: bool,
+    launching: bool,
+    alpha: f32,
+}
+
 impl WindowRenderAnimation {
     /// Apply the same affine the element decorator applies, so the frost rect
     /// follows the animated window instead of its (instant) logical position.
@@ -1349,26 +1359,33 @@ pub fn compose_frame(
             zoom,
             output_scale,
         );
-        let fades: Vec<(
-            std::rc::Rc<crate::state::SuspendedWindow>,
-            Point<i32, Logical>,
-            f32,
-        )> = state
+        // Collected before the per-fade mutable borrows of `state` below.
+        // `focused`/`launching` are the values frozen at fade creation, never a
+        // live lookup: adoption already ended the relaunch and moved focus, and
+        // the chrome caches key on both, so re-resolving them would re-rasterize
+        // the label and re-color the bar mid-fade.
+        let fades: Vec<FadeRender> = state
             .adoption_fades
             .iter()
             .filter(|f| visible_rect.overlaps(Rectangle::new(f.loc, f.suspended.size.get())))
-            .map(|f| (f.suspended.clone(), f.loc, f.alpha()))
+            .map(|f| FadeRender {
+                suspended: f.suspended.clone(),
+                loc: f.loc,
+                focused: f.focused,
+                launching: f.launching,
+                alpha: f.alpha(),
+            })
             .collect();
-        for (s, loc, alpha) in fades {
+        for fade in fades {
             let border_shader = state.render.border_shader.clone();
             let shadow_shader = state.render.shadow_shader.clone();
             suspended::push_suspended_element(
                 renderer,
-                &s,
-                loc,
-                false,
-                false,
-                alpha,
+                &fade.suspended,
+                fade.loc,
+                fade.focused,
+                fade.launching,
+                fade.alpha,
                 &state.config.decorations,
                 state.decoration_scale,
                 &mut state.decorations,
