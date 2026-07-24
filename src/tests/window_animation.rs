@@ -195,10 +195,14 @@ fn open_is_suppressed_for_an_adopted_window() {
     let adopted = window_by_app_id(&mut f, "myapp").expect("the window adopted the slot");
     let eid = element_id(&mut f, &adopted);
 
-    assert_eq!(
-        f.state().window_animations.len(),
-        0,
-        "an adopted window gets no open entry"
+    // The only entry is the geometry hold that keeps it filling the slot — an
+    // open entry would report no geometry rect and would fade the window in.
+    assert!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(eid)
+            .is_some(),
+        "an adopted window gets a geometry hold, not an open scale+fade"
     );
     let loc = f.state().stage.position_of(&adopted).unwrap().to_f64();
     let size = adopted.geometry().size.to_f64();
@@ -845,8 +849,9 @@ fn conversion_drops_the_window_animation_entry() {
 }
 
 /// Adoption leaves no window-animation entry (no open on the adopted window, and
-/// both involved ids' entries dropped), and no render transient materializes
-/// headless — the crossfade counter stays 0.
+/// both involved ids' stale entries dropped, replaced by the fresh hold that
+/// keeps the adopted window filling the slot), and no render transient
+/// materializes headless — the crossfade counter stays 0.
 #[test]
 fn adoption_drops_entries_and_creates_no_render_transient() {
     let tmp = TempDir::new();
@@ -859,10 +864,21 @@ fn adoption_drops_entries_and_creates_no_render_transient() {
         "the window adopted the slot"
     );
 
+    // Exactly one entry: the adopted window's slot hold. Neither involved id
+    // carried a stale chase across the replace.
+    let adopted = window_by_app_id(&mut f, "myapp").unwrap();
+    let eid = element_id(&mut f, &adopted);
     assert_eq!(
         f.state().window_animations.len(),
-        0,
-        "adoption left no window-animation entry"
+        1,
+        "adoption leaves only the adopted window's hold"
+    );
+    assert!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(eid)
+            .is_some(),
+        "and that entry belongs to the adopted window"
     );
     let counters = f.state().debug_counters();
     assert_eq!(
@@ -1143,4 +1159,58 @@ fn unfill_animates_straight_to_the_restored_rect() {
             "visual reached the target corner while still filled-size: {v:?}"
         );
     }
+}
+
+/// An adopted window must occupy the stand-in's slot from the first frame. The
+/// client is still committing buffers at whatever size it mapped with, so without
+/// a geometry entry holding the adopted rect it draws undersized underneath the
+/// fading stand-in chrome — a visible mismatch that reads as a flicker rather
+/// than a crossfade.
+#[test]
+fn adoption_holds_the_adopted_rect_until_the_client_catches_up() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+
+    let (_sid, cid, surface) = arrange_pending_relaunch(&mut f, &tmp);
+    // The stand-in is 600x400; the returning client maps at 300x200.
+    let w = f.client(cid).window(&surface);
+    w.set_size(300, 200);
+    w.attach_new_buffer();
+    w.ack_last_and_commit();
+    f.double_roundtrip(cid);
+
+    let adopted = window_by_app_id(&mut f, "myapp").expect("the window adopted the slot");
+    let eid = element_id(&mut f, &adopted);
+    let pos = f.state().stage.position_of(&adopted).unwrap();
+
+    let visual = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .expect("adoption seeded a geometry entry holding the slot");
+    assert!(
+        dist(visual.loc, pos.to_f64()) <= 0.5,
+        "the held rect sits at the adopted position ({visual:?} vs {pos:?})"
+    );
+    assert!(
+        (visual.size.w - 600.0).abs() <= 0.5 && (visual.size.h - 400.0).abs() <= 0.5,
+        "the window is drawn at the stand-in's size, not its own 300x200 ({visual:?})"
+    );
+
+    // The hold survives ticks while the request is outstanding, so the mismatch
+    // is never visible.
+    let base = Instant::now();
+    for _ in 0..30 {
+        f.state().tick_window_animations_at(TICK, base);
+    }
+    let held = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .expect("still holding while the client has not acked");
+    assert!(
+        (held.size.w - 600.0).abs() <= 0.5,
+        "still filling the slot ({held:?})"
+    );
 }
