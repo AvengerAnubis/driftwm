@@ -24,6 +24,19 @@ use super::{OutputRenderElements, WindowTransformElement, shaders};
 /// invisible; a tighter epsilon leaves a long, dead tail past the motion).
 const DONE_EPSILON: f64 = 0.01;
 
+/// Fraction of an effect's duration the alpha ramp occupies, front-loaded so the
+/// window is opaque for the rest of it: opening reaches full opacity by this much
+/// progress, closing stays opaque until this much remains. A linear ramp leaves
+/// the window dwelling translucent through most of the motion, which reads as a
+/// much stronger fade than intended. Shared by open, close, and both crossfades.
+pub(crate) const FADE_PORTION: f64 = 0.6;
+
+/// Alpha of a closing/departing effect at `progress`, front-loaded per
+/// [`FADE_PORTION`].
+fn fade_out_alpha(progress: f64) -> f32 {
+    (((1.0 - progress) / FADE_PORTION).clamp(0.0, 1.0)) as f32
+}
+
 /// One surface of a captured window tree: an Rc-cloned GL texture and where it
 /// sits relative to the window's render origin (logical, pre-scale).
 struct BakedSurface {
@@ -451,7 +464,7 @@ impl ClosingSnapshot {
         zoom: f64,
         output_scale: f64,
     ) -> Option<OutputRenderElements> {
-        let alpha = (1.0 - self.progress).clamp(0.0, 1.0) as f32;
+        let alpha = fade_out_alpha(self.progress);
         let close_scale = if self.alpha_only {
             1.0
         } else {
@@ -550,6 +563,6 @@ impl AdoptionFade {
     }
 
     pub fn alpha(&self) -> f32 {
-        (1.0 - self.progress).clamp(0.0, 1.0) as f32
+        fade_out_alpha(self.progress)
     }
 }

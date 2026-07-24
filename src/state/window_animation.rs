@@ -5,13 +5,15 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use driftwm::stage::ElementId;
 
-/// Progress-based effects (open) end when within this of 1.0. Deliberately
-/// larger than the camera's convergence epsilon: a tighter one leaves a long,
-/// invisible alpha tail well past the visible motion.
-const OPEN_DONE_EPSILON: f64 = 0.01;
-/// Geometry chase converges when the visual rect is within this many logical
-/// pixels of its live target (per axis, location and size).
-const GEOMETRY_EPSILON: f64 = 0.5;
+/// Every effect advances on normalized progress and ends when within this of
+/// 1.0. Deliberately larger than the camera's convergence epsilon: a tighter one
+/// leaves a long, invisible tail well past the visible motion. Because geometry
+/// rides the same scalar, its settle time is a fixed duration rather than growing
+/// with travel distance the way a distance-epsilon chase does.
+const PROGRESS_DONE_EPSILON: f64 = 0.01;
+/// A geometry target that moves by more than this many logical pixels (per axis,
+/// location or size) re-seeds the lerp instead of stretching the current leg.
+const TARGET_MOVED_EPSILON: f64 = 0.5;
 /// A client that never commits the requested size holds the stretched endpoint
 /// no longer than this after first reaching it.
 pub(crate) const MAX_ENDPOINT_HOLD: Duration = Duration::from_millis(500);
@@ -53,7 +55,14 @@ enum AnimationKind {
         progress: f64,
     },
     Geometry {
+        /// Last computed rect — what the renderer draws, and the seed for the
+        /// next leg when the target moves.
         visual: Rectangle<f64, Logical>,
+        /// Start of the current leg; the visual is `lerp(from, target, progress)`.
+        from: Rectangle<f64, Logical>,
+        /// The target the current leg aims at, so a moved target is detectable.
+        leg_target: Rectangle<f64, Logical>,
+        progress: f64,
         space: AnimSpace,
         requested_size: Option<Size<i32, Logical>>,
         /// Committed size last observed, so a commit that changes size to
@@ -127,6 +136,9 @@ impl WindowAnimations {
             kind:
                 AnimationKind::Geometry {
                     visual,
+                    from,
+                    leg_target,
+                    progress,
                     space: entry_space,
                     requested_size: entry_request,
                     role: entry_role,
@@ -138,6 +150,11 @@ impl WindowAnimations {
             if replace_visual || *entry_space != space {
                 *visual = seed;
             }
+            // A retarget always starts a fresh leg from wherever the visual is,
+            // so the new leg takes a full (distance-independent) duration.
+            *from = *visual;
+            *leg_target = *visual;
+            *progress = 0.0;
             *entry_space = space;
             *entry_request = requested_size;
             *entry_role = role;
@@ -150,6 +167,9 @@ impl WindowAnimations {
             WindowAnimation {
                 kind: AnimationKind::Geometry {
                     visual: seed,
+                    from: seed,
+                    leg_target: seed,
+                    progress: 0.0,
                     space,
                     requested_size,
                     last_committed_size: committed_size,
@@ -230,7 +250,9 @@ impl WindowAnimations {
                 AnimatedVisual {
                     loc,
                     size,
-                    alpha: p as f32,
+                    // Front-loaded so the window spends most of the animation
+                    // opaque and moving, not dwelling translucent.
+                    alpha: (p / crate::render::FADE_PORTION).min(1.0) as f32,
                 }
             }
             AnimationKind::Geometry { visual, .. } => AnimatedVisual {
@@ -290,10 +312,13 @@ impl WindowAnimations {
                     return false;
                 }
                 *progress += (1.0 - *progress) * frame_factor;
-                1.0 - *progress > OPEN_DONE_EPSILON
+                1.0 - *progress > PROGRESS_DONE_EPSILON
             }
             AnimationKind::Geometry {
                 visual,
+                from,
+                leg_target,
+                progress,
                 requested_size,
                 hold_deadline,
                 ..
@@ -301,25 +326,37 @@ impl WindowAnimations {
                 if !eligible {
                     return false;
                 }
-                let target_size = requested_size.map(|s| s.to_f64()).unwrap_or(live_size);
+                let target = Rectangle::new(
+                    target_loc,
+                    requested_size.map(|s| s.to_f64()).unwrap_or(live_size),
+                );
+                // A moved target (commit resolution, settle recenter, adopt move,
+                // deadline release) starts a fresh leg from where the visual is —
+                // continuous, and the new leg takes a full duration rather than
+                // teleporting by the target delta.
+                let moved = (target.loc.x - leg_target.loc.x).abs() > TARGET_MOVED_EPSILON
+                    || (target.loc.y - leg_target.loc.y).abs() > TARGET_MOVED_EPSILON
+                    || (target.size.w - leg_target.size.w).abs() > TARGET_MOVED_EPSILON
+                    || (target.size.h - leg_target.size.h).abs() > TARGET_MOVED_EPSILON;
+                if moved {
+                    *from = *visual;
+                    *leg_target = target;
+                    *progress = 0.0;
+                }
+                *progress += (1.0 - *progress) * frame_factor;
+                let p = progress.clamp(0.0, 1.0);
                 // Lerp to the result directly (never via a delta): a shrink would
-                // build a negative-component `Size`, which panics in debug. The
-                // lerp of two non-negative sizes with a factor in [0, 1] can't go
-                // negative, but clamp defensively against a dt-spike overshoot.
+                // build a negative-component `Size`, which panics in debug.
                 visual.loc = Point::from((
-                    visual.loc.x + (target_loc.x - visual.loc.x) * frame_factor,
-                    visual.loc.y + (target_loc.y - visual.loc.y) * frame_factor,
+                    from.loc.x + (target.loc.x - from.loc.x) * p,
+                    from.loc.y + (target.loc.y - from.loc.y) * p,
                 ));
                 visual.size = Size::from((
-                    (visual.size.w + (target_size.w - visual.size.w) * frame_factor).max(0.0),
-                    (visual.size.h + (target_size.h - visual.size.h) * frame_factor).max(0.0),
+                    (from.size.w + (target.size.w - from.size.w) * p).max(0.0),
+                    (from.size.h + (target.size.h - from.size.h) * p).max(0.0),
                 ));
 
-                let converged = (visual.loc.x - target_loc.x).abs() <= GEOMETRY_EPSILON
-                    && (visual.loc.y - target_loc.y).abs() <= GEOMETRY_EPSILON
-                    && (visual.size.w - target_size.w).abs() <= GEOMETRY_EPSILON
-                    && (visual.size.h - target_size.h).abs() <= GEOMETRY_EPSILON;
-                if !converged {
+                if 1.0 - *progress > PROGRESS_DONE_EPSILON {
                     return true;
                 }
                 if requested_size.is_none() {
@@ -327,9 +364,9 @@ impl WindowAnimations {
                 }
                 // Endpoint hold: pin the stretched (requested) rect until the
                 // client commits, or the deadline (anchored here, at
-                // endpoint-reach) releases it and the chase bends back to live.
-                visual.loc = target_loc;
-                visual.size = target_size;
+                // endpoint-reach) releases it — clearing the request moves the
+                // target, which re-seeds a final leg back to the live size.
+                *visual = target;
                 match hold_deadline {
                     Some(deadline) if now >= *deadline => {
                         *requested_size = None;

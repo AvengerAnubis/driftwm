@@ -72,9 +72,14 @@ fn element_id(f: &mut Fixture, window: &Window) -> ElementId {
 /// resolved requests, open) — an entry holding an outstanding request would spin
 /// to the panic, which is the point of `PAST_HOLD` elsewhere.
 fn tick_until_settled(f: &mut Fixture) {
-    for _ in 0..MAX_TICKS {
+    ticks_to_settle(f);
+}
+
+/// As [`tick_until_settled`], returning how many ticks convergence took.
+fn ticks_to_settle(f: &mut Fixture) -> usize {
+    for n in 0..MAX_TICKS {
         if !f.state().window_animations.is_active() {
-            return;
+            return n;
         }
         f.state().tick_window_animations(TICK);
     }
@@ -323,6 +328,54 @@ fn mid_flight_map_window_retargets_without_snapping() {
     );
 
     tick_until_settled(&mut f);
+}
+
+/// Geometry animations run on normalized progress, so their duration is a fixed
+/// number of ticks regardless of how far the window travels — and it matches the
+/// open animation's. A distance-epsilon chase instead grows a log-distance tail,
+/// which is what made fit/fill/fullscreen feel slower than open/close.
+#[test]
+fn geometry_settles_in_the_same_time_regardless_of_distance() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+
+    // The open animation's duration is the reference.
+    f.state()
+        .map_window(window.clone(), Point::from((100, 300)), false);
+    f.state().start_window_open_animation(&window);
+    let open_ticks = ticks_to_settle(&mut f);
+    assert!(open_ticks > 2, "the open animation should take real time");
+
+    // A short hop, then a hop ~60x longer. Both stay inside the viewport so the
+    // travelling visual never loses eligibility (which would end it instantly).
+    let mut move_ticks = Vec::new();
+    for (from, to) in [((100, 300), (120, 300)), ((100, 300), (1300, 300))] {
+        f.state()
+            .map_window(window.clone(), Point::from(from), false);
+        tick_until_settled(&mut f);
+        f.state().map_window(window.clone(), Point::from(to), false);
+        f.state()
+            .animate_window_move_from(&window, Point::from(from));
+        assert!(
+            f.state().window_animations.is_active(),
+            "the move started a chase"
+        );
+        move_ticks.push(ticks_to_settle(&mut f));
+    }
+
+    assert_eq!(
+        move_ticks[0], move_ticks[1],
+        "a 20px and a 1200px move must take the same number of ticks, got {move_ticks:?}"
+    );
+    assert!(
+        move_ticks[0].abs_diff(open_ticks) <= 2,
+        "geometry ({}) and open ({open_ticks}) should settle in the same time",
+        move_ticks[0],
+    );
 }
 
 /// A size request equal to the committed size is resolved at the start (never
