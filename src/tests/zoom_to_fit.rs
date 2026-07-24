@@ -134,3 +134,44 @@ fn a_second_press_returns_to_the_pre_fit_viewport() {
         "the toggle restores the pre-fit camera, got {camera:?} want {camera_before:?}"
     );
 }
+
+/// Fitting a window straight out of fullscreen must center it like any other
+/// fit. The exit only *sends* the smaller configure, so the client is still
+/// committing viewport-sized buffers when fit runs: deriving the fit camera from
+/// live geometry then centers the viewport on the middle of a fullscreen-sized
+/// rect, parking the real window up and left of centre (its bottom-right corner
+/// near the middle of the screen).
+#[test]
+fn fitting_straight_out_of_fullscreen_centers_the_window() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (600, 400));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+
+    f.state().enter_fullscreen(&window, Some(output.clone()));
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+
+    // Exit + fit back-to-back, exactly as `execute_action` does for a fit
+    // binding pressed while fullscreen.
+    f.state().exit_fullscreen_on(&output);
+    f.state().fit_window(&window);
+    settle(&mut f);
+    // Let the client catch up to the fit configure and drain any settle.
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    f.double_roundtrip(id);
+    settle(&mut f);
+
+    let usable = f.state().get_usable_area();
+    let camera = f.state().camera();
+    let center = f.state().window_visual_center(&window).unwrap();
+    let want_x = camera.x + usable.loc.x as f64 + usable.size.w as f64 / 2.0;
+    let want_y = camera.y + usable.loc.y as f64 + usable.size.h as f64 / 2.0;
+    assert!(
+        (center.x - want_x).abs() <= 2.0 && (center.y - want_y).abs() <= 2.0,
+        "fit window centre {center:?} should sit at the usable centre ({want_x}, {want_y})"
+    );
+}

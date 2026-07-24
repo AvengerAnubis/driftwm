@@ -53,7 +53,21 @@ impl DriftWm {
         ));
         let usable_center_x = usable.loc.x as f64 + usable.size.w as f64 / 2.0;
         let usable_center_y = usable.loc.y as f64 + usable.size.h as f64 / 2.0;
-        let visual_center = self.window_visual_center(window).unwrap_or_default();
+        // Center on the restore size rather than live geometry. A fit pressed
+        // while fullscreen runs immediately after the exit guard, and the exit
+        // only *sends* the smaller configure — live geometry still reports the
+        // viewport size, which would park the camera half a fullscreen away from
+        // the real window (the same round-trip staleness `fit_window` already
+        // avoids for the size it saves).
+        let centering_size = self
+            .stage
+            .restore_size(window)
+            .unwrap_or_else(|| window.geometry().size);
+        let visual_center = self
+            .stage
+            .position_of(window)
+            .map(|loc| super::visual_frame_center(loc, centering_size, bar as f64))
+            .unwrap_or_default();
         let target_camera = Point::from((
             visual_center.x - usable_center_x,
             visual_center.y - usable_center_y,
@@ -91,6 +105,12 @@ impl DriftWm {
             target_camera,
             visual_center: center,
         } = self.compute_fit_geometry(window);
+
+        // A fit establishes its own placement, so an exit recenter still owed
+        // from the fullscreen/fill exit that preceded it must not fire: it would
+        // land on the client's next resize and yank the fitted window back to the
+        // pre-exit center (`enter_fullscreen` drops it for the same reason).
+        self.pending_recenter.remove(&wl_surface.id());
 
         self.animate_window_geometry(window, target_size);
         window.enter_fit_configure(target_size);
