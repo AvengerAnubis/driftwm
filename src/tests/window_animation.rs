@@ -1079,3 +1079,68 @@ fn an_unmapped_window_no_longer_reports_its_geometry() {
          animation must use the rect captured at unmap, not this"
     );
 }
+
+/// Unfill animates as one leg from the filled rect to the restored rect, the way
+/// leaving fullscreen does. The restore position has to be applied up front: if
+/// only the size half is animated while the stage still holds the fill position,
+/// the window shrinks anchored at the fill rect's top-left and only jumps to its
+/// real position later, when the settle fires on the client's resized commit.
+#[test]
+fn unfill_animates_straight_to_the_restored_rect() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+    let restored_pos = f.state().stage.position_of(&window).unwrap();
+
+    // Fill, let the client catch up, and drain the fill animation.
+    f.state().fill_window(&window);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    f.double_roundtrip(id);
+    tick_until_settled(&mut f);
+    let fill_pos = f.state().stage.position_of(&window).unwrap();
+    let fill_size = window.geometry().size;
+    assert_ne!(fill_pos, restored_pos, "the fill moved the window");
+
+    f.state().unfill_window(&window);
+
+    assert_eq!(
+        f.state().stage.position_of(&window),
+        Some(restored_pos),
+        "unfill applies the restored position immediately, so the chase has one \
+         target — not the fill position with a deferred jump"
+    );
+    let from = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .expect("unfill started a geometry chase");
+    assert!(
+        dist(from.loc, fill_pos.to_f64()) <= 0.5,
+        "the chase starts at the filled rect ({from:?} vs {fill_pos:?})"
+    );
+
+    // Every intermediate visual sits strictly between the two rects; none lands on
+    // the target corner while still filled-size (the reported top-left jump).
+    for _ in 0..4 {
+        f.state().tick_window_animations(TICK);
+        let v = f
+            .state()
+            .window_animations
+            .geometry_visual_rect(eid)
+            .expect("still in flight");
+        let at_target_corner = dist(v.loc, restored_pos.to_f64()) <= 0.5;
+        let still_filled = (v.size.w - fill_size.w as f64).abs() <= 0.5;
+        assert!(
+            !(at_target_corner && still_filled),
+            "visual reached the target corner while still filled-size: {v:?}"
+        );
+    }
+}

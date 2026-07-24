@@ -197,11 +197,17 @@ impl DriftWm {
         self.animate_window_geometry(window, saved_size);
         self.send_size_configure(window, saved_size);
 
+        // Restore the position now, before the client acks, so the animation has a
+        // single target and travels the filled rect → restored rect as one leg.
+        // Deferring it left the chase shrinking the window anchored at the filled
+        // rect's top-left, then jumping when the settle fired. Leaving fullscreen
+        // restores its saved location the same way.
+        self.map_window(window.clone(), saved_pos, false);
+
         if saved_size == pre_exit_size {
             // The exit configure re-sends the size the client already has, so no
-            // commit with a changed size will arrive to trigger the recenter —
-            // restore the position immediately instead.
-            self.map_window(window.clone(), saved_pos, false);
+            // commit with a changed size will arrive to trigger the recenter — the
+            // position restored above is already final.
             self.refresh_stable_snap_rect(&StageWindow::Client(window.clone()));
         } else {
             self.pending_recenter.insert(
