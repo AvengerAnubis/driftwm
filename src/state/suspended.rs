@@ -521,6 +521,10 @@ impl DriftWm {
         let Some(s) = self.find_suspended(id) else {
             return;
         };
+        // Read before the cancel below clears it, so the fade freezes the label
+        // the user was looking at when they dismissed (the adoption fade captures
+        // its chrome state the same way, and for the same reason).
+        let launching = self.is_suspended_launching(id);
         // A dismiss mid-relaunch cancels it: a late token then finds no live
         // pending and falls through to normal placement.
         self.cancel_pending_relaunch(id);
@@ -545,7 +549,7 @@ impl DriftWm {
             self.standin_fades.push(crate::render::StandInFade {
                 suspended: s.clone(),
                 loc,
-                launching: self.is_suspended_launching(id),
+                launching,
                 focused,
                 shrink: self.config.effects.animation_scale,
                 progress: 0.0,
