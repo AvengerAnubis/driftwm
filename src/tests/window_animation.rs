@@ -538,6 +538,15 @@ fn a_commit_resolves_the_outstanding_request() {
     w.attach_new_buffer();
     w.ack_last_and_commit();
     f.double_roundtrip(id);
+    let counters = f.state().debug_counters();
+    assert_eq!(
+        counters["resize_crossfades"], 0,
+        "the crossfade the resolve arms is backend-gated — none headless"
+    );
+    assert_eq!(
+        counters["resize_captures"], 0,
+        "and the capture it would have consumed never existed"
+    );
     tick_until_settled(&mut f);
     assert_eq!(
         f.state().window_animations.len(),
@@ -580,6 +589,9 @@ fn a_client_chosen_size_also_resolves_the_request() {
     w.attach_new_buffer();
     w.commit();
     f.double_roundtrip(id);
+    let counters = f.state().debug_counters();
+    assert_eq!(counters["resize_crossfades"], 0, "backend-gated");
+    assert_eq!(counters["resize_captures"], 0);
     tick_until_settled(&mut f);
     assert_eq!(
         f.state().window_animations.len(),
@@ -851,6 +863,8 @@ fn conversion_drops_the_window_animation_entry() {
     assert_eq!(counters["closing_snapshots"], 0);
     assert_eq!(counters["standin_fades"], 0);
     assert_eq!(counters["close_pixels"], 0);
+    assert_eq!(counters["resize_captures"], 0);
+    assert_eq!(counters["resize_crossfades"], 0);
 
     // Tear the stand-in down for the baseline.
     let sid = f
@@ -901,6 +915,10 @@ fn adoption_drops_entries_and_creates_no_render_transient() {
     );
     assert_eq!(counters["closing_snapshots"], 0);
     assert_eq!(counters["close_pixels"], 0);
+    // Adoption replaces the stand-in in place, keeping its id: same hazard as
+    // conversion, so both involved ids' crossfade halves go at the replace.
+    assert_eq!(counters["resize_captures"], 0);
+    assert_eq!(counters["resize_crossfades"], 0);
 }
 
 /// The stand-in's "launching…" label state is live while the relaunch is pending
@@ -1705,6 +1723,141 @@ fn a_request_carrying_retarget_refreezes_and_bumps_the_generation() {
         f.state().window_animations.start_held(eid),
         "and it waits for the client's redraw of the new size"
     );
+    let counters = f.state().debug_counters();
+    assert_eq!(
+        counters["resize_captures"], 0,
+        "the superseded request's capture went with it"
+    );
+    assert_eq!(
+        counters["resize_crossfades"], 0,
+        "as did any overlay for the leg that no longer exists"
+    );
+}
+
+/// A freeze whose window scrolls off every viewport instant-completes, and the
+/// content captured for a crossfade that will never play goes with it. The
+/// client's eventual redraw then finds nothing to resolve.
+#[test]
+fn an_off_screen_freeze_drops_its_entry_and_its_capture() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.state().fit_window(&window);
+    let base = Instant::now();
+    f.state().tick_window_animations_at(TICK, base);
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the fit froze the window"
+    );
+
+    // Pan away: the frozen rect now intersects no viewport.
+    f.state().set_camera(Point::from((100_000.0, 100_000.0)));
+    f.state().update_output_from_camera();
+    f.state().tick_window_animations_at(TICK, base);
+
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "the frozen entry instant-completed off-screen"
+    );
+    let counters = f.state().debug_counters();
+    assert_eq!(
+        counters["resize_captures"], 0,
+        "nothing stays stashed for a leg that will never run"
+    );
+    assert_eq!(counters["resize_crossfades"], 0);
+
+    // The redraw the freeze was waiting for lands late: a no-op, not a revival.
+    let w = f.client(id).window(&surface);
+    w.set_size(1896, 1056);
+    w.attach_new_buffer();
+    w.ack_last_and_commit();
+    f.double_roundtrip(id);
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "the late commit revived nothing"
+    );
+    let counters = f.state().debug_counters();
+    assert_eq!(counters["resize_captures"], 0);
+    assert_eq!(counters["resize_crossfades"], 0);
+}
+
+/// Suspending a window mid-freeze converts it into a stand-in that inherits its
+/// `ElementId`, so both crossfade halves have to be dropped at the conversion:
+/// the dead-id sweep can never fire for an id that is still very much alive, and
+/// a surviving overlay would wear the dead client's pixels on the stand-in.
+#[test]
+fn conversion_mid_freeze_drops_the_crossfade_with_the_entry() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    // A stand-in only appears for an app the compositor can relaunch.
+    std::fs::write(
+        tmp.path().join("myapp.desktop"),
+        "[Desktop Entry]\nType=Application\nName=myapp\nExec=myapp\n",
+    )
+    .unwrap();
+    f.state().desktop_entry_cache = Some(DesktopEntryCache::new(vec![tmp.path().to_path_buf()]));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "myapp", (400, 300));
+    let window = window_by_app_id(&mut f, "myapp").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&window, serial);
+
+    f.state().fit_window(&window);
+    f.state().tick_window_animations_at(TICK, Instant::now());
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the fit froze the window"
+    );
+
+    f.state().execute_action(&Action::SuspendWindow);
+    f.client(id).window(&surface).destroy();
+    f.roundtrip(id);
+    f.dispatch();
+
+    assert!(
+        f.state()
+            .stage
+            .window_by_id(eid)
+            .is_some_and(|w| w.suspended().is_some()),
+        "the stand-in inherited the frozen window's id — no sweep will collect it"
+    );
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "the conversion dropped the frozen chase"
+    );
+    let counters = f.state().debug_counters();
+    assert_eq!(
+        counters["resize_captures"], 0,
+        "and the content captured for its crossfade"
+    );
+    assert_eq!(counters["resize_crossfades"], 0);
+
+    // Tear the stand-in down for the baseline.
+    let sid = f
+        .state()
+        .stage
+        .windows()
+        .find_map(|w| w.suspended().map(|s| s.id));
+    if let Some(sid) = sid {
+        f.state().dismiss_suspended(sid);
+    }
 }
 
 /// Adoption holds a slot rather than requesting a resize, so it is never frozen —
