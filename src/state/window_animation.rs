@@ -196,6 +196,13 @@ pub(crate) struct FrozenPicture {
     pub fullscreen_on: Option<FullscreenCover>,
     /// Drawn in the screen-pinned z-bucket, marked pinned on its title bar.
     pub pinned: bool,
+    /// There is no earlier picture at all: this entry took over an open fade
+    /// that had never been drawn, so the fields above describe nothing that was
+    /// ever on screen. Held until some later action stamps a real picture,
+    /// rather than clearing when the fade lands — the leg is the same one, and
+    /// switching the chrome hand-over on halfway through it would fade a border
+    /// ring and shadow in and back out over a window already two-thirds grown.
+    pub undrawn: bool,
 }
 
 /// One entry's output-scoping data: its id, and `Some((space, visual rect))`
@@ -261,10 +268,12 @@ enum AnimationKind {
         /// named entry need not exist yet when this is set) and dropped as soon
         /// as the wait no longer resolves.
         waits_for: Option<ElementId>,
-        /// Progress of an open fade this chase inherited from an open entry it
-        /// replaced before that entry was ever drawn — a window that maps
-        /// straight into fullscreen or fit fades in at its destination rect
-        /// rather than popping in at the placement rect.
+        /// Progress of an open fade this chase inherited from the open entry it
+        /// replaced, so a window still arriving keeps arriving instead of
+        /// popping to full opacity. One never drawn is also reseeded at the
+        /// destination rect, so a window that maps straight into fullscreen or
+        /// fit fades in there rather than at the placement rect it never showed
+        /// (see [`FrozenPicture::undrawn`] for what else that case changes).
         ///
         /// Its own accumulator, deliberately not an alias for `progress`: the
         /// `moved` branch re-seeds `progress` on every retarget, so folding the
@@ -585,19 +594,19 @@ impl WindowAnimations {
                     start_hold,
                     picture,
                     progress,
-                    open_fade,
                     ..
                 },
         }) = self.animations.get(&id)
         else {
             return None;
         };
-        // An open fade has no earlier picture to hand the chrome over *from* —
-        // the window has never been drawn. Ramping from the windowed default
-        // would fade a border ring and shadow in and back out over a fullscreen
-        // fade-in; the live answer (bare for fullscreen, chrome for a fit) is
-        // the whole truth here.
-        if open_fade.is_some() {
+        // A fade taken over before it was ever drawn has no earlier picture to
+        // hand the chrome over *from*, so the live answer (bare for fullscreen,
+        // chrome for a fit) is the whole truth. A fade the user has already seen
+        // is the opposite case: that picture wore chrome, at a rect this leg
+        // starts from, and blinking it out is exactly what the ramp exists to
+        // prevent.
+        if picture.undrawn {
             return None;
         }
         let from = if picture.fullscreen_on.is_some() {
@@ -967,8 +976,8 @@ impl WindowAnimations {
                 // is no picture to fade in over yet. Waiting on someone else's
                 // freeze must not, or a just-launched window is held completely
                 // invisible for the length of it. Cleared on landing so the
-                // chrome hand-over and the resize crossfade — both suppressed
-                // for a fade — come back for whatever leg follows on this entry.
+                // resize crossfade, suppressed while a window is still fading
+                // in, comes back for whatever leg follows on this entry.
                 if !frozen && let Some(fade) = *open_fade {
                     let fade = fade + (1.0 - fade) * frame_factor;
                     *open_fade = (1.0 - fade > PROGRESS_DONE_EPSILON).then_some(fade);

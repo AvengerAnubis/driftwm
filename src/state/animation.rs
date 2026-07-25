@@ -203,8 +203,9 @@ impl DriftWm {
         // comes from the surviving request, so it is exactly what the tick
         // converges to.
         let open_fade = self.window_animations.open_progress(id);
+        let open_unshown = self.window_animations.open_unshown(id);
         let seed = match final_loc {
-            Some(loc) if self.window_animations.open_unshown(id) => {
+            Some(loc) if open_unshown => {
                 Rectangle::new(loc.to_f64(), requested_size.unwrap_or(committed).to_f64())
             }
             _ => seed,
@@ -264,6 +265,7 @@ impl DriftWm {
                 // whatever pin change it rides, so live describes the picture.
                 _ => self.is_pinned(element),
             },
+            undrawn: open_unshown,
         };
         if carries_request {
             self.window_animations.clear_waits_for(id);

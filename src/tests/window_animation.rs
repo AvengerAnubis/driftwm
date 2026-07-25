@@ -4854,10 +4854,70 @@ fn a_window_fullscreened_mid_open_keeps_its_grow_leg() {
     f.state().exit_fullscreen_on(&output);
 }
 
+/// A fullscreen request landing on a window whose open fade has already been
+/// drawn must not strip its chrome. The freeze is holding a picture the user has
+/// seen — bar, border and shadow, at the pre-fullscreen rect — so the chrome
+/// leaves across the grow like any other fullscreen enter: in one direction, and
+/// without a step when the fade lands ahead of the leg.
+#[test]
+fn a_fullscreen_enter_over_a_drawn_open_fade_hands_its_chrome_over() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (400, 300));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+
+    for _ in 0..5 {
+        f.state().tick_window_animations(TICK);
+    }
+    let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let size = window.geometry().size.to_f64();
+    assert!(
+        f.state().animated_visual(eid, loc, size).alpha < 1.0,
+        "precondition: the window has been on screen, partway through its fade"
+    );
+
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    assert!(
+        f.state().window_animations.has_open_fade(eid),
+        "precondition: the fade rode onto the fullscreen chase"
+    );
+    assert_eq!(
+        chrome_alpha(&mut f, &window),
+        1.0,
+        "the frozen picture is the windowed one the user was shown, chrome and all"
+    );
+
+    super::adopt_last_configure(&mut f, id, &surface);
+    let mut previous = chrome_alpha(&mut f, &window);
+    for _ in 0..MAX_TICKS {
+        if !f.state().window_animations.is_active() {
+            break;
+        }
+        f.state().tick_window_animations(TICK);
+        let now = chrome_alpha(&mut f, &window);
+        assert!(
+            now <= previous + 1e-6,
+            "the chrome only ever leaves across the grow: it stepped back up from \
+             {previous} to {now}"
+        );
+        previous = now;
+    }
+    assert!(
+        f.state().chrome_fullscreen(&window),
+        "and is gone once the window fills the output"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+}
+
 /// An open fade is one arrival, not a permanent property of the entry carrying
-/// it: it clears the moment it lands. Both the chrome hand-over and the resize
-/// crossfade are suppressed while it runs, so an entry that kept it forever
-/// would deny them to every later leg on the same window.
+/// it: it clears the moment it lands. The resize crossfade is suppressed while
+/// it runs, so an entry that kept it forever would deny that to every later leg
+/// on the same window.
 #[test]
 fn an_inherited_open_fade_clears_when_it_lands() {
     let mut f = Fixture::new();
@@ -4924,10 +4984,10 @@ fn tick_until_fade_lands(f: &mut Fixture, id: ElementId) {
     }
 }
 
-/// Once the fade has landed, a leg starting on the same entry gets the chrome
-/// hand-over back: a fullscreen exit ramps the border, shadow and bar in from
-/// the bare fullscreen picture instead of popping them on at full opacity over
-/// a still-fullscreen-sized window.
+/// Once the fade has landed, the next leg on the same entry ramps the chrome
+/// from the picture that leg stamped: a fullscreen exit brings the border,
+/// shadow and bar in from the bare fullscreen picture instead of popping them on
+/// at full opacity over a still-fullscreen-sized window.
 #[test]
 fn a_landed_open_fade_hands_the_chrome_ramp_back_to_the_next_leg() {
     let mut f = Fixture::new();
