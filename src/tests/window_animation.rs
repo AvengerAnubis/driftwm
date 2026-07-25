@@ -830,6 +830,88 @@ fn output_is_visually_fullscreen_only_after_the_entry_finishes() {
     f.state().exit_fullscreen_on(&output);
 }
 
+/// The park to zoom 1 is fullscreen's business, not the scene's: while the
+/// entering window grows, everything behind it keeps rendering through the
+/// pre-fullscreen view, and only follows the park once the window covers the
+/// output — by which point the scene is culled outright and never has to travel.
+#[test]
+fn the_scene_keeps_its_view_until_the_fullscreen_entry_lands() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (800, 600));
+    reset_view(&mut f);
+    f.state().with_output_state(|os| {
+        os.camera = Point::from((40.0, 25.0));
+        os.zoom = 0.5;
+    });
+    f.state().update_output_from_camera();
+    let pre = f
+        .state()
+        .with_output_state(|os| (os.camera, os.zoom))
+        .unwrap();
+    assert_eq!(
+        f.state().world_view(&output),
+        pre,
+        "with nothing in flight the scene is on the live viewport"
+    );
+
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    let parked = f
+        .state()
+        .with_output_state(|os| (os.camera, os.zoom))
+        .unwrap();
+    assert_eq!(parked.1, 1.0, "the viewport parked at zoom 1");
+    assert_ne!(parked, pre, "the park moved the live viewport");
+    assert_eq!(
+        f.state().world_view(&output),
+        pre,
+        "the scene stays on the pre-fullscreen view for the whole entry"
+    );
+
+    super::adopt_last_configure(&mut f, id, &surface);
+    tick_until_settled(&mut f);
+    assert_eq!(
+        f.state().world_view(&output),
+        parked,
+        "the scene follows the park once the entry lands"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+}
+
+/// A frozen fullscreen picture claims to cover its output, and that claim culls
+/// everything underneath. It is only good while the output still shows the view
+/// the picture froze under: a fit dispatched out of fullscreen retargets the
+/// exit's entry (keeping its stamp) and pans the camera away, and holding the
+/// claim through that would leave the pan crossing black.
+#[test]
+fn a_camera_move_ends_a_frozen_fullscreen_cover() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (800, 600));
+    reset_view(&mut f);
+
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    tick_until_settled(&mut f);
+
+    f.state().exit_fullscreen_on(&output);
+    assert!(
+        f.state().is_output_visually_fullscreen(&output),
+        "the exit's freeze still holds the fullscreen picture on the output"
+    );
+
+    f.state().with_output_state(|os| os.camera.x += 300.0);
+    assert!(
+        !f.state().is_output_visually_fullscreen(&output),
+        "a picture the camera has panned away from covers nothing"
+    );
+}
+
 /// Reversing out of a fullscreen entry mid-flight seeds the exit from the entry's
 /// current visual, frame-converted back to the restored camera space — so the
 /// on-screen picture is continuous (no jump) and the fullscreen-entry role clears.
