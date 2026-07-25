@@ -22,7 +22,7 @@ use smithay::{
             protocol::{wl_output, wl_seat},
         },
     },
-    utils::{Logical, Point, Rectangle, Serial, Size},
+    utils::{Logical, Point, Rectangle, Serial},
     wayland::{
         compositor::with_states,
         input_method::InputMethodSeat,
@@ -664,22 +664,23 @@ impl DriftWm {
         self.output_showing_canvas_point(point).or(active)
     }
 
-    /// Canvas region `output` currently shows. Zoom falls back to 1.0, never
-    /// `Default`: `visible_canvas_rect` divides by it, and 0.0 overflows the
-    /// cast to `i32` (a debug-build panic).
-    fn parent_visible_canvas_rect(&self, output: Option<&Output>) -> Rectangle<i32, Logical> {
-        let Some(output) = output else {
-            return driftwm::canvas::visible_canvas_rect(Point::default(), Size::default(), 1.0);
-        };
+    /// Canvas region currently shown by the output that displays a parent
+    /// centered at `center`. `None` when there are no outputs at all: nothing
+    /// to constrain against, so callers leave the popup's geometry alone.
+    fn parent_visible_canvas_rect(
+        &self,
+        center: Point<f64, Logical>,
+    ) -> Option<Rectangle<i32, Logical>> {
+        let output = self.output_showing_parent(center)?;
         let (camera, zoom) = {
-            let os = output_state(output);
+            let os = output_state(&output);
             (os.camera, os.zoom)
         };
-        driftwm::canvas::visible_canvas_rect(
+        Some(driftwm::canvas::visible_canvas_rect(
             camera.to_i32_round(),
-            output_logical_size(output),
+            output_logical_size(&output),
             zoom,
-        )
+        ))
     }
 
     /// Apply xdg positioner constraint adjustments so the popup stays within
@@ -724,8 +725,9 @@ impl DriftWm {
                     window_loc.x as f64 + size.w as f64 / 2.0,
                     window_loc.y as f64 + size.h as f64 / 2.0,
                 ));
-                let output = self.output_showing_parent(center);
-                let mut visible = self.parent_visible_canvas_rect(output.as_ref());
+                let Some(mut visible) = self.parent_visible_canvas_rect(center) else {
+                    return;
+                };
                 visible.loc -= window_loc;
                 visible
             };
@@ -748,9 +750,10 @@ impl DriftWm {
                 widget_bbox.loc.x as f64 + widget_bbox.size.w as f64 / 2.0,
                 widget_bbox.loc.y as f64 + widget_bbox.size.h as f64 / 2.0,
             ));
-            let output = self.output_showing_parent(center);
             // Constrain to the visible canvas area (accounts for zoom)
-            let mut target = self.parent_visible_canvas_rect(output.as_ref());
+            let Some(mut target) = self.parent_visible_canvas_rect(center) else {
+                return;
+            };
             // Translate to layer-surface-relative coordinates
             target.loc -= pos;
             target.loc -= get_popup_toplevel_coords(popup);
