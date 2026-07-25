@@ -3838,10 +3838,10 @@ fn cancelling_the_entry_a_follower_waits_on_releases_it() {
     assert_eq!(f.state().window_animations.len(), 0);
 }
 
-/// The v1 regression: a second freeze landing on the entry a follower waits on
-/// (a second fit pressed inside the first one's budget) must not break the
-/// follower away early. `frozen_at` asks the live state fresh every tick, so a
-/// fresh freeze holds the follower exactly like the first one did.
+/// A second freeze landing on the entry a follower waits on (a second fit
+/// pressed inside the first one's budget) must not break the follower away
+/// early. `frozen_at` asks the live state fresh every tick, so a fresh freeze
+/// holds the follower exactly like the first one did.
 #[test]
 fn a_follower_stays_parked_through_a_second_freeze_on_the_entry_it_waits_on() {
     let mut f = Fixture::new();
@@ -4762,8 +4762,7 @@ fn an_open_into_fullscreen_fade_degrades_at_the_start_hold_deadline_if_never_ack
 /// 0) has been seen at its placement rect, so it keeps the ordinary grow leg
 /// from there rather than being put straight at the fullscreen rect. The fade
 /// itself rides along — an arrival interrupted partway is still an arrival, and
-/// dropping it would pop the window to full opacity. The regression guard for
-/// `open_unshown` gating the seed and nothing else.
+/// dropping it would pop the window to full opacity.
 #[test]
 fn a_window_fullscreened_mid_open_keeps_its_grow_leg() {
     let mut f = Fixture::new();
@@ -4946,9 +4945,9 @@ fn a_fullscreen_exit_mid_open_fade_stamps_no_cover() {
     );
 }
 
-/// The `89f8f02` guard applies to the open-into-fit shortcut too: the camera
-/// pan is parked behind the freeze rather than firing at the action, exactly as
-/// it does for a fit fired on an already-open window.
+/// A fit's camera pan is parked behind the freeze rather than firing at the
+/// action; this applies to the open-into-fit shortcut too, exactly as it does
+/// for a fit fired on an already-open window.
 #[test]
 fn an_open_into_fit_still_parks_its_camera_pan_until_the_ack() {
     let mut f = Fixture::new();

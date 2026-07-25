@@ -673,8 +673,7 @@ impl CompositorHandler for DriftWm {
                             // into fullscreen/fit runs both in this same commit,
                             // so this entry is never drawn: the geometry entry
                             // below takes its fade over and plays it at the
-                            // destination rect instead, and the window is never
-                            // shown at the placement rect it isn't keeping.
+                            // destination rect instead.
                             self.start_window_open_animation(&window);
 
                             if let Some(client_output) = self.pending_fullscreen.remove(&root) {
