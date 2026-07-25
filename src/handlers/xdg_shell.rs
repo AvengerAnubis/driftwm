@@ -293,7 +293,9 @@ impl XdgShellHandler for DriftWm {
                             .unwrap_or(parent),
                     )
                 })
-                .or_else(|| self.first_spatially_related_in_history(window));
+                .or_else(|| {
+                    self.first_spatially_related_in_history(&StageWindow::Client(window.clone()))
+                });
 
             // When auto-navigation is off, dropping an off-screen follow target
             // guarantees focus never lands somewhere the user can't see.
@@ -368,7 +370,7 @@ impl XdgShellHandler for DriftWm {
                                     loc.y as f64 + size.h as f64 / 2.0,
                                 ))
                             });
-                            self.nearest_visible_window_on(from, out, window)
+                            self.nearest_visible_window_on(from, out, Some(window))
                         }
                         (None, _) => None,
                     };

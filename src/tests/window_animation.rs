@@ -1491,3 +1491,120 @@ fn a_late_commit_after_the_deadline_clears_staleness() {
         );
     }
 }
+
+// Dismissing a focused stand-in follows the same tiers a real close does: the
+// spatially-related history entry first (panning to it only when
+// `auto_navigate_on_close` allows), else a visible window on the stand-in's home
+// output — never panning in that arm.
+
+/// Helper: a stand-in at `pos` plus a live client window at `win_pos`, camera at
+/// the origin with animations quiet. Returns the client's window handle.
+fn standin_and_window(
+    f: &mut Fixture,
+    pos: Point<i32, Logical>,
+    win_pos: Point<i32, Logical>,
+) -> (crate::state::SuspendedId, smithay::desktop::Window) {
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+    map_window(f, id, "live", (400, 300));
+    let window = window_by_app_id(f, "live").unwrap();
+    f.state().with_output_state(|os| {
+        os.camera = Point::from((0.0, 0.0));
+        os.zoom = 1.0;
+        os.camera_target = None;
+        os.zoom_target = None;
+        os.zoom_animation_anchor = None;
+        os.overview_return = None;
+        os.momentum.stop();
+    });
+    f.state().map_window(window.clone(), win_pos, false);
+    f.state().update_output_from_camera();
+    let sid = f
+        .state()
+        .insert_suspended_for_test(1, pos, Size::from((400, 300)), "myapp", "myapp");
+    f.state()
+        .set_suspended_focus(sid, smithay::utils::SERIAL_COUNTER.next_serial());
+    (sid, window)
+}
+
+/// (a) A focused stand-in clustered with a window that is scrolled off-screen:
+/// with auto-navigation on, the dismiss pans to it, exactly as a close would.
+#[test]
+fn dismissing_a_focused_stand_in_navigates_to_a_related_off_screen_window() {
+    let mut f = Fixture::new();
+    // The window sits immediately right of the stand-in (snapped: same cluster),
+    // and both are far from the camera so the follow target is off-screen.
+    let (sid, _window) =
+        standin_and_window(&mut f, Point::from((6000, 600)), Point::from((6412, 600)));
+    let before = f.state().camera();
+
+    f.state().dismiss_suspended(sid);
+
+    assert!(
+        f.state().camera_target().is_some(),
+        "a related off-screen follow target pans, like a close does"
+    );
+    let _ = before;
+}
+
+/// (b) No spatial relation and the only MRU window is off-screen: the dismiss
+/// must not pan. Focus falls to a visible window on the home output, or clears.
+#[test]
+fn dismissing_an_unrelated_focused_stand_in_does_not_pan() {
+    let mut f = Fixture::new();
+    // The window is nowhere near the stand-in, and off the stand-in's viewport.
+    let (sid, _window) =
+        standin_and_window(&mut f, Point::from((300, 300)), Point::from((40000, 40000)));
+    let before = f.state().camera();
+
+    f.state().dismiss_suspended(sid);
+
+    assert_eq!(f.state().camera(), before, "the no-follow arm never pans");
+    assert!(
+        f.state().camera_target().is_none(),
+        "and arms no camera animation"
+    );
+}
+
+/// (c) Same shape as (a) but with auto-navigation off: the off-screen follow is
+/// dropped rather than panned to.
+#[test]
+fn dismissing_with_auto_navigate_off_drops_an_off_screen_follow() {
+    let mut f = Fixture::with_config(
+        Config::from_toml("[navigation]\nauto_navigate_on_close = false\n").unwrap(),
+    );
+    let (sid, _window) =
+        standin_and_window(&mut f, Point::from((6000, 600)), Point::from((6412, 600)));
+    let before = f.state().camera();
+
+    f.state().dismiss_suspended(sid);
+
+    assert_eq!(
+        f.state().camera(),
+        before,
+        "auto_navigate_on_close = false never pans on dismiss"
+    );
+    assert!(f.state().camera_target().is_none());
+}
+
+/// (d) Dismissing a stand-in that never held focus leaves focus and camera alone.
+#[test]
+fn dismissing_an_unfocused_stand_in_changes_nothing() {
+    let mut f = Fixture::new();
+    let (sid, window) =
+        standin_and_window(&mut f, Point::from((6000, 600)), Point::from((6412, 600)));
+    // Hand focus to the live window, so the stand-in is not the focused element.
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&window, serial);
+    let before = f.state().camera();
+
+    f.state().dismiss_suspended(sid);
+
+    assert_eq!(f.state().camera(), before, "no camera change");
+    assert!(f.state().camera_target().is_none());
+    assert!(
+        f.state().focused_window().is_some(),
+        "the live window keeps focus"
+    );
+}

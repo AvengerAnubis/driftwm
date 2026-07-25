@@ -536,9 +536,29 @@ impl DriftWm {
         // live on the Rc, so retaining it here — before the cache evictions
         // below — keeps them renderable after the stage entry is gone. Skipped
         // when it would never be seen (headless, or off every drawable output).
+        let element = StageWindow::Suspended(s.clone());
+        // Resolved while the stand-in is still on the stage — its rect is what
+        // the cluster/overlap and nearest-visible queries below are relative to.
+        let (follow, home, center) = if was_focused {
+            let follow = self
+                .first_spatially_related_in_history(&element)
+                // An off-screen follow is only worth panning to when the user
+                // asked for that; otherwise focus must stay somewhere visible.
+                .filter(|t| self.config.auto_navigate_on_close || self.window_fully_in_viewport(t));
+            let home = self
+                .output_for_window(&element)
+                .or_else(|| self.active_output());
+            let center = self
+                .visual_frame_rect(&element)
+                .map(|r| Point::from(((r.x_low + r.x_high) / 2.0, (r.y_low + r.y_high) / 2.0)));
+            (follow, home, center)
+        } else {
+            (None, None, None)
+        };
+
         let rect = self
             .stage
-            .position_of(&StageWindow::Suspended(s.clone()))
+            .position_of(&element)
             .map(|loc| (loc, s.size.get()));
         if self.backend.is_some()
             && let Some((loc, size)) = rect
@@ -555,7 +575,7 @@ impl DriftWm {
             });
         }
 
-        self.stage.remove(&StageWindow::Suspended(s));
+        self.stage.remove(&element);
         self.decorations.remove(&DecorationKey::Suspended(id));
         self.render
             .border_cache
@@ -565,22 +585,40 @@ impl DriftWm {
             .remove(&DecorationKey::Suspended(id));
 
         if was_focused {
-            // Close-style follow: return to the most-recent live window, panning
-            // only if it isn't already fully on screen.
-            let follow = self
-                .stage
-                .focus_history()
-                .iter()
-                .filter_map(|w| w.client())
-                .find(|w| w.alive())
-                .cloned();
+            // The same tiers a real close uses, minus the parent tier: a stand-in
+            // is an app-level slot, so no xdg parent relation can exist. A
+            // spatially related history entry is followed (panning only when it
+            // isn't already fully visible); otherwise focus stays put — a visible
+            // MRU window on the stand-in's home output, else the nearest visible
+            // one to where it sat, else nothing. That arm never pans.
             let serial = SERIAL_COUNTER.next_serial();
             match follow {
                 Some(target) if self.window_fully_in_viewport(&target) => {
                     self.raise_and_focus(&target, serial);
                 }
                 Some(target) => self.navigate_to_window(&target, false),
-                None => self.set_window_focus(None, serial),
+                None => {
+                    let mru = self
+                        .stage
+                        .focus_history()
+                        .iter()
+                        .filter_map(|w| w.client())
+                        .find(|w| w.alive())
+                        .cloned();
+                    let target = match (home.as_ref(), mru) {
+                        (Some(out), Some(m)) if self.window_intersects_viewport_on(&m, out) => {
+                            Some(m)
+                        }
+                        (Some(out), _) => {
+                            center.and_then(|c| self.nearest_visible_window_on(c, out, None))
+                        }
+                        (None, _) => None,
+                    };
+                    match target {
+                        Some(target) => self.raise_and_focus(&target, serial),
+                        None => self.set_window_focus(None, serial),
+                    }
+                }
             }
         }
         // The suspended window may have sat under the cursor; re-target so a
