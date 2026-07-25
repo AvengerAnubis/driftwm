@@ -27,7 +27,7 @@ use driftwm::stage::ElementId;
 use smithay::desktop::Window;
 use wayland_client::protocol::wl_surface::WlSurface as ClientSurface;
 
-use crate::state::SuspendedId;
+use crate::state::{StageWindow, SuspendedId};
 
 use super::client::ClientId;
 use super::real::TempDir;
@@ -78,16 +78,20 @@ fn element_id(f: &mut Fixture, window: &Window) -> ElementId {
         .expect("window is stage-mapped")
 }
 
-/// Stage id of the stand-in for `sid` — the id an adoption hands on to the
-/// window that takes over its slot.
-fn standin_element_id(f: &mut Fixture, sid: SuspendedId) -> ElementId {
-    let element = f
-        .state()
+/// The stage element for the stand-in with id `sid`.
+fn standin_element(f: &mut Fixture, sid: SuspendedId) -> StageWindow {
+    f.state()
         .stage
         .windows()
         .find(|w| w.suspended().is_some_and(|s| s.id == sid))
         .cloned()
-        .expect("the stand-in is on the stage");
+        .expect("the stand-in is on the stage")
+}
+
+/// Stage id of the stand-in for `sid` — the id an adoption hands on to the
+/// window that takes over its slot.
+fn standin_element_id(f: &mut Fixture, sid: SuspendedId) -> ElementId {
+    let element = standin_element(f, sid);
     f.state().stage.id_of(&element).expect("and carries an id")
 }
 
@@ -3412,4 +3416,1371 @@ fn cancelling_a_frozen_fit_drops_its_parked_pan() {
         f.state().camera_target().is_none(),
         "no late pan lands for a freeze that was cancelled, not released"
     );
+}
+
+// A snapped fit's pushed cluster neighbours wait for the window pushing them:
+// `animate_element_move_from`'s `waits_for` parks a follower on whatever entry
+// it names until that entry's own start freeze releases, so the two move as one
+// instead of the neighbour vacating first.
+
+struct ParkedFollower {
+    pid: ClientId,
+    primary: Window,
+    peid: ElementId,
+    fid: ClientId,
+    fsurface: ClientSurface,
+    follower: Window,
+    feid: ElementId,
+    seed: Point<i32, Logical>,
+}
+
+/// Two real windows: a "primary" frozen on a big resize that never acks, and a
+/// "follower" pushed by that resize and parked on the primary's freeze via
+/// `waits_for` — the same shape `animate_cluster_shift` builds for a real
+/// cluster member, without needing a real fit to construct it.
+fn parked_follower(f: &mut Fixture) -> ParkedFollower {
+    f.add_output(1, (1920, 1080));
+
+    let pid = f.add_client();
+    map_window(f, pid, "primary", (400, 300));
+    let primary = window_by_app_id(f, "primary").unwrap();
+    reset_view(f);
+    f.state()
+        .map_window(primary.clone(), Point::from((400, 300)), false);
+    let peid = element_id(f, &primary);
+    tick_until_settled(f);
+
+    let fid = f.add_client();
+    let fsurface = map_window(f, fid, "follower", (400, 300));
+    let follower = window_by_app_id(f, "follower").unwrap();
+    f.state()
+        .map_window(follower.clone(), Point::from((900, 300)), false);
+    let feid = element_id(f, &follower);
+    tick_until_settled(f);
+
+    let committed = primary.geometry().size;
+    f.state().animate_window_geometry(
+        &primary,
+        Size::from((committed.w + 300, committed.h + 300)),
+        None,
+    );
+    assert!(
+        f.state().window_animations.start_held(peid),
+        "precondition: the primary's resize froze it"
+    );
+
+    let seed = f.state().stage.position_of(&follower).unwrap();
+    f.state()
+        .map_window(follower.clone(), Point::from((1200, 300)), false);
+    f.state()
+        .animate_window_move_from(&follower, seed, Some(peid));
+
+    ParkedFollower {
+        pid,
+        primary,
+        peid,
+        fid,
+        fsurface,
+        follower,
+        feid,
+        seed,
+    }
+}
+
+/// The real wiring: a snapped fit's own pushed neighbour stays at its pre-shift
+/// position while the primary is frozen on the fit's resize, and both converge
+/// once the primary's client acks it.
+#[test]
+fn a_snapped_fits_pushed_neighbour_waits_for_the_fitting_windows_freeze() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let gap = f.state().config.snap_gap as i32;
+    let id = f.add_client();
+
+    let psurface = map_window(&mut f, id, "primary", (300, 300));
+    let primary = window_by_app_id(&mut f, "primary").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(primary.clone(), Point::from((400, 300)), false);
+    let peid = element_id(&mut f, &primary);
+    tick_until_settled(&mut f);
+
+    map_window(&mut f, id, "neighbour", (300, 300));
+    let neighbour = window_by_app_id(&mut f, "neighbour").unwrap();
+    f.state()
+        .map_window(neighbour.clone(), Point::from((700 + gap, 300)), false);
+    let neid = element_id(&mut f, &neighbour);
+    tick_until_settled(&mut f);
+
+    let pre_shift = f.state().stage.position_of(&neighbour).unwrap();
+
+    f.state().fit_window_snapped(&primary);
+    assert!(
+        f.state().window_animations.start_held(peid),
+        "the fit's resize froze the primary"
+    );
+    for _ in 0..10 {
+        f.state().tick_window_animations(TICK);
+    }
+    assert_eq!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(neid)
+            .unwrap()
+            .loc,
+        pre_shift.to_f64(),
+        "the neighbour stays put while the primary is frozen"
+    );
+
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &psurface);
+    tick_until_settled(&mut f);
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "both the primary and the neighbour converged and pruned together"
+    );
+}
+
+/// The same wiring for an unfit: shrinking the primary back down pushes its
+/// neighbour back too, and the neighbour waits for that freeze exactly as it
+/// does for a fit.
+#[test]
+fn an_unfits_pushed_neighbour_waits_for_the_unfitting_windows_freeze() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let gap = f.state().config.snap_gap as i32;
+    let id = f.add_client();
+
+    let psurface = map_window(&mut f, id, "primary", (300, 300));
+    let primary = window_by_app_id(&mut f, "primary").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(primary.clone(), Point::from((400, 300)), false);
+    let peid = element_id(&mut f, &primary);
+    tick_until_settled(&mut f);
+
+    f.state().fit_window(&primary);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &psurface);
+    tick_until_settled(&mut f);
+    assert!(
+        f.state().stage.is_fit(&primary),
+        "precondition: the primary is fit"
+    );
+
+    let fit_pos = f.state().stage.position_of(&primary).unwrap();
+    let fit_size = primary.geometry().size;
+    map_window(&mut f, id, "neighbour", (300, 300));
+    let neighbour = window_by_app_id(&mut f, "neighbour").unwrap();
+    f.state().map_window(
+        neighbour.clone(),
+        Point::from((fit_pos.x + fit_size.w + gap, fit_pos.y)),
+        false,
+    );
+    let neid = element_id(&mut f, &neighbour);
+    tick_until_settled(&mut f);
+
+    let pre_shift = f.state().stage.position_of(&neighbour).unwrap();
+
+    f.state().unfit_window_snapped(&primary);
+    assert!(
+        f.state().window_animations.start_held(peid),
+        "the unfit's shrink froze the primary"
+    );
+    for _ in 0..10 {
+        f.state().tick_window_animations(TICK);
+    }
+    assert_eq!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(neid)
+            .unwrap()
+            .loc,
+        pre_shift.to_f64(),
+        "the neighbour waits through the unfit's freeze too"
+    );
+
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &psurface);
+    f.double_roundtrip(id);
+    tick_until_settled(&mut f);
+    assert_eq!(f.state().window_animations.len(), 0);
+}
+
+/// A client that never acks releases its followers at the same degrade
+/// deadline that releases it — the follower's wait resolves against
+/// `frozen_at`, which answers the same "still frozen after a tick at `now`"
+/// question for both.
+#[test]
+fn a_follower_releases_at_the_degrade_deadline_with_the_entry_it_waits_on() {
+    let mut f = Fixture::new();
+    let ParkedFollower {
+        peid, feid, seed, ..
+    } = parked_follower(&mut f);
+
+    let base = Instant::now();
+    for _ in 0..20 {
+        f.state().tick_window_animations_at(TICK, base);
+    }
+    assert!(f.state().window_animations.start_held(peid), "still frozen");
+    assert_eq!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(feid)
+            .unwrap()
+            .loc,
+        seed.to_f64(),
+        "still parked while the primary is frozen"
+    );
+
+    let past = base + PAST_HOLD;
+    f.state().tick_window_animations_at(TICK, past);
+    assert!(
+        !f.state().window_animations.start_held(peid),
+        "the primary's budget expired"
+    );
+    for _ in 0..5 {
+        f.state().tick_window_animations_at(TICK, past);
+    }
+    let after = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(feid)
+        .map_or(seed.to_f64(), |r| r.loc);
+    assert!(
+        after.x != seed.x as f64,
+        "the follower released the same tick the primary's freeze degraded"
+    );
+}
+
+/// A follower named against an entry that never freezes (a same-size request,
+/// which carries nothing worth waiting for) advances on the very first tick.
+#[test]
+fn a_follower_advances_immediately_when_the_named_entry_never_freezes() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+
+    let pid = f.add_client();
+    map_window(&mut f, pid, "primary", (400, 300));
+    let primary = window_by_app_id(&mut f, "primary").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(primary.clone(), Point::from((400, 300)), false);
+    let peid = element_id(&mut f, &primary);
+    tick_until_settled(&mut f);
+
+    let committed = primary.geometry().size;
+    f.state().animate_window_geometry(&primary, committed, None);
+    assert!(
+        !f.state().window_animations.start_held(peid),
+        "an equal-size request never freezes"
+    );
+
+    let fid = f.add_client();
+    map_window(&mut f, fid, "follower", (400, 300));
+    let follower = window_by_app_id(&mut f, "follower").unwrap();
+    f.state()
+        .map_window(follower.clone(), Point::from((900, 300)), false);
+    let feid = element_id(&mut f, &follower);
+    tick_until_settled(&mut f);
+
+    let seed = f.state().stage.position_of(&follower).unwrap();
+    f.state()
+        .map_window(follower.clone(), Point::from((1200, 300)), false);
+    f.state()
+        .animate_window_move_from(&follower, seed, Some(peid));
+
+    f.state().tick_window_animations(TICK);
+    let after = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(feid)
+        .unwrap()
+        .loc;
+    assert!(
+        after.x > seed.x as f64,
+        "nothing to wait on, so the follower moved on the very first tick"
+    );
+}
+
+/// Cancelling the entry a follower waits on releases the follower too: it has
+/// nothing left to resolve against, so it converges normally on the very next
+/// tick instead of stalling for the rest of the (now nonexistent) budget.
+#[test]
+fn cancelling_the_entry_a_follower_waits_on_releases_it() {
+    let mut f = Fixture::new();
+    let ParkedFollower { primary, .. } = parked_follower(&mut f);
+
+    f.state().cancel_window_animation(&primary);
+
+    // Would spin to a panic if the follower were still parked on an entry that
+    // no longer exists and can never resolve.
+    tick_until_settled(&mut f);
+    assert_eq!(f.state().window_animations.len(), 0);
+}
+
+/// The v1 regression: a second freeze landing on the entry a follower waits on
+/// (a second fit pressed inside the first one's budget) must not break the
+/// follower away early. `frozen_at` asks the live state fresh every tick, so a
+/// fresh freeze holds the follower exactly like the first one did.
+#[test]
+fn a_follower_stays_parked_through_a_second_freeze_on_the_entry_it_waits_on() {
+    let mut f = Fixture::new();
+    let ParkedFollower {
+        primary,
+        peid,
+        feid,
+        seed,
+        ..
+    } = parked_follower(&mut f);
+
+    for _ in 0..5 {
+        f.state().tick_window_animations(TICK);
+    }
+    assert_eq!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(feid)
+            .unwrap()
+            .loc,
+        seed.to_f64(),
+        "parked through the first freeze"
+    );
+
+    let committed = primary.geometry().size;
+    f.state().animate_window_geometry(
+        &primary,
+        Size::from((committed.w + 400, committed.h + 400)),
+        None,
+    );
+    assert!(
+        f.state().window_animations.start_held(peid),
+        "refroze on the second request"
+    );
+
+    for _ in 0..5 {
+        f.state().tick_window_animations(TICK);
+    }
+    assert_eq!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(feid)
+            .unwrap()
+            .loc,
+        seed.to_f64(),
+        "still parked — no early break-away across the second freeze"
+    );
+}
+
+/// A hide-to-tray remap writes an open entry straight over the primary's
+/// frozen geometry entry — there is no remove site to hang the cleanup on — and
+/// a follower waiting on it must not stall for the rest of the budget: the wait
+/// stops resolving the moment the named entry is no longer a frozen `Geometry`.
+#[test]
+fn a_follower_proceeds_once_start_open_overwrites_the_entry_it_waits_on() {
+    let mut f = Fixture::new();
+    let ParkedFollower {
+        primary,
+        feid,
+        seed,
+        ..
+    } = parked_follower(&mut f);
+
+    f.state().start_window_open_animation(&primary);
+    f.state().tick_window_animations(TICK);
+    let after = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(feid)
+        .unwrap()
+        .loc;
+    assert!(
+        after.x > seed.x as f64,
+        "the follower released the moment the wait stopped resolving"
+    );
+
+    tick_until_settled(&mut f);
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "both the remapped primary and the follower converged"
+    );
+}
+
+/// A client that dies without a clean unmap leaves its window animation entry
+/// for the dead-id sweep (`retain_ids`) to collect, not an eager `remove` — a
+/// follower waiting on it must not stall until that sweep runs.
+#[test]
+fn a_follower_proceeds_once_a_dead_clients_entry_is_swept() {
+    let mut f = Fixture::new();
+    let ParkedFollower {
+        pid, feid, seed, ..
+    } = parked_follower(&mut f);
+
+    f.kill_client(pid);
+    f.pump(3);
+
+    f.state().tick_window_animations(TICK);
+    let after = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(feid)
+        .unwrap()
+        .loc;
+    assert!(
+        after.x > seed.x as f64,
+        "the follower released once the dead primary's entry was swept"
+    );
+}
+
+/// A follower that acquires its own resize stops waiting on the primary — it is
+/// now a window others can be pushed by. Proven by resolving the follower's own
+/// freeze and letting it converge while the primary stays frozen forever
+/// (never acked): if the wait had survived, the follower could never move.
+#[test]
+fn a_follower_that_acquires_its_own_resize_stops_waiting() {
+    let mut f = Fixture::new();
+    let ParkedFollower {
+        peid,
+        fid,
+        fsurface,
+        follower,
+        feid,
+        seed,
+        ..
+    } = parked_follower(&mut f);
+
+    for _ in 0..5 {
+        f.state().tick_window_animations(TICK);
+    }
+    assert_eq!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(feid)
+            .unwrap()
+            .loc,
+        seed.to_f64(),
+        "parked before it has a request of its own"
+    );
+
+    let f_committed = follower.geometry().size;
+    let f_bigger = Size::from((f_committed.w + 300, f_committed.h + 300));
+    f.state().animate_window_geometry(&follower, f_bigger, None);
+    assert!(
+        f.state().window_animations.start_held(feid),
+        "now frozen on its own account"
+    );
+
+    let w = f.client(fid).window(&fsurface);
+    w.set_size(f_bigger.w as u16, f_bigger.h as u16);
+    w.attach_new_buffer();
+    w.ack_last_and_commit();
+    f.double_roundtrip(fid);
+
+    for _ in 0..200 {
+        f.state().tick_window_animations(TICK);
+    }
+    assert!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(feid)
+            .is_none(),
+        "converged on its own resize, independent of the primary"
+    );
+    assert!(
+        f.state().window_animations.start_held(peid),
+        "sanity: the primary is still frozen — it was never acked"
+    );
+}
+
+/// A follower nudged mid-wait (a position-only retarget naming no one) keeps
+/// waiting: only a request-carrying retarget on the follower's own entry clears
+/// `waits_for`, so the neighbour that is still being pushed keeps behaving like
+/// one.
+#[test]
+fn a_follower_nudged_mid_wait_stays_parked() {
+    let mut f = Fixture::new();
+    let ParkedFollower {
+        follower,
+        feid,
+        seed,
+        ..
+    } = parked_follower(&mut f);
+
+    for _ in 0..3 {
+        f.state().tick_window_animations(TICK);
+    }
+    assert_eq!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(feid)
+            .unwrap()
+            .loc,
+        seed.to_f64()
+    );
+
+    f.state()
+        .map_window(follower.clone(), Point::from((1500, 300)), false);
+    f.state().animate_window_move_from(&follower, seed, None);
+
+    for _ in 0..5 {
+        f.state().tick_window_animations(TICK);
+    }
+    assert_eq!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(feid)
+            .unwrap()
+            .loc,
+        seed.to_f64(),
+        "still parked — the nudge named nobody, so the existing wait survives"
+    );
+}
+
+// Suspended stand-ins are cluster members too: a stand-in's entry is
+// position-only and element-based rather than window-based, but it waits,
+// slides, culls and gets swept on dismiss exactly like a client member.
+
+/// A snapped fit slides a stand-in cluster member exactly like a client
+/// member — parked while the primary is frozen, then landing on the stage
+/// position once the shift's own freeze releases.
+#[test]
+fn a_snapped_fit_slides_a_stand_in_cluster_member_and_lands_it_at_its_stage_position() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let gap = f.state().config.snap_gap as i32;
+    let id = f.add_client();
+
+    let psurface = map_window(&mut f, id, "primary", (300, 300));
+    let primary = window_by_app_id(&mut f, "primary").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(primary.clone(), Point::from((400, 300)), false);
+    let peid = element_id(&mut f, &primary);
+    tick_until_settled(&mut f);
+
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((700 + gap, 300)),
+        Size::from((300, 300)),
+        "n",
+        "N",
+    );
+    let element = standin_element(&mut f, sid);
+    let neid = f.state().stage.id_of(&element).unwrap();
+    let pre_shift = f.state().stage.position_of(&element).unwrap();
+
+    f.state().fit_window_snapped(&primary);
+    assert!(
+        f.state().window_animations.start_held(peid),
+        "the fit froze the primary"
+    );
+    for _ in 0..10 {
+        f.state().tick_window_animations(TICK);
+    }
+    assert_eq!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(neid)
+            .unwrap()
+            .loc,
+        pre_shift.to_f64(),
+        "the stand-in waits for the primary's freeze exactly like a client member"
+    );
+
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &psurface);
+    tick_until_settled(&mut f);
+
+    let final_pos = f.state().stage.position_of(&element).unwrap();
+    assert_ne!(
+        final_pos, pre_shift,
+        "precondition: the shift actually pushed it"
+    );
+    assert!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(neid)
+            .is_none(),
+        "the slide converged and pruned, landing on the stage position"
+    );
+}
+
+/// A resize that also moves can put the live rect off every viewport while the
+/// picture an animation is still drawing stays on it — `window_cull_rect`
+/// merges the two so the frame composer never culls a stand-in mid-slide, same
+/// as it already does for a client.
+#[test]
+fn a_stand_ins_slide_is_not_culled_when_its_target_leaves_every_viewport() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    reset_view(&mut f);
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((200, 200)),
+        Size::from((300, 200)),
+        "n",
+        "N",
+    );
+    let element = standin_element(&mut f, sid);
+    let id = f.state().stage.id_of(&element).unwrap();
+
+    let seed = Point::from((200, 200));
+    f.state()
+        .map_window(element.clone(), Point::from((60000, 60000)), false);
+    f.state().animate_element_move_from(&element, seed, None);
+
+    let bbox = Rectangle::new(Point::from((60000, 60000)), Size::from((300, 200)));
+    assert!(
+        !f.state().canvas_rect_drawable(bbox),
+        "precondition: the live target has left every viewport"
+    );
+    let culled = f.state().window_cull_rect(Some(id), bbox);
+    assert!(
+        f.state().canvas_rect_drawable(culled),
+        "but the picture is still on screen mid-slide, so it must still be drawn"
+    );
+}
+
+/// Dismissing a stand-in mid-slide drops its window-animation entry
+/// immediately, rather than leaving the next tick's dead-id sweep to reap it a
+/// frame late.
+#[test]
+fn dismissing_a_stand_in_mid_slide_drops_its_entry() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    reset_view(&mut f);
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((200, 200)),
+        Size::from((300, 200)),
+        "n",
+        "N",
+    );
+    let element = standin_element(&mut f, sid);
+
+    f.state()
+        .map_window(element.clone(), Point::from((900, 200)), false);
+    f.state()
+        .animate_element_move_from(&element, Point::from((200, 200)), None);
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "the slide armed an entry"
+    );
+
+    f.state().dismiss_suspended(sid);
+
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "dismiss purged the entry, not just the stage slot"
+    );
+}
+
+/// A stand-in mid-interactive-drag is guarded exactly like a client window:
+/// the shared `interactive_move` set suppresses any animation start on it,
+/// whether it was armed by a move grab's install or a resize grab's — both
+/// arm the same set.
+#[test]
+fn no_entry_starts_on_a_stand_in_under_an_interactive_grab() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    reset_view(&mut f);
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((200, 200)),
+        Size::from((300, 200)),
+        "n",
+        "N",
+    );
+    let element = standin_element(&mut f, sid);
+
+    f.state().arm_interactive_move(&sid);
+    f.state()
+        .map_window(element.clone(), Point::from((900, 200)), false);
+    f.state()
+        .animate_element_move_from(&element, Point::from((200, 200)), None);
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "the grab guard suppressed the start, same as it does for a client"
+    );
+    f.state().disarm_interactive_move(&sid);
+}
+
+// Pin/unpin animates the canvas <-> screen flip it makes to the on-screen rect,
+// instead of jumping it in one frame at zoom != 1.
+
+/// Pinning at zoom 0.5 draws the pre-toggle on-screen rect on the very first
+/// frame — a zero jump — and grows from there to the pin site at full size.
+#[test]
+fn pinning_at_zoom_half_grows_from_the_pre_toggle_rect_to_the_pin_site() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state().with_output_state(|os| os.zoom = 0.5);
+    f.state().update_output_from_camera();
+    tick_until_settled(&mut f);
+    let eid = element_id(&mut f, &window);
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&window, serial);
+
+    let (camera, zoom) = f
+        .state()
+        .with_output_state(|os| (os.camera, os.zoom))
+        .unwrap();
+    let canvas_loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let canvas_size = window.geometry().size.to_f64();
+    let pre_toggle = Rectangle::new(
+        Point::from((
+            (canvas_loc.x - camera.x) * zoom,
+            (canvas_loc.y - camera.y) * zoom,
+        )),
+        Size::from((canvas_size.w * zoom, canvas_size.h * zoom)),
+    );
+
+    f.state().execute_action(&Action::TogglePinToScreen);
+    assert!(f.state().is_pinned(&window), "the window pinned");
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "a pin entry carries no request, so it never freezes"
+    );
+    let first_frame = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .unwrap();
+    assert_eq!(
+        (first_frame.loc, first_frame.size),
+        (pre_toggle.loc, pre_toggle.size),
+        "the first frame after pinning draws exactly the pre-toggle on-screen rect"
+    );
+
+    tick_until_settled(&mut f);
+    assert!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(eid)
+            .is_none(),
+        "the entry converged on the pin site at full size and pruned"
+    );
+}
+
+/// Unpinning at zoom 0.5, in reverse: seeds at the pre-toggle rect expressed in
+/// canvas coordinates, and shrinks from there to the live canvas rect.
+#[test]
+fn unpinning_at_zoom_half_shrinks_from_the_pin_site_to_the_canvas_rect() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state().with_output_state(|os| os.zoom = 0.5);
+    f.state().update_output_from_camera();
+    tick_until_settled(&mut f);
+    let eid = element_id(&mut f, &window);
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&window, serial);
+
+    f.state().execute_action(&Action::TogglePinToScreen);
+    assert!(f.state().is_pinned(&window), "the window pinned");
+    tick_until_settled(&mut f);
+
+    let site = f.state().stage.pin_of(&window).cloned().unwrap();
+    let (camera, zoom) = f
+        .state()
+        .with_output_state(|os| (os.camera, os.zoom))
+        .unwrap();
+    let size = window.geometry().size.to_f64();
+    let pre_toggle = Rectangle::new(
+        Point::from((
+            camera.x + site.screen_pos.x as f64 / zoom,
+            camera.y + site.screen_pos.y as f64 / zoom,
+        )),
+        Size::from((size.w / zoom, size.h / zoom)),
+    );
+
+    f.state().execute_action(&Action::TogglePinToScreen);
+    assert!(!f.state().is_pinned(&window), "the window unpinned");
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "a pin entry carries no request, so it never freezes"
+    );
+    let first_frame = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .unwrap();
+    assert_eq!(
+        (first_frame.loc, first_frame.size),
+        (pre_toggle.loc, pre_toggle.size),
+        "the first frame after unpinning draws the pre-toggle rect in canvas space"
+    );
+
+    tick_until_settled(&mut f);
+    assert!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(eid)
+            .is_none(),
+        "the entry converged on the live canvas rect at full size and pruned"
+    );
+}
+
+/// At zoom 1 the pin site and the pre-toggle canvas rect coincide exactly, so
+/// the toggle is visually a no-op — no special-cased skip, just seed == target.
+#[test]
+fn pin_toggle_at_zoom_one_is_visually_a_no_op() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    tick_until_settled(&mut f);
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&window, serial);
+
+    let canvas_loc = f.state().stage.position_of(&window).unwrap().to_f64();
+
+    f.state().execute_action(&Action::TogglePinToScreen);
+    assert!(f.state().is_pinned(&window), "the window pinned");
+    let site = f.state().stage.pin_of(&window).cloned().unwrap();
+    assert_eq!(
+        site.screen_pos.to_f64(),
+        canvas_loc,
+        "at zoom 1 the pin site is exactly the pre-toggle canvas position"
+    );
+
+    tick_until_settled(&mut f);
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "seed == target at zoom 1, so there was nothing to animate"
+    );
+}
+
+/// A pin toggled while the window is frozen mid-fit cancels the fit's frozen
+/// entry (`cancelling_a_frozen_fit_drops_its_parked_pan`) and starts a pin
+/// entry that carries no request of its own. When the fit's now-orphaned
+/// configure is acked late, the pin entry has nothing outstanding to resolve —
+/// it just reads the window's new (bigger) live size on its next tick, so the
+/// drawn size jumps to it outright rather than freezing a second time.
+#[test]
+fn a_late_fit_ack_after_a_pin_toggle_resizes_the_pin_entry_live() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.state().fit_window(&window);
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the fit froze the window"
+    );
+    let pre_fit_size = window.geometry().size;
+
+    f.state().execute_action(&Action::TogglePinToScreen);
+    assert!(f.state().is_pinned(&window), "the toggle pinned the window");
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "a pin entry carries no request, so it never freezes"
+    );
+
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    f.double_roundtrip(id);
+    assert_ne!(
+        window.geometry().size,
+        pre_fit_size,
+        "precondition: the late ack actually changed the live size"
+    );
+
+    tick_until_settled(&mut f);
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "the pin entry's target flipped to the new live size and converged \
+         there, rather than stalling on the pre-fit one"
+    );
+}
+
+// A window that opens straight into fullscreen (or fit) fades in already at
+// its destination rect, instead of popping in at the placement rect and then
+// growing — see `map_straight_into_fullscreen` / `map_straight_into_fit`.
+
+/// Map a window that requests fullscreen before its first commit — the
+/// deferred `pending_fullscreen` path a game or xwayland-satellite client
+/// takes. `first_size` is what the client's first (still un-fullscreened)
+/// buffer commits at; the compositor's own fullscreen configure follows in the
+/// same map commit, left un-acked. Returns the surface.
+fn map_straight_into_fullscreen(
+    f: &mut Fixture,
+    id: ClientId,
+    app_id: &str,
+    first_size: (u16, u16),
+) -> ClientSurface {
+    let window = f.client(id).create_window();
+    let surface = window.surface.clone();
+    window.set_app_id(app_id);
+    window.set_fullscreen(None);
+    window.commit();
+    f.roundtrip(id);
+
+    let w = f.client(id).window(&surface);
+    w.set_size(first_size.0, first_size.1);
+    w.attach_new_buffer();
+    w.ack_last_and_commit();
+    f.double_roundtrip(id);
+    surface
+}
+
+/// As [`map_straight_into_fullscreen`], but the client self-maximizes before
+/// its first commit instead — the deferred `pending_fit` path.
+fn map_straight_into_fit(
+    f: &mut Fixture,
+    id: ClientId,
+    app_id: &str,
+    first_size: (u16, u16),
+) -> ClientSurface {
+    let window = f.client(id).create_window();
+    let surface = window.surface.clone();
+    window.set_app_id(app_id);
+    window.set_maximized();
+    window.commit();
+    f.roundtrip(id);
+
+    let w = f.client(id).window(&surface);
+    w.set_size(first_size.0, first_size.1);
+    w.attach_new_buffer();
+    w.ack_last_and_commit();
+    f.double_roundtrip(id);
+    surface
+}
+
+/// The scene behind an open-into-fullscreen fade is never culled. A design
+/// that dropped the geometry entry in favour of a bare `fullscreen = true`
+/// stage flag would report the output visually fullscreen from the instant the
+/// stage wrote membership — background freed, every other window culled —
+/// while the entering window itself drew at alpha 0 for the whole freeze.
+/// Extends `output_is_visually_fullscreen_only_after_the_entry_finishes` to the
+/// map-time path.
+#[test]
+fn a_window_that_opens_into_fullscreen_never_reports_the_output_visually_fullscreen_early() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_straight_into_fullscreen(&mut f, id, "fs", (400, 300));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    let eid = element_id(&mut f, &window);
+
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "frozen, waiting for the fullscreen-sized commit"
+    );
+    let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let size = window.geometry().size.to_f64();
+    assert_eq!(
+        f.state().animated_visual(eid, loc, size).alpha,
+        0.0,
+        "nothing is drawn while the fade waits"
+    );
+    assert!(
+        !f.state().is_output_visually_fullscreen(&output),
+        "the output is not visually fullscreen while the fade waits"
+    );
+
+    super::adopt_last_configure(&mut f, id, &surface);
+    assert!(
+        !f.state().is_output_visually_fullscreen(&output),
+        "nor right after the freeze releases, mid-fade"
+    );
+
+    tick_until_settled(&mut f);
+    assert!(
+        f.state().is_output_visually_fullscreen(&output),
+        "only once the fade lands"
+    );
+    let final_loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let final_size = window.geometry().size.to_f64();
+    assert_eq!(
+        f.state().animated_visual(eid, final_loc, final_size).alpha,
+        1.0,
+        "and it fully faded in"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+}
+
+/// As `the_scene_keeps_its_view_until_the_fullscreen_entry_lands`, for a window
+/// that maps straight into fullscreen: the pre-map scene keeps rendering behind
+/// the fade for the whole freeze, and only follows the zoom-1 park once the
+/// entry — by then covering the output — lands.
+#[test]
+fn the_scene_keeps_its_pre_map_view_through_an_open_into_fullscreen_fade() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    f.state().with_output_state(|os| {
+        os.camera = Point::from((40.0, 25.0));
+        os.zoom = 0.5;
+    });
+    f.state().update_output_from_camera();
+    let pre = f
+        .state()
+        .with_output_state(|os| (os.camera, os.zoom))
+        .unwrap();
+    assert_eq!(
+        f.state().world_view(&output),
+        pre,
+        "with nothing mapped yet the scene is on the live viewport"
+    );
+
+    let id = f.add_client();
+    let surface = map_straight_into_fullscreen(&mut f, id, "fs", (400, 300));
+
+    let parked = f
+        .state()
+        .with_output_state(|os| (os.camera, os.zoom))
+        .unwrap();
+    assert_eq!(parked.1, 1.0, "the viewport parked at zoom 1");
+    assert_ne!(parked, pre, "the park moved the live viewport");
+    assert_eq!(
+        f.state().world_view(&output),
+        pre,
+        "the scene stays on the pre-map view for the whole freeze"
+    );
+
+    super::adopt_last_configure(&mut f, id, &surface);
+    assert_eq!(
+        f.state().world_view(&output),
+        pre,
+        "and still, right as the fade starts running"
+    );
+    tick_until_settled(&mut f);
+    assert_eq!(
+        f.state().world_view(&output),
+        parked,
+        "the scene follows the park only once the entry lands"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+}
+
+/// No compositor chrome is drawn over an open-into-fullscreen fade: there was
+/// never a windowed picture to hand the border/shadow ramp over *from*, so
+/// `chrome_ramp` must stay bare for the whole leg instead of fading a ring in
+/// and back out around the growing window.
+#[test]
+fn no_chrome_is_drawn_over_an_open_into_fullscreen_fade() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_straight_into_fullscreen(&mut f, id, "fs", (400, 300));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+
+    assert_eq!(chrome_alpha(&mut f, &window), 0.0, "bare while frozen");
+
+    super::adopt_last_configure(&mut f, id, &surface);
+    for _ in 0..10 {
+        f.state().tick_window_animations(TICK);
+        assert_eq!(
+            chrome_alpha(&mut f, &window),
+            0.0,
+            "and bare through every tick of the fade — no ring or shadow ramp"
+        );
+    }
+    tick_until_settled(&mut f);
+    assert_eq!(chrome_alpha(&mut f, &window), 0.0, "and once it lands");
+
+    f.state().exit_fullscreen_on(&output);
+}
+
+/// A window that maps already at output size gets no freeze at all — the
+/// request equals what is already committed — so the fade runs immediately
+/// instead of sitting invisible for a resize that will never arrive.
+#[test]
+fn a_window_mapped_already_at_output_size_fades_in_without_freezing() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_straight_into_fullscreen(&mut f, id, "fs", (1920, 1080));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    let eid = element_id(&mut f, &window);
+
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "the request matched what was already committed, so nothing was worth \
+         freezing"
+    );
+    // Not held, so — unlike a frozen entry — this one actually advances.
+    f.state().tick_window_animations(TICK);
+    let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let size = window.geometry().size.to_f64();
+    assert!(
+        f.state().animated_visual(eid, loc, size).alpha > 0.0,
+        "the fade is already running rather than sitting invisible"
+    );
+
+    tick_until_settled(&mut f);
+    assert!(f.state().is_output_visually_fullscreen(&output));
+    f.state().exit_fullscreen_on(&output);
+}
+
+/// A client that self-maximizes during map takes the same shortcut for fit:
+/// frozen and invisible while the fade waits, seeded already at the fit rect
+/// (never the placement rect), then fully faded in once it lands.
+#[test]
+fn a_client_that_self_maximizes_during_map_fades_in_at_the_fit_rect() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_straight_into_fit(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    let eid = element_id(&mut f, &window);
+
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the fit's resize froze the window"
+    );
+    let seeded = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .unwrap();
+    let fit_loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    assert_eq!(
+        seeded.loc, fit_loc,
+        "seeded already at the fit's destination, not the placement rect"
+    );
+    let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let size = window.geometry().size.to_f64();
+    assert_eq!(
+        f.state().animated_visual(eid, loc, size).alpha,
+        0.0,
+        "nothing is drawn while the fade waits"
+    );
+
+    super::adopt_last_configure(&mut f, id, &surface);
+    tick_until_settled(&mut f);
+    assert!(f.state().stage.is_fit(&window));
+    let final_loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let final_size = window.geometry().size.to_f64();
+    let settled = f.state().animated_visual(eid, final_loc, final_size);
+    assert_eq!(settled.alpha, 1.0, "fully faded in");
+    assert_eq!(settled.loc, final_loc, "at the fit rect");
+}
+
+/// A client that never redraws still fades in eventually: the freeze degrades
+/// at `MAX_START_HOLD` and the leg starts running with stale (capped) content,
+/// same as any other compositor-initiated resize.
+#[test]
+fn an_open_into_fullscreen_fade_degrades_at_the_start_hold_deadline_if_never_acked() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_straight_into_fullscreen(&mut f, id, "fs", (400, 300));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    let eid = element_id(&mut f, &window);
+
+    let base = Instant::now();
+    for _ in 0..10 {
+        f.state().tick_window_animations_at(TICK, base);
+    }
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "still frozen, nothing acked"
+    );
+    let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let size = window.geometry().size.to_f64();
+    assert_eq!(
+        f.state().animated_visual(eid, loc, size).alpha,
+        0.0,
+        "still invisible"
+    );
+
+    let past = base + PAST_HOLD;
+    for _ in 0..30 {
+        f.state().tick_window_animations_at(TICK, past);
+    }
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "the budget expired"
+    );
+    assert!(
+        f.state().animated_visual(eid, loc, size).alpha > 0.0,
+        "the degrade let the fade start running with stale content"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+}
+
+/// A window fullscreened after its open fade has already started (progress >
+/// 0) is no longer "mapped this commit, never ticked" — it keeps the ordinary
+/// grow leg instead of taking the open-into-fullscreen shortcut. The regression
+/// guard for `open_unshown`.
+#[test]
+fn a_window_fullscreened_mid_open_keeps_its_grow_leg() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (400, 300));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+
+    for _ in 0..5 {
+        f.state().tick_window_animations(TICK);
+    }
+    let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let size = window.geometry().size.to_f64();
+    let mid_open = f.state().animated_visual(eid, loc, size);
+    assert!(
+        mid_open.alpha > 0.0 && mid_open.alpha < 1.0,
+        "precondition: partway through the open fade, not fresh off the map"
+    );
+
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    assert!(
+        !f.state().window_animations.has_open_fade(eid),
+        "a fade already in flight does not take the open-into-fullscreen shortcut"
+    );
+
+    super::adopt_last_configure(&mut f, id, &surface);
+    tick_until_settled(&mut f);
+    assert!(f.state().is_output_visually_fullscreen(&output));
+    f.state().exit_fullscreen_on(&output);
+}
+
+/// The `89f8f02` guard applies to the open-into-fit shortcut too: the camera
+/// pan is parked behind the freeze rather than firing at the action, exactly as
+/// it does for a fit fired on an already-open window.
+#[test]
+fn an_open_into_fit_still_parks_its_camera_pan_until_the_ack() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_straight_into_fit(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    let eid = element_id(&mut f, &window);
+
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the fit's resize froze the window"
+    );
+    assert!(
+        f.state().camera_target().is_none(),
+        "the pan is parked behind the freeze"
+    );
+
+    super::adopt_last_configure(&mut f, id, &surface);
+    f.state().tick_window_animations(TICK);
+    assert!(
+        f.state().camera_target().is_some(),
+        "the ack releases the parked pan"
+    );
+}
+
+/// The fade never seeds at the placement rect: the very first frame drawn for
+/// an open-into-fullscreen is already the fullscreen rect.
+#[test]
+fn an_open_into_fullscreen_fade_seeds_at_the_fullscreen_rect_not_the_placement_rect() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_straight_into_fullscreen(&mut f, id, "fs", (400, 300));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    let eid = element_id(&mut f, &window);
+
+    let camera = f.state().camera();
+    let viewport = crate::state::output_logical_size(&output).to_f64();
+    let seeded = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .unwrap();
+    assert_eq!(
+        (seeded.loc, seeded.size),
+        (camera, viewport),
+        "the very first frame is already the fullscreen rect"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+}
+
+/// Toggling fullscreen off before the client acks an open-into-fullscreen must
+/// not pop the window to full opacity: the exit's retarget carries the open
+/// fade over rather than clearing it, so a window that was never drawn stays
+/// that way through the reversal too.
+#[test]
+fn toggling_fullscreen_off_before_the_ack_does_not_pop_an_open_fade_to_full_opacity() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_straight_into_fullscreen(&mut f, id, "fs", (400, 300));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    let eid = element_id(&mut f, &window);
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "frozen, unacked"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+
+    assert!(
+        f.state().window_animations.has_open_fade(eid),
+        "the open fade survives the exit's retarget"
+    );
+    let visual = f
+        .state()
+        .animated_visual(eid, Point::from((0.0, 0.0)), Size::from((0.0, 0.0)));
+    assert!(
+        visual.alpha < 1.0,
+        "a window never drawn does not pop to full opacity mid-exit, got alpha \
+         {}",
+        visual.alpha
+    );
+}
+
+/// A window pinned to screen by rule at map time is unaffected by any of this:
+/// one ordinary open entry, no start freeze, at the pinned rect.
+#[test]
+fn a_window_pinned_to_screen_by_rule_opens_normally_with_no_hold() {
+    let mut f = Fixture::with_config(
+        Config::from_toml("[[window_rules]]\napp_id = \"pin\"\npinned_to_screen = true\n").unwrap(),
+    );
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    map_window(&mut f, id, "pin", (320, 240));
+    let window = window_by_app_id(&mut f, "pin").unwrap();
+    let eid = element_id(&mut f, &window);
+
+    assert_eq!(f.state().window_animations.len(), 1, "exactly one entry");
+    assert!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(eid)
+            .is_none(),
+        "an ordinary open entry, not a geometry chase"
+    );
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "no start freeze"
+    );
+
+    tick_until_settled(&mut f);
 }
