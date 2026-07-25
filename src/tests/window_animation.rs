@@ -1210,8 +1210,8 @@ fn adoption_holds_the_adopted_rect_until_the_client_catches_up() {
     );
 
     // And the content is actually stretched to fill it. A slot hold is the one
-    // case where a stale buffer must be magnified: capping it here renders the
-    // adopted window undersized at the slot's corner, the flicker this fixed.
+    // case where a stale buffer must be magnified, or the adopted window
+    // renders undersized at the slot's corner.
     let committed = adopted.geometry().size.to_f64();
     let v = f.state().animated_visual(eid, pos.to_f64(), committed);
     let (sx, sy) = crate::state::window_animation::content_scale(v.size, committed, v.cap_content);
@@ -1222,10 +1222,9 @@ fn adoption_holds_the_adopted_rect_until_the_client_catches_up() {
 }
 
 /// A fit, fill, or fullscreen grows the window's rect several times over before
-/// the client redraws. The rect is allowed to animate, but the stale buffer must
-/// not be magnified to meet it — stretching a 400x300 buffer across a fitted
-/// 1896x1056 rect renders the interface ~4.7x oversized for those frames, which
-/// is the "glimpse of a huge interface" this pins.
+/// the client redraws. The stale buffer must not be magnified to meet it —
+/// stretching a 400x300 buffer across a fitted 1896x1056 rect would render the
+/// interface ~4.7x oversized for those frames.
 #[test]
 fn a_growing_animation_never_magnifies_the_stale_buffer() {
     let mut f = Fixture::new();
@@ -1267,9 +1266,9 @@ fn a_growing_animation_never_magnifies_the_stale_buffer() {
 }
 
 /// Dismissing a stand-in still does its bookkeeping — off the stage, chrome
-/// caches evicted — and materializes no render transient headless, since the fade
-/// is backend-gated like every other one. The fade's own shape (alpha curve and
-/// shrink) is pinned by the unit tests on `StandInFade`, which need no renderer.
+/// caches evicted — and materializes no render transient headless, since the
+/// fade is backend-gated like every other one. Its own shape is pinned by the
+/// `StandInFade` unit tests, which need no renderer.
 #[test]
 fn dismissing_a_stand_in_leaves_no_render_transient_headless() {
     let mut f = Fixture::new();

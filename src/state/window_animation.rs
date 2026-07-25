@@ -36,13 +36,12 @@ pub(crate) struct AnimatedVisual {
 /// render path guessing from whether a request is outstanding.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ContentPolicy {
-    /// A live chase toward a size we just requested: cap the scale at 1. The rect
-    /// grows several times over before the client redraws, and magnifying the old
-    /// buffer to meet it renders the interface hugely oversized.
+    /// A live chase toward a size we just requested: cap the scale at 1 (see
+    /// [`content_scale`]).
     Cap,
     /// A seeded hold onto a rect the window has inherited (an adopted stand-in
-    /// slot): stretch to fill. Drawing this one at its committed size would leave
-    /// the window undersized in the corner of the slot, under the crossfade.
+    /// slot): stretch to fill, since drawing it at its committed size would
+    /// leave the window undersized in the corner of the slot.
     Stretch,
 }
 

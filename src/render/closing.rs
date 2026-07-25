@@ -592,10 +592,9 @@ pub(crate) struct StandInFade {
     /// the fade would visibly change before fading out.
     pub launching: bool,
     pub focused: bool,
-    /// Scale the chrome shrinks toward by the end of the fade. A dismiss is a
-    /// close, so it uses `effects.animation_scale`; the adoption crossfade is a
-    /// representation exchange and passes `1.0`, which makes
-    /// [`Self::shrink_scale`] exactly 1 and leaves its elements untransformed.
+    /// Scale the chrome shrinks toward by the end of the fade. A dismiss uses
+    /// `effects.animation_scale`; the adoption crossfade passes `1.0`, keeping
+    /// [`Self::shrink_scale`] exactly 1 so its elements stay untransformed.
     pub shrink: f64,
     pub progress: f64,
 }
@@ -678,7 +677,7 @@ mod standin_fade_tests {
 
     /// The adoption crossfade passes `1.0`, and it has to stay *exactly* 1 at
     /// every progress: any drift would wrap its chrome in a transform and change
-    /// what is a purely alpha-only exchange today.
+    /// what is a purely alpha-only exchange.
     #[test]
     fn an_unshrinking_fade_is_exactly_identity_throughout() {
         for p in [0.0, 0.25, 0.5, 0.75, 1.0] {

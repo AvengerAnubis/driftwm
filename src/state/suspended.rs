@@ -494,8 +494,8 @@ impl DriftWm {
             crate::state::window_animation::AnimSpace::Canvas,
             Some(adopt_size),
             crate::state::window_animation::GeometryRole::Normal,
-            // The window has inherited this slot, so fill it: capping here is what
-            // made the adopted window render undersized under the crossfade.
+            // The window has inherited this slot, so fill it: capping here would
+            // render it undersized in the corner of the slot under the crossfade.
             crate::state::window_animation::ContentPolicy::Stretch,
         );
 
@@ -522,8 +522,7 @@ impl DriftWm {
             return;
         };
         // Read before the cancel below clears it, so the fade freezes the label
-        // the user was looking at when they dismissed (the adoption fade captures
-        // its chrome state the same way, and for the same reason).
+        // the user was looking at when they dismissed.
         let launching = self.is_suspended_launching(id);
         // A dismiss mid-relaunch cancels it: a late token then finds no live
         // pending and falls through to normal placement.

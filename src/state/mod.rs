@@ -507,7 +507,8 @@ pub struct DriftWm {
     pub(crate) window_animations: window_animation::WindowAnimations,
     /// Flattened textures of closed windows, faded out after teardown.
     pub(crate) closing_snapshots: Vec<crate::render::ClosingSnapshot>,
-    /// Departing stand-ins fading over the window that adopted their slot.
+    /// Departing stand-in chrome fading out — over the window that adopted its
+    /// slot, or in place when the stand-in was dismissed.
     pub(crate) standin_fades: Vec<crate::render::StandInFade>,
     /// Content textures captured at unmap/teardown, keyed by root surface id,
     /// consumed when the close animation flattens.
