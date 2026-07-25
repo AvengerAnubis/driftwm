@@ -110,8 +110,9 @@ enum AnimationKind {
         /// We have configured a size the client has not committed yet, so its
         /// buffer does not match the rect being animated. A property of the
         /// buffer, not of the request: it outlives the hold deadline (which drops
-        /// the request without any commit having landed) and is cleared only by an
-        /// actual commit, so the release leg stays capped instead of popping.
+        /// the request without any commit having landed) and survives a
+        /// position-only retarget, so those legs stay capped instead of popping.
+        /// Only an actual commit clears it.
         buffer_stale: bool,
         content_policy: ContentPolicy,
         /// Committed size last observed, so a commit that changes size to
@@ -208,12 +209,20 @@ impl WindowAnimations {
             *leg_target = *visual;
             *progress = 0.0;
             *entry_space = space;
-            *entry_request = requested_size;
             *entry_role = role;
             *hold_deadline = None;
             *last_committed_size = committed_size;
-            *buffer_stale = requested_size.is_some();
-            *entry_policy = content_policy;
+            // A position-only retarget is the same hold, moving: it leaves the
+            // outstanding request, the buffer's staleness, and the content policy
+            // exactly as they were, so a nudged window mid-resize keeps holding
+            // (capped) and a nudged adopted window keeps filling its slot. Only a
+            // retarget that carries a size request restates them — a new request
+            // makes the buffer stale by definition and brings its own policy.
+            if requested_size.is_some() {
+                *entry_request = requested_size;
+                *buffer_stale = true;
+                *entry_policy = content_policy;
+            }
             return;
         }
         self.animations.insert(
@@ -343,6 +352,13 @@ impl WindowAnimations {
         }) = self.animations.get_mut(&id)
         {
             let Some(request) = *requested_size else {
+                // No request outstanding — but a commit that changes size is still
+                // the resolution arriving (late, after a deadline release dropped
+                // the request), so it clears staleness. A same-size redraw does
+                // not: the buffer still doesn't match the rect.
+                if committed_size != *last_committed_size {
+                    *buffer_stale = false;
+                }
                 *last_committed_size = committed_size;
                 return;
             };

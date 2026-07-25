@@ -1347,3 +1347,148 @@ fn the_hold_deadline_release_stays_capped() {
         );
     }
 }
+
+/// A position-only retarget (a nudge, a cluster shift) landing on an entry with
+/// an unacked grow must not cancel the pending resize's staleness: no commit has
+/// landed, so the bend-back leg still has to be capped, or the window pops to
+/// several times its size on the way.
+#[test]
+fn a_position_only_retarget_keeps_an_unacked_grow_capped() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    // A fit the client has not acked, driven partway.
+    f.state().fit_window(&window);
+    let base = Instant::now();
+    for _ in 0..4 {
+        f.state().tick_window_animations_at(TICK, base);
+    }
+
+    // Nudge it while that grow is still outstanding.
+    let from = f.state().stage.position_of(&window).unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((from.x + 40, from.y)), false);
+    f.state().animate_window_move_from(&window, from);
+
+    let committed = window.geometry().size.to_f64();
+    let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let v = f.state().animated_visual(eid, loc, committed);
+    assert!(
+        v.cap_content,
+        "the grow is still unacked, so the moving entry stays capped"
+    );
+    for _ in 0..8 {
+        f.state().tick_window_animations_at(TICK, base);
+        let v = f.state().animated_visual(eid, loc, committed);
+        let (sx, sy) =
+            crate::state::window_animation::content_scale(v.size, committed, v.cap_content);
+        assert!(
+            sx <= 1.0 && sy <= 1.0,
+            "capped throughout the moving leg (got {sx:.2}x)"
+        );
+    }
+}
+
+/// Sliding an adopted window keeps its slot hold: the same hold, moving. Taking
+/// the mover's policy would flip it to capped and snap the content down to the
+/// client's own size mid-slide.
+#[test]
+fn a_position_only_retarget_keeps_an_adopted_slot_stretching() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+
+    let (_sid, cid, surface) = arrange_pending_relaunch(&mut f, &tmp);
+    let w = f.client(cid).window(&surface);
+    w.set_size(300, 200);
+    w.attach_new_buffer();
+    w.ack_last_and_commit();
+    f.double_roundtrip(cid);
+
+    let adopted = window_by_app_id(&mut f, "myapp").expect("adopted the slot");
+    let eid = element_id(&mut f, &adopted);
+    let from = f.state().stage.position_of(&adopted).unwrap();
+
+    // Slide it while the slot hold is still outstanding.
+    f.state()
+        .map_window(adopted.clone(), Point::from((from.x + 40, from.y)), false);
+    f.state().animate_window_move_from(&adopted, from);
+
+    let committed = adopted.geometry().size.to_f64();
+    let loc = f.state().stage.position_of(&adopted).unwrap().to_f64();
+    let v = f.state().animated_visual(eid, loc, committed);
+    assert!(
+        !v.cap_content,
+        "an adopted slot keeps stretching while it slides"
+    );
+    // And it keeps filling it as the slide plays out — dropping the hold would
+    // bend the rect down to the client's own size instead.
+    let base = Instant::now();
+    for _ in 0..8 {
+        f.state().tick_window_animations_at(TICK, base);
+        let v = f
+            .state()
+            .window_animations
+            .geometry_visual_rect(eid)
+            .expect("the hold is still in flight");
+        assert!(
+            (v.size.w - 600.0).abs() <= 0.5 && (v.size.h - 400.0).abs() <= 0.5,
+            "the slot rect survives the slide ({v:?})"
+        );
+    }
+}
+
+/// A commit arriving after the hold deadline already dropped the request is still
+/// the resolution: it clears staleness, so the flag never outlives the buffer it
+/// describes.
+#[test]
+fn a_late_commit_after_the_deadline_clears_staleness() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.state().fit_window(&window);
+    let base = Instant::now();
+    for _ in 0..30 {
+        f.state().tick_window_animations_at(TICK, base);
+    }
+    // Release the hold without any commit having landed.
+    let past = base + crate::state::window_animation::MAX_ENDPOINT_HOLD + TICK;
+    f.state().tick_window_animations_at(TICK, past);
+    let committed = window.geometry().size.to_f64();
+    let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    assert!(
+        f.state().animated_visual(eid, loc, committed).cap_content,
+        "still stale right after the release — no commit yet"
+    );
+
+    // The client finally redraws at a new size.
+    let w = f.client(id).window(&surface);
+    w.set_size(900, 700);
+    w.attach_new_buffer();
+    w.ack_last_and_commit();
+    f.double_roundtrip(id);
+
+    if f.state().window_animations.is_active() {
+        let committed = window.geometry().size.to_f64();
+        assert!(
+            !f.state().animated_visual(eid, loc, committed).cap_content,
+            "the late commit resolved it, so staleness is cleared"
+        );
+    }
+}
