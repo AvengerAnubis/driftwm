@@ -109,9 +109,48 @@ fn map_popup(
     id: client::ClientId,
     parent: &wayland_client::protocol::wl_surface::WlSurface,
 ) -> wayland_client::protocol::wl_surface::WlSurface {
-    let popup = f.client(id).create_popup(parent);
-    let surface = popup.surface.clone();
-    popup.commit();
+    map_popup_with(f, id, parent, client::PopupProps::default())
+}
+
+/// [`map_popup`] with a custom positioner (see [`client::PopupProps`]).
+fn map_popup_with(
+    f: &mut Fixture,
+    id: client::ClientId,
+    parent: &wayland_client::protocol::wl_surface::WlSurface,
+    props: client::PopupProps,
+) -> wayland_client::protocol::wl_surface::WlSurface {
+    let surface = f
+        .client(id)
+        .create_popup_with(parent, props)
+        .surface
+        .clone();
+    settle_popup(f, id, surface)
+}
+
+/// [`map_popup_with`] for a popup parented to a layer surface rather than a
+/// toplevel (`zwlr_layer_surface_v1.get_popup`).
+fn map_layer_popup_with(
+    f: &mut Fixture,
+    id: client::ClientId,
+    parent: &wayland_client::protocol::wl_surface::WlSurface,
+    props: client::PopupProps,
+) -> wayland_client::protocol::wl_surface::WlSurface {
+    let surface = f
+        .client(id)
+        .create_layer_popup_with(parent, props)
+        .surface
+        .clone();
+    settle_popup(f, id, surface)
+}
+
+/// Drive a freshly created popup through its map ritual: initial commit,
+/// buffer, ack, settle.
+fn settle_popup(
+    f: &mut Fixture,
+    id: client::ClientId,
+    surface: wayland_client::protocol::wl_surface::WlSurface,
+) -> wayland_client::protocol::wl_surface::WlSurface {
+    f.client(id).popup(&surface).commit();
     f.roundtrip(id);
 
     let popup = f.client(id).popup(&surface);

@@ -39,7 +39,9 @@ use wayland_protocols::xdg::activation::v1::client::xdg_activation_token_v1::{
 };
 use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
 use wayland_protocols::xdg::shell::client::xdg_popup::{self, XdgPopup};
-use wayland_protocols::xdg::shell::client::xdg_positioner::XdgPositioner;
+use wayland_protocols::xdg::shell::client::xdg_positioner::{
+    Anchor, ConstraintAdjustment, Gravity, XdgPositioner,
+};
 use wayland_protocols::xdg::shell::client::xdg_surface::{self, XdgSurface};
 use wayland_protocols::xdg::shell::client::xdg_toplevel::{self, XdgToplevel};
 use wayland_protocols::xdg::shell::client::xdg_wm_base::{self, XdgWmBase};
@@ -233,6 +235,34 @@ pub struct LayerConfigureProps {
     pub exclusive_edge: Option<zwlr_layer_surface_v1::Anchor>,
 }
 
+/// Positioner state for `create_popup_with`. `Default` is a 200×100 popup
+/// whose 1×1 anchor rect sits at the parent's top-left corner with neither
+/// anchor nor gravity set, so the popup ends up *centered on* that corner.
+/// No constraint adjustment either — tests that need the unconstrain logic
+/// to move the popup must set `constraint_adjustment` explicitly.
+#[derive(Clone, Copy)]
+pub struct PopupProps {
+    pub size: (i32, i32),
+    pub anchor_rect: (i32, i32, i32, i32),
+    pub anchor: Anchor,
+    pub gravity: Gravity,
+    pub offset: (i32, i32),
+    pub constraint_adjustment: ConstraintAdjustment,
+}
+
+impl Default for PopupProps {
+    fn default() -> Self {
+        Self {
+            size: (200, 100),
+            anchor_rect: (0, 0, 1, 1),
+            anchor: Anchor::None,
+            gravity: Gravity::None,
+            offset: (0, 0),
+            constraint_adjustment: ConstraintAdjustment::empty(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct SyncData {
     pub done: AtomicBool,
@@ -368,11 +398,23 @@ impl Client {
         self.state.create_popup(parent)
     }
 
+    /// Create an xdg popup whose parent is the toplevel backing `parent`,
+    /// with a custom positioner (see [`PopupProps`]).
+    pub fn create_popup_with(&mut self, parent: &WlSurface, props: PopupProps) -> &mut Popup {
+        self.state.create_popup_with(parent, props)
+    }
+
     /// Create an xdg popup whose parent is the layer surface backing
     /// `parent` (`zwlr_layer_surface_v1.get_popup`, per protocol issued on an
     /// xdg_popup created with a null xdg parent).
     pub fn create_layer_popup(&mut self, parent: &WlSurface) -> &mut Popup {
         self.state.create_layer_popup(parent)
+    }
+
+    /// [`Client::create_layer_popup`] with a custom positioner (see
+    /// [`PopupProps`]).
+    pub fn create_layer_popup_with(&mut self, parent: &WlSurface, props: PopupProps) -> &mut Popup {
+        self.state.create_layer_popup_with(parent, props)
     }
 
     pub fn popup(&mut self, surface: &WlSurface) -> &mut Popup {
@@ -479,10 +521,26 @@ impl State {
             .unwrap()
     }
 
-    pub fn create_popup(&mut self, parent: &WlSurface) -> &mut Popup {
-        let compositor = self.compositor.as_ref().unwrap();
+    /// Build an xdg positioner from `props`. Only consumed by `get_popup`;
+    /// the caller destroys it right after.
+    fn build_positioner(&self, props: PopupProps) -> XdgPositioner {
         let xdg_wm_base = self.xdg_wm_base.as_ref().unwrap();
+        let positioner = xdg_wm_base.create_positioner(&self.qh, ());
+        positioner.set_size(props.size.0, props.size.1);
+        let (x, y, w, h) = props.anchor_rect;
+        positioner.set_anchor_rect(x, y, w, h);
+        positioner.set_anchor(props.anchor);
+        positioner.set_gravity(props.gravity);
+        positioner.set_constraint_adjustment(props.constraint_adjustment);
+        positioner.set_offset(props.offset.0, props.offset.1);
+        positioner
+    }
 
+    pub fn create_popup(&mut self, parent: &WlSurface) -> &mut Popup {
+        self.create_popup_with(parent, PopupProps::default())
+    }
+
+    pub fn create_popup_with(&mut self, parent: &WlSurface, props: PopupProps) -> &mut Popup {
         let parent_xdg = self
             .windows
             .iter()
@@ -491,12 +549,10 @@ impl State {
             .xdg_surface
             .clone();
 
-        // The positioner is only consumed by get_popup, so destroy it right
-        // after. Anchor rect must be non-empty; size drives the popup geometry.
-        let positioner = xdg_wm_base.create_positioner(&self.qh, ());
-        positioner.set_size(200, 100);
-        positioner.set_anchor_rect(0, 0, 1, 1);
+        let positioner = self.build_positioner(props);
 
+        let compositor = self.compositor.as_ref().unwrap();
+        let xdg_wm_base = self.xdg_wm_base.as_ref().unwrap();
         let surface = compositor.create_surface(&self.qh, ());
         let xdg_surface = xdg_wm_base.get_xdg_surface(&surface, &self.qh, ());
         let xdg_popup = xdg_surface.get_popup(Some(&parent_xdg), &positioner, &self.qh, ());
@@ -506,9 +562,10 @@ impl State {
     }
 
     pub fn create_layer_popup(&mut self, parent: &WlSurface) -> &mut Popup {
-        let compositor = self.compositor.as_ref().unwrap();
-        let xdg_wm_base = self.xdg_wm_base.as_ref().unwrap();
+        self.create_layer_popup_with(parent, PopupProps::default())
+    }
 
+    pub fn create_layer_popup_with(&mut self, parent: &WlSurface, props: PopupProps) -> &mut Popup {
         let parent_layer = self
             .layers
             .iter()
@@ -517,11 +574,10 @@ impl State {
             .layer_surface
             .clone();
 
-        // Anchor rect must be non-empty; size drives the popup geometry.
-        let positioner = xdg_wm_base.create_positioner(&self.qh, ());
-        positioner.set_size(200, 100);
-        positioner.set_anchor_rect(0, 0, 1, 1);
+        let positioner = self.build_positioner(props);
 
+        let compositor = self.compositor.as_ref().unwrap();
+        let xdg_wm_base = self.xdg_wm_base.as_ref().unwrap();
         let surface = compositor.create_surface(&self.qh, ());
         let xdg_surface = xdg_wm_base.get_xdg_surface(&surface, &self.qh, ());
         // xdg parent must be null: the layer surface assigns itself as parent

@@ -2,7 +2,8 @@ use std::cell::RefCell;
 
 use crate::grabs::{MoveGrab, ResizeGrab, ResizeState};
 use crate::state::{
-    ClusterMember, DriftWm, FocusTarget, PopupGrabState, StageWindow, output_state,
+    ClusterMember, DriftWm, FocusTarget, PopupGrabState, StageWindow, output_logical_size,
+    output_state,
 };
 use crate::surface_tree::focus_belongs_to_toplevel;
 use driftwm::window_ext::WindowExt;
@@ -13,6 +14,7 @@ use smithay::{
         find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output,
     },
     input::pointer::{CursorIcon, CursorImageStatus, Focus, GrabStartData},
+    output::Output,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
@@ -20,7 +22,7 @@ use smithay::{
             protocol::{wl_output, wl_seat},
         },
     },
-    utils::{Point, Rectangle, Serial},
+    utils::{Logical, Point, Rectangle, Serial, Size},
     wayland::{
         compositor::with_states,
         input_method::InputMethodSeat,
@@ -647,6 +649,39 @@ impl DriftWm {
         keyboard.current_focus().is_some_and(|f| &f.0 == root)
     }
 
+    /// Output a popup parent at `point` should be constrained against: the
+    /// active output when it shows the point, else any output that does, else
+    /// the active one. Popups are overwhelmingly pointer-triggered, and default
+    /// cameras make every viewport show the same canvas region, so preferring
+    /// the pointer's output avoids resolving by output registration order.
+    fn output_showing_parent(&self, point: Point<f64, Logical>) -> Option<Output> {
+        let active = self.active_output();
+        if let Some(output) = &active
+            && self.output_shows_canvas_point(output, point)
+        {
+            return active;
+        }
+        self.output_showing_canvas_point(point).or(active)
+    }
+
+    /// Canvas region `output` currently shows. Zoom falls back to 1.0, never
+    /// `Default`: `visible_canvas_rect` divides by it, and 0.0 overflows the
+    /// cast to `i32` (a debug-build panic).
+    fn parent_visible_canvas_rect(&self, output: Option<&Output>) -> Rectangle<i32, Logical> {
+        let Some(output) = output else {
+            return driftwm::canvas::visible_canvas_rect(Point::default(), Size::default(), 1.0);
+        };
+        let (camera, zoom) = {
+            let os = output_state(output);
+            (os.camera, os.zoom)
+        };
+        driftwm::canvas::visible_canvas_rect(
+            camera.to_i32_round(),
+            output_logical_size(output),
+            zoom,
+        )
+    }
+
     /// Apply xdg positioner constraint adjustments so the popup stays within
     /// the output bounds. Works for both xdg-toplevel and layer-shell parents.
     pub(crate) fn unconstrain_popup(&self, popup: &PopupKind) {
@@ -661,31 +696,39 @@ impl DriftWm {
         // The target rect for constraining, in parent-surface-relative coordinates.
         // We need to figure out where the root surface is on the output and express
         // the output bounds relative to the popup's toplevel.
-        let active_output = self.active_output();
         let target = if let Some(window) = self
             .stage
             .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&root))
         {
-            // Parent is an xdg window — target is the *visible canvas area* in
-            // window-relative coords. We must use visible_canvas_rect (not raw
-            // output_geo) because the screen is a (camera, zoom) viewport onto
-            // the canvas: when zoomed/panned, output_geo translated by window_loc
-            // describes a phantom screen far from the popup's anchor, and the
-            // positioner mis-flips the popup to "fit" it.
-            let window_loc = self.stage.position_of(window).unwrap_or_default();
-            let viewport_size = active_output
-                .as_ref()
-                .and_then(|o| self.space.output_geometry(o))
-                .map(|g| g.size)
-                .unwrap_or_default();
-
-            let mut target = driftwm::canvas::visible_canvas_rect(
-                self.camera().to_i32_round(),
-                viewport_size,
-                self.zoom(),
-            );
-            target.loc -= window_loc;
+            let mut target = if let Some(site) = self.stage.pin_of(window)
+                && let Some(pin_output) = self.output_by_name(&site.output)
+            {
+                // A pinned window is fixed to its output's screen space and
+                // renders at scale 1.0, so the target is the plain output rect
+                // relative to the pin site — no camera, no zoom. If the pin
+                // target is gone, fall through to the canvas path below.
+                let mut screen = Rectangle::from_size(output_logical_size(&pin_output));
+                screen.loc -= site.screen_pos;
+                screen
+            } else {
+                // Parent is an xdg window — target is the *visible canvas area* in
+                // window-relative coords. We must use visible_canvas_rect (not raw
+                // output_geo) because the screen is a (camera, zoom) viewport onto
+                // the canvas: when zoomed/panned, output_geo translated by window_loc
+                // describes a phantom screen far from the popup's anchor, and the
+                // positioner mis-flips the popup to "fit" it.
+                let window_loc = self.stage.position_of(window).unwrap_or_default();
+                let size = window.geometry().size;
+                let center = Point::from((
+                    window_loc.x as f64 + size.w as f64 / 2.0,
+                    window_loc.y as f64 + size.h as f64 / 2.0,
+                ));
+                let output = self.output_showing_parent(center);
+                let mut visible = self.parent_visible_canvas_rect(output.as_ref());
+                visible.loc -= window_loc;
+                visible
+            };
             target.loc -= get_popup_toplevel_coords(popup);
             target
         } else if let Some(cl) = self
@@ -694,25 +737,39 @@ impl DriftWm {
             .find(|cl| cl.surface.wl_surface() == &root)
             && let Some(pos) = cl.position
         {
-            // Parent is a canvas-positioned layer surface
-            let output_geo = active_output
-                .as_ref()
-                .and_then(|o| self.space.output_geometry(o))
-                .unwrap_or_default();
+            // Parent is a canvas-positioned layer surface. Resolve its output from
+            // the widget's centre, not its origin, so a widget whose top-left has
+            // scrolled off every viewport still resolves to the output showing it.
+            // Uses bbox() rather than bbox_with_popups(): the latter would fold this
+            // popup (and any open sibling) into the point deciding its own output.
+            let mut widget_bbox = cl.surface.bbox();
+            widget_bbox.loc += pos;
+            let center = Point::from((
+                widget_bbox.loc.x as f64 + widget_bbox.size.w as f64 / 2.0,
+                widget_bbox.loc.y as f64 + widget_bbox.size.h as f64 / 2.0,
+            ));
+            let output = self.output_showing_parent(center);
             // Constrain to the visible canvas area (accounts for zoom)
-            let viewport_size = output_geo.size;
-            let mut target = driftwm::canvas::visible_canvas_rect(
-                self.camera().to_i32_round(),
-                viewport_size,
-                self.zoom(),
-            );
+            let mut target = self.parent_visible_canvas_rect(output.as_ref());
             // Translate to layer-surface-relative coordinates
             target.loc -= pos;
             target.loc -= get_popup_toplevel_coords(popup);
             target
         } else {
-            // Parent is a layer surface — find it in the layer map
-            let output = self.active_output();
+            // Parent is a layer surface — find the output whose map holds it.
+            // The search takes one guard per output and drops it before the
+            // next; re-locking the *same* output's map (as the lookup below
+            // does) while a guard is still alive would deadlock.
+            let output = self
+                .space
+                .outputs()
+                .find(|o| {
+                    layer_map_for_output(o)
+                        .layers()
+                        .any(|l| l.wl_surface() == &root)
+                })
+                .cloned()
+                .or_else(|| self.active_output());
             let output = match output {
                 Some(o) => o,
                 None => return,

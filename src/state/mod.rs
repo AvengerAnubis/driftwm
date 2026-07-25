@@ -1886,19 +1886,34 @@ impl DriftWm {
             loc.x as f64 + size.w as f64 / 2.0,
             loc.y as f64 + size.h as f64 / 2.0,
         ));
-        let found = self
-            .space
+        self.output_showing_canvas_point(center)
+            .or_else(|| self.active_output())
+    }
+
+    /// True if `output`'s viewport currently shows the canvas point.
+    pub fn output_shows_canvas_point(&self, output: &Output, point: Point<f64, Logical>) -> bool {
+        let (camera, zoom) = {
+            let os = output_state(output);
+            (os.camera, os.zoom)
+        };
+        let visible = driftwm::canvas::visible_canvas_rect(
+            camera.to_i32_round(),
+            output_logical_size(output),
+            zoom,
+        );
+        visible.contains(Point::from((point.x as i32, point.y as i32)))
+    }
+
+    /// First output whose viewport shows the canvas point. Callers that have a
+    /// preferred output (the pointer's, say) should test it with
+    /// `output_shows_canvas_point` first: viewports overlap by default — every
+    /// output starts centered on the canvas origin — so the first match is
+    /// registration order, not proximity.
+    pub fn output_showing_canvas_point(&self, point: Point<f64, Logical>) -> Option<Output> {
+        self.space
             .outputs()
-            .find(|output| {
-                let os = output_state(output);
-                let size = output_logical_size(output);
-                let visible =
-                    driftwm::canvas::visible_canvas_rect(os.camera.to_i32_round(), size, os.zoom);
-                drop(os);
-                visible.contains(Point::from((center.x as i32, center.y as i32)))
-            })
-            .cloned();
-        found.or_else(|| self.active_output())
+            .find(|output| self.output_shows_canvas_point(output, point))
+            .cloned()
     }
 
     /// Bounding box of a mapped window in canvas coordinates: `window.bbox_with_popups()`

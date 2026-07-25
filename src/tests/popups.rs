@@ -2,11 +2,18 @@
 //! client: mapping/tracking, parent teardown, grab-serial handling, client
 //! crash reaping, and the serial gate on activation.
 
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1;
+use smithay::utils::Point;
+use wayland_protocols::xdg::shell::client::xdg_positioner::{
+    Anchor, ConstraintAdjustment, Gravity,
+};
+use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
+use crate::state::output_state;
+
+use super::client::PopupProps;
 use super::{
-    Fixture, config, first_popup_surface, keyboard_focus, map_popup, map_window, popups_tracked_on,
-    server_surface, window_by_app_id,
+    Fixture, config, first_popup_surface, keyboard_focus, map_layer_popup_with, map_popup,
+    map_popup_with, map_window, popups_tracked_on, server_surface, window_by_app_id,
 };
 
 #[test]
@@ -352,4 +359,308 @@ fn activation_without_serial_does_not_move_focus() {
         Some(requester_surface),
         "activation without a serial must not steal focus"
     );
+}
+
+/// A popup's constraint target is the *parent's* output, not the pointer's:
+/// with the parent visible only on output 2 while output 1 is active, sliding
+/// the popup back into bounds must use output 2's viewport. The anchor sits at
+/// the parent's own right edge and is pushed left until it's flush with
+/// output 2's right edge (window-relative: camera 5000 + 1280 + 2 padding -
+/// window x 6000 = 282, so 391 + 200 - 282 = 309px of slide, landing at
+/// x = 391 - 309 = 82). Constraining against output 1 instead would slide it
+/// thousands of pixels in the same direction, since output 1's viewport sits
+/// near the canvas origin, nowhere near the parent.
+#[test]
+fn popup_constrains_against_non_active_parent_output() {
+    let mut f = Fixture::new();
+    let out1 = f.add_output(1, (1920, 1080));
+    let out2 = f.add_output(2, (1280, 720));
+    // Move output 2 far from the canvas origin so its viewport can't overlap
+    // output 1's default (origin-centered) one.
+    output_state(&out2).camera = Point::from((5000.0, 5000.0));
+    f.state().focused_output = Some(out1.clone());
+
+    let id = f.add_client();
+    let parent = map_window(&mut f, id, "parent", (400, 300));
+    let window = window_by_app_id(&mut f, "parent").unwrap();
+    // Place the parent inside output 2's viewport, near its right edge.
+    f.state()
+        .stage
+        .set_position(&window, Point::from((6000, 5000)));
+
+    let popup_surface = map_popup_with(
+        &mut f,
+        id,
+        &parent,
+        PopupProps {
+            anchor_rect: (390, 140, 1, 1),
+            anchor: Anchor::Right,
+            gravity: Gravity::Right,
+            constraint_adjustment: ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        f.client(id).popup(&popup_surface).pending_configure.pos,
+        (82, 90),
+        "popup must slide against the parent's own output (2), not the active one (1)"
+    );
+
+    f.client(id).popup(&popup_surface).destroy();
+    f.double_roundtrip(id);
+}
+
+/// Same shape as above, but the parent's output is zoomed: output 2's visible
+/// canvas area shrinks to 642×362 (1280/2 + 2, 720/2 + 2), so the correct
+/// slide distance differs from the zoom-1 case, and still has nothing to do
+/// with output 1's un-zoomed viewport.
+#[test]
+fn popup_constrains_against_non_active_parent_output_zoomed() {
+    let mut f = Fixture::new();
+    let out1 = f.add_output(1, (1920, 1080));
+    let out2 = f.add_output(2, (1280, 720));
+    output_state(&out2).camera = Point::from((5000.0, 5000.0));
+    output_state(&out2).zoom = 2.0;
+    f.state().focused_output = Some(out1.clone());
+
+    let id = f.add_client();
+    let parent = map_window(&mut f, id, "parent", (400, 300));
+    let window = window_by_app_id(&mut f, "parent").unwrap();
+    f.state()
+        .stage
+        .set_position(&window, Point::from((5400, 5100)));
+
+    let popup_surface = map_popup_with(
+        &mut f,
+        id,
+        &parent,
+        PopupProps {
+            anchor_rect: (390, 140, 1, 1),
+            anchor: Anchor::Right,
+            gravity: Gravity::Right,
+            constraint_adjustment: ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY,
+            ..Default::default()
+        },
+    );
+
+    // Target right edge (window-relative): 5000 + 642 - 5400 = 242, so
+    // 391 + 200 - 242 = 349px of slide, landing at x = 391 - 349 = 42.
+    assert_eq!(
+        f.client(id).popup(&popup_surface).pending_configure.pos,
+        (42, 90),
+        "popup must slide against the parent's zoomed output (2), not the un-zoomed active one (1)"
+    );
+
+    f.client(id).popup(&popup_surface).destroy();
+    f.double_roundtrip(id);
+}
+
+/// The tie-break that makes "the parent's output" well-defined: with default
+/// cameras every viewport is centered on the canvas origin, so a parent sitting
+/// there is shown by *both* outputs and the answer can't come from scanning the
+/// output list. The active output wins — popups are pointer-triggered, and the
+/// pointer is on the active output. Resolving by a plain first-match instead
+/// would pick output 1 (registered first) and leave the popup unslid at x=600,
+/// hanging off the smaller active output.
+#[test]
+fn popup_prefers_the_active_output_when_viewports_overlap() {
+    let mut f = Fixture::new();
+    let out1 = f.add_output(1, (1920, 1080));
+    let out2 = f.add_output(2, (1280, 720));
+    // Cameras stay at their defaults: both viewports straddle the origin.
+    f.state().focused_output = Some(out2.clone());
+    assert_eq!(
+        f.state().space.outputs().next().map(|o| o.name()),
+        Some(out1.name()),
+        "precondition: output 1 comes first, so first-match and active-first disagree"
+    );
+
+    let id = f.add_client();
+    let parent = map_window(&mut f, id, "parent", (400, 300));
+    let window = window_by_app_id(&mut f, "parent").unwrap();
+    f.state().stage.set_position(&window, Point::from((0, 0)));
+
+    let popup_surface = map_popup_with(
+        &mut f,
+        id,
+        &parent,
+        PopupProps {
+            offset: (700, 0),
+            constraint_adjustment: ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY,
+            ..Default::default()
+        },
+    );
+
+    // Unconstrained the popup sits at (600, -50). Output 2's visible canvas
+    // rect is (-640, -360, 1282, 722), window-relative unchanged (the window is
+    // at the origin), so the popup's right edge overshoots by 800 - 642 = 158
+    // and slides back to x = 442. Output 1's rect reaches x = 962 and would not
+    // slide it at all.
+    assert_eq!(
+        f.client(id).popup(&popup_surface).pending_configure.pos,
+        (442, -50),
+        "overlapping viewports must be broken by the active output, not list order"
+    );
+
+    f.client(id).popup(&popup_surface).destroy();
+    f.double_roundtrip(id);
+}
+
+/// A screen-pinned parent constrains in screen space against its own pin
+/// output — never the canvas camera/zoom of whichever output is active. The
+/// pin output's zoom (2.0) is deliberately different from the active output's
+/// (1.0): a pinned window always renders at scale 1.0, so the correct slide
+/// distance doesn't depend on it at all, while constraining against the
+/// active output's (camera, zoom) viewport would.
+#[test]
+fn popup_on_pinned_parent_constrains_against_pin_output() {
+    let mut f = Fixture::with_config(config(
+        r#"
+[[window_rules]]
+app_id = "pin"
+pinned_to_screen = true
+size = [200, 150]
+"#,
+    ));
+    let out1 = f.add_output(1, (1920, 1080));
+    let out2 = f.add_output(2, (1280, 720));
+    output_state(&out2).zoom = 2.0;
+    // Pin binds to whichever output is active when the window maps.
+    f.state().focused_output = Some(out2.clone());
+
+    let id = f.add_client();
+    let parent = map_window(&mut f, id, "pin", (200, 150));
+    let window = window_by_app_id(&mut f, "pin").unwrap();
+    let site = f.state().stage.pin_of(&window).cloned().unwrap();
+    assert_eq!(site.output, out2.name(), "precondition: pinned to output 2");
+    // Centered on output 2: (1280/2 - 200/2, 720/2 - 150/2) = (540, 285).
+    assert_eq!(site.screen_pos, Point::from((540, 285)));
+
+    f.state().focused_output = Some(out1.clone());
+
+    let popup_surface = map_popup_with(
+        &mut f,
+        id,
+        &parent,
+        PopupProps {
+            offset: (700, 400),
+            constraint_adjustment: ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY,
+            ..Default::default()
+        },
+    );
+
+    // Unconstrained popup sits at (600, 350) (offset centered by the default
+    // 200×100 size). Output 2's screen rect, window-relative, is
+    // (-540, -285, 1280, 720): it clips the popup's right/bottom edges by
+    // (60, 15), landing at (540, 335).
+    assert_eq!(
+        f.client(id).popup(&popup_surface).pending_configure.pos,
+        (540, 335),
+        "popup must slide against the pin's own output (2) in screen space, not the active output (1)"
+    );
+
+    f.client(id).popup(&popup_surface).destroy();
+    f.double_roundtrip(id);
+}
+
+/// Regression guard: a popup that already fits inside its single output's
+/// viewport is left untouched even with slide adjustments enabled.
+#[test]
+fn popup_inside_single_output_viewport_is_not_slid() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    let parent = map_window(&mut f, id, "parent", (400, 300));
+
+    let popup_surface = map_popup_with(
+        &mut f,
+        id,
+        &parent,
+        PopupProps {
+            constraint_adjustment: ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY,
+            ..Default::default()
+        },
+    );
+
+    // Same unconstrained position as the default (no constraint_adjustment)
+    // positioner in `overhanging_popup_keeps_parent_hit_testable`.
+    assert_eq!(
+        f.client(id).popup(&popup_surface).pending_configure.pos,
+        (-100, -50),
+        "a popup that already fits must not be slid"
+    );
+
+    f.client(id).popup(&popup_surface).destroy();
+    f.double_roundtrip(id);
+}
+
+/// A popup parented to a screen-anchored layer surface constrains against the
+/// output whose layer map holds that layer, not the active one. Both halves of
+/// the target come from that output: its size, and the layer's arranged
+/// position inside it. Resolving to the active output instead finds the layer
+/// in no map at all, so its geometry silently defaults to the output origin and
+/// the target degrades to the whole (wrong-sized) screen.
+#[test]
+fn popup_on_layer_parent_constrains_against_the_layer_output() {
+    let mut f = Fixture::new();
+    let out1 = f.add_output(1, (1920, 1080));
+    let out2 = f.add_output(2, (1280, 720));
+    // Output 1 keeps the focus it took as the first-connected output.
+    assert_eq!(
+        f.state().active_output().map(|o| o.name()),
+        Some(out1.name()),
+        "precondition: the layer's output is not the active one"
+    );
+
+    let id = f.add_client();
+    f.double_roundtrip(id);
+    let out2_wl = f.client(id).output(&out2.name());
+
+    let layer = f
+        .client(id)
+        .create_layer(Some(&out2_wl), zwlr_layer_shell_v1::Layer::Top, "bar");
+    let layer_surface = layer.surface.clone();
+    // Anchored bottom-right so the arranged position is nowhere near the
+    // origin a missing layer-map lookup would fall back to.
+    layer.set_configure_props(super::client::LayerConfigureProps {
+        size: Some((200, 150)),
+        anchor: Some(zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Right),
+        ..Default::default()
+    });
+    layer.commit();
+    f.roundtrip(id);
+
+    let layer = f.client(id).layer(&layer_surface);
+    layer.set_size(200, 150);
+    layer.attach_new_buffer();
+    layer.ack_last_and_commit();
+    f.double_roundtrip(id);
+
+    let popup_surface = map_layer_popup_with(
+        &mut f,
+        id,
+        &layer_surface,
+        PopupProps {
+            offset: (300, 0),
+            constraint_adjustment: ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY,
+            ..Default::default()
+        },
+    );
+
+    // The layer arranges to (1080, 570) on output 2, so the target — output 2's
+    // 1280×720 screen in layer-relative coords — is (-1080, -570, 1280, 720).
+    // The popup starts at (200, -50) and its right edge overshoots x = 200 by
+    // 200, sliding to x = 0; its top edge is inside, so y stays. Against output
+    // 1 the target would be (0, 0, 1920, 1080): x would not slide and y would,
+    // giving (200, 0).
+    assert_eq!(
+        f.client(id).popup(&popup_surface).pending_configure.pos,
+        (0, -50),
+        "popup must constrain against the output holding its layer parent"
+    );
+
+    f.client(id).popup(&popup_surface).destroy();
+    f.double_roundtrip(id);
 }
