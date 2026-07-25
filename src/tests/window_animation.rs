@@ -2244,11 +2244,8 @@ fn a_frozen_resize_that_moves_off_screen_is_still_drawn() {
     );
 }
 
-/// A resize the client may not even be able to honour is not worth a freeze, a
-/// stash, a GPU flatten and a crossfade. Worse, a client that *cannot* take a
-/// few-pixel request answers by committing the size it already had, which no arm
-/// can tell from silence — so the freeze would burn its whole budget over a
-/// resize nobody can see.
+/// A resize below the sub-threshold floor carries no request at all — nothing
+/// worth freezing over (`MIN_ANIMATED_RESIZE` in `state::animation`).
 #[test]
 fn a_sub_threshold_resize_carries_no_request() {
     let mut f = Fixture::new();

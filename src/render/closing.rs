@@ -876,10 +876,8 @@ mod resize_capture_tests {
     }
 
     /// Content stashed for a superseded request must never be crossfaded into
-    /// the request that replaced it — a commit submitted before a retarget can
-    /// resolve the newer one (pre-commit hooks run at submit; the commit itself
-    /// can be deferred by a dmabuf fence). It can never become valid again, so
-    /// the mismatch drops it rather than leaving it to be picked up later.
+    /// the request that replaced it (see [`ResizeCaptures::take_for`]), so a
+    /// generation mismatch drops it rather than leaving it to be picked up later.
     #[test]
     fn a_stale_generation_capture_is_dropped_not_consumed() {
         let mut captures = ResizeCaptures::default();

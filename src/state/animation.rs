@@ -181,9 +181,8 @@ impl DriftWm {
         if requested_size.is_some() {
             self.drop_resize_crossfade(id);
         }
-        // What the picture this leg starts from looked like. A fullscreen leg is
-        // armed after the stage has already flipped both memberships, so its role
-        // is the only witness of the side it came from.
+        // What the picture this leg starts from looked like — see
+        // [`GeometryRole`] and [`FrozenPicture`].
         let picture = FrozenPicture {
             fullscreen_on: match &role {
                 GeometryRole::FullscreenEntry { .. } => None,
@@ -364,12 +363,9 @@ impl DriftWm {
         // Mark the outputs that show a *moving* animation this tick, before
         // advancing, so the completing tick still presents the final resting
         // frame and udev re-arms the next frame (rect-scoped; never
-        // mark_all_dirty). A frozen entry holds one picture for up to half a
-        // second, so it is no reason to compose. It does still reach
-        // `redraws_needed` on udev, which marks every output with an active
-        // animation: that redraw is the pump for the ticks its own deadline needs,
-        // so skipping the compose there too would first need a timer to replace
-        // the pump.
+        // mark_all_dirty). A frozen entry holds one picture still, so it isn't a
+        // reason to compose — but it still counts toward `redraws_needed` on
+        // udev, which is what pumps the ticks its own deadline needs to fire.
         let affected: Vec<Output> = self
             .space
             .outputs()

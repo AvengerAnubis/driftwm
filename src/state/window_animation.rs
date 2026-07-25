@@ -299,14 +299,14 @@ impl WindowAnimations {
             *entry_role = role;
             *last_committed_size = committed_size;
             // A position-only retarget is the same wait, moving: it leaves the
-            // outstanding request, the buffer's staleness, the content policy, both
-            // holds' remaining budgets and the frozen picture's chrome stamp exactly
-            // as they were, so a nudged window mid-resize keeps holding (capped) and
-            // a nudged adopted window keeps filling its slot. Refreshing a budget
-            // instead would let a held nudge key outrun either deadline and hold the
-            // window indefinitely. Only a retarget that carries a size request
-            // restates them — a new request makes the buffer stale by definition,
-            // brings its own policy, and legitimately re-opens both budgets.
+            // outstanding request, buffer staleness, content policy, both holds'
+            // remaining budgets and the frozen picture's chrome stamp untouched, so
+            // a nudged window mid-resize keeps holding (capped) and a nudged
+            // adopted window keeps filling its slot. Refreshing a budget instead
+            // would let a held nudge outrun either deadline and hold the window
+            // indefinitely. Only a retarget carrying a size request restates
+            // these — a new request makes the buffer stale by definition, brings
+            // its own policy, and legitimately re-opens both budgets.
             if requested_size.is_some() {
                 *entry_request = requested_size;
                 *buffer_stale = true;
@@ -396,12 +396,12 @@ impl WindowAnimations {
     /// travelled toward whatever the *live* window wears. `None` when no geometry
     /// entry governs it and the live answer stands alone.
     ///
-    /// Interpolating between the two ends the fullscreen chrome pop: bar, border
-    /// and shadow used to blink out on the frame the freeze released, while the
-    /// window was still small and had the whole leg left to grow. It also makes
-    /// the ramp direction fall out of the two pictures rather than out of the
-    /// role, which a retarget can restate mid-transition. Only alpha ramps —
-    /// border *width* stays full throughout, since shrinking it reads as jarring.
+    /// Interpolating avoids a chrome pop: without it, bar, border and shadow
+    /// would blink out on the frame the freeze releases, while the window is
+    /// still small with its whole leg left to grow. It also makes the ramp
+    /// direction fall out of the two pictures rather than out of the role,
+    /// which a retarget can restate mid-transition. Only alpha ramps — border
+    /// *width* stays full throughout, since shrinking it reads as jarring.
     pub fn chrome_ramp(&self, id: ElementId) -> Option<(f32, f32)> {
         let Some(WindowAnimation {
             kind:
@@ -585,9 +585,9 @@ impl WindowAnimations {
                 alpha: 1.0,
                 // A frozen window renders at its seed ratio, uncapped: the seed
                 // reproduces exactly what was on screen before the action, which
-                // for a frame-converted seed (fullscreen at zoom) is not 1:1.
-                // Capping would visibly shrink the "frozen" window. The cap is for
-                // a leg that runs with stale content, i.e. after a degrade.
+                // for a frame-converted seed (fullscreen at zoom) is not 1:1, and
+                // capping would visibly shrink the "frozen" window. The cap only
+                // applies once a degrade starts a leg running with stale content.
                 cap_content: !start_hold.is_held()
                     && *buffer_stale
                     && *content_policy == ContentPolicy::Cap,
