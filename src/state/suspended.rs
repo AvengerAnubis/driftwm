@@ -505,6 +505,7 @@ impl DriftWm {
             // The window has inherited this slot, so fill it: capping here would
             // render it undersized in the corner of the slot under the crossfade.
             crate::state::window_animation::ContentPolicy::Stretch,
+            None,
         );
 
         // An adopt is an immediate, user-visible change — write through now.

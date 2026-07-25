@@ -166,7 +166,7 @@ impl DriftWm {
         // center (`enter_fullscreen` and `fit_window` drop it for the same reason).
         self.pending_recenter.remove(&wl_surface.id());
 
-        self.animate_window_geometry(window, new_size);
+        self.animate_window_geometry(window, new_size, None);
         self.send_size_configure(window, new_size);
         self.map_window(window.clone(), new_loc, false);
         self.stage.set_fill(window, saved_pos, saved_size);
@@ -194,7 +194,7 @@ impl DriftWm {
         let target_center = super::visual_frame_center(saved_pos, saved_size, bar);
 
         let pre_exit_size = window.geometry().size;
-        self.animate_window_geometry(window, saved_size);
+        self.animate_window_geometry(window, saved_size, None);
         self.send_size_configure(window, saved_size);
 
         // Restore the position now, before the client acks, so the animation has a

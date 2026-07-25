@@ -774,6 +774,7 @@ impl DriftWm {
                         None,
                         GeometryRole::Normal,
                         ContentPolicy::Cap,
+                        None,
                     );
                 }
             }
@@ -815,6 +816,7 @@ impl DriftWm {
                     None,
                     GeometryRole::Normal,
                     ContentPolicy::Cap,
+                    None,
                 );
             }
         }

@@ -151,6 +151,12 @@ impl DriftWm {
     /// intersects no drawable output, else (re)start the chase. `replace_visual`
     /// forces the seed onto an existing entry — the seeded (fullscreen) callers
     /// convert coordinate frames, so keeping the old visual would jump at zoom≠1.
+    ///
+    /// `final_rect` is where this chase ends up, and only the caller knows it:
+    /// a fullscreen enter maps before arming while a fit arms before mapping, so
+    /// deriving it from the stage would be right for one and the placement rect
+    /// for the other. Supplied only by the two callers that can run inside a
+    /// window's map commit, where it seeds an open fade at the destination.
     #[allow(clippy::too_many_arguments)]
     fn start_geometry_entry(
         &mut self,
@@ -162,6 +168,7 @@ impl DriftWm {
         replace_visual: bool,
         content_policy: ContentPolicy,
         waits_for: Option<ElementId>,
+        final_rect: Option<Rectangle<f64, Logical>>,
     ) {
         let Some(id) = self.stage.id_of(element) else {
             return;
@@ -169,6 +176,31 @@ impl DriftWm {
         if self.element_under_interactive_grab(element) {
             return;
         }
+        let committed = element.geometry().size;
+        // A request the window cannot visibly answer is no request at all: drop
+        // it here, once, so the freeze `start_geometry` arms and the capture
+        // dropped below can never disagree about whether a resize is starting.
+        // Resolved before the open-fade override below, which sizes its seed
+        // from whatever request survives this.
+        let requested_size = requested_size.filter(|size| {
+            (size.w - committed.w)
+                .abs()
+                .max((size.h - committed.h).abs())
+                > MIN_ANIMATED_RESIZE
+        });
+        // A chase armed in the same commit that mapped the window takes over the
+        // open fade rather than destroying it, seeded at the rect it is going to
+        // reach — a zero-length chase, so the window fades in already fullscreen
+        // (or already fitted) instead of popping in at the placement rect and
+        // then sliding. The size comes from the surviving request so the seed is
+        // exactly what the tick converges to.
+        let (seed, open_fade) = match final_rect {
+            Some(rect) if self.window_animations.open_unshown(id) => (
+                Rectangle::new(rect.loc, requested_size.unwrap_or(committed).to_f64()),
+                Some(0.0),
+            ),
+            _ => (seed, None),
+        };
         let eligible = match &space {
             AnimSpace::Screen(name) => self.output_name_drawable(name),
             AnimSpace::Canvas => self.canvas_rect_drawable(seed.to_i32_round()),
@@ -176,16 +208,6 @@ impl DriftWm {
         if !eligible {
             return;
         }
-        let committed = element.geometry().size;
-        // A request the window cannot visibly answer is no request at all: drop
-        // it here, once, so the freeze `start_geometry` arms and the capture
-        // dropped below can never disagree about whether a resize is starting.
-        let requested_size = requested_size.filter(|size| {
-            (size.w - committed.w)
-                .abs()
-                .max((size.h - committed.h).abs())
-                > MIN_ANIMATED_RESIZE
-        });
         // A brand new resize supersedes the last one: its captured content is for
         // a request nobody waits on any more, and a live overlay belongs to a leg
         // that no longer exists.
@@ -239,6 +261,7 @@ impl DriftWm {
             content_policy,
             picture,
             waits_for,
+            open_fade,
         );
     }
 
@@ -299,8 +322,15 @@ impl DriftWm {
 
     /// Canvas geometry animation toward a size configure (fill/fit). Must be
     /// called while the stage still holds the pre-action rect; the chase target
-    /// is then the new live stage position.
-    pub(crate) fn animate_window_geometry(&mut self, window: &Window, to_size: Size<i32, Logical>) {
+    /// is then the new live stage position. `final_rect` is that post-action
+    /// rect, for a caller that can run inside a window's map commit (see
+    /// [`Self::start_geometry_entry`]) — the stage does not hold it yet.
+    pub(crate) fn animate_window_geometry(
+        &mut self,
+        window: &Window,
+        to_size: Size<i32, Logical>,
+        final_rect: Option<Rectangle<f64, Logical>>,
+    ) {
         let Some(id) = self.stage.id_of(window) else {
             return;
         };
@@ -315,11 +345,14 @@ impl DriftWm {
             false,
             ContentPolicy::Cap,
             None,
+            final_rect,
         );
     }
 
     /// Geometry animation with an explicit, frame-converted seed (fullscreen
     /// enter/exit cross the locked-viewport ↔ camera ↔ pin-screen boundary).
+    /// `final_rect` as in [`Self::start_geometry_entry`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn begin_geometry_animation_seeded(
         &mut self,
         window: &Window,
@@ -328,6 +361,7 @@ impl DriftWm {
         requested_size: Option<Size<i32, Logical>>,
         role: GeometryRole,
         content_policy: ContentPolicy,
+        final_rect: Option<Rectangle<f64, Logical>>,
     ) {
         self.start_geometry_entry(
             &StageWindow::Client(window.clone()),
@@ -338,6 +372,7 @@ impl DriftWm {
             true,
             content_policy,
             None,
+            final_rect,
         );
     }
 
@@ -385,6 +420,7 @@ impl DriftWm {
             false,
             ContentPolicy::Cap,
             waits_for,
+            None,
         );
     }
 
@@ -686,6 +722,11 @@ impl DriftWm {
             return;
         };
         if !self.window_animations.start_held(id) {
+            return;
+        }
+        // A window fading in has shown no old picture to cross from, so its
+        // client's throwaway first buffer must not be stretched under the fade.
+        if self.window_animations.has_open_fade(id) {
             return;
         }
         let Some(generation) = self.window_animations.generation_of(id) else {

@@ -115,6 +115,30 @@ pub(crate) fn chrome_alpha(from: f32, live: f32, travelled: f32) -> f32 {
     from + (live - from) * travelled
 }
 
+/// How large a window opening is drawn, `p` through its fade: from `amplitude`
+/// of its rect up to the whole of it.
+fn open_scale(amplitude: f64, p: f64) -> f64 {
+    amplitude + (1.0 - amplitude) * p
+}
+
+/// How opaque a window opening is, `p` through its fade. `1 - (1-p)²`: rises
+/// fast so the window isn't translucent through most of the grow-in, then
+/// smoothly asymptotes to full opacity at p=1 — eased, with no saturation
+/// corner.
+fn open_alpha(p: f64) -> f32 {
+    (1.0 - (1.0 - p) * (1.0 - p)) as f32
+}
+
+/// `rect` scaled about its own centre — the open fade's grow-in, shared by the
+/// standalone open entry and a geometry entry that took one over.
+fn scaled_about_centre(rect: Rectangle<f64, Logical>, scale: f64) -> Rectangle<f64, Logical> {
+    let size = rect.size.upscale(scale);
+    Rectangle::new(
+        rect.loc + Point::from(((rect.size.w - size.w) / 2.0, (rect.size.h - size.h) / 2.0)),
+        size,
+    )
+}
+
 /// Coordinate space a geometry chase runs in. Canvas entries render through the
 /// camera transform; a pinned window's entry is `Screen`, chasing its pin's
 /// screen position under zoom 1 (a canvas chase would mis-size at zoom≠1 and
@@ -237,6 +261,15 @@ enum AnimationKind {
         /// named entry need not exist yet when this is set) and dropped as soon
         /// as the wait no longer resolves.
         waits_for: Option<ElementId>,
+        /// Progress of an open fade this chase inherited from an open entry it
+        /// replaced before that entry was ever drawn — a window that maps
+        /// straight into fullscreen or fit fades in at its destination rect
+        /// rather than popping in at the placement rect.
+        ///
+        /// Its own accumulator, deliberately not an alias for `progress`: the
+        /// `moved` branch re-seeds `progress` on every retarget, so folding the
+        /// two together would restart the fade whenever the chase target moves.
+        open_fade: Option<f64>,
     },
 }
 
@@ -302,6 +335,7 @@ impl WindowAnimations {
         content_policy: ContentPolicy,
         picture: FrozenPicture,
         waits_for: Option<ElementId>,
+        open_fade: Option<f64>,
     ) {
         if let Some(WindowAnimation {
             kind:
@@ -322,6 +356,9 @@ impl WindowAnimations {
                     generation: entry_generation,
                     pending_view,
                     waits_for: entry_waits_for,
+                    // Never written by a retarget — see the request-carrying
+                    // branch below for why it has to outlive one.
+                    open_fade: _,
                 },
         }) = self.animations.get_mut(&id)
         {
@@ -365,6 +402,10 @@ impl WindowAnimations {
                 // A member that acquires its own resize stops waiting for
                 // anyone; it is now a window others can be pushed by.
                 *entry_waits_for = None;
+                // An open fade deliberately survives this: fullscreening a
+                // window and toggling it back off before the client acks
+                // retargets the same entry, and dropping the fade there would
+                // pop a window that has never been drawn to full opacity.
                 // While the picture is frozen nothing can change it but the client's
                 // redraw, and that releases the freeze — so the stamp taken when it
                 // froze still describes what is on screen. Restating it from the
@@ -415,9 +456,35 @@ impl WindowAnimations {
                     role,
                     pending_view: None,
                     waits_for,
+                    open_fade,
                 },
             },
         );
+    }
+
+    /// `id` holds an open fade that has never been drawn — mapped this commit
+    /// and not ticked since. A geometry chase armed in that same commit takes
+    /// the fade over instead of destroying it.
+    pub fn open_unshown(&self, id: ElementId) -> bool {
+        matches!(
+            self.animations.get(&id),
+            Some(WindowAnimation {
+                kind: AnimationKind::Open { progress }
+            }) if *progress == 0.0
+        )
+    }
+
+    /// Whether `id`'s geometry entry is playing an open fade.
+    pub fn has_open_fade(&self, id: ElementId) -> bool {
+        matches!(
+            self.animations.get(&id),
+            Some(WindowAnimation {
+                kind: AnimationKind::Geometry {
+                    open_fade: Some(_),
+                    ..
+                }
+            })
+        )
     }
 
     /// Park a view move on `id`'s geometry entry, to be handed back when its
@@ -486,12 +553,21 @@ impl WindowAnimations {
                     start_hold,
                     picture,
                     progress,
+                    open_fade,
                     ..
                 },
         }) = self.animations.get(&id)
         else {
             return None;
         };
+        // An open fade has no earlier picture to hand the chrome over *from* —
+        // the window has never been drawn. Ramping from the windowed default
+        // would fade a border ring and shadow in and back out over a fullscreen
+        // fade-in; the live answer (bare for fullscreen, chrome for a fit) is
+        // the whole truth here.
+        if open_fade.is_some() {
+            return None;
+        }
         let from = if picture.fullscreen_on.is_some() {
             0.0
         } else {
@@ -670,7 +746,7 @@ impl WindowAnimations {
         id: ElementId,
         target_loc: Point<f64, Logical>,
         target_size: Size<f64, Logical>,
-        open_scale: f64,
+        amplitude: f64,
     ) -> AnimatedVisual {
         let Some(animation) = self.animations.get(&id) else {
             return AnimatedVisual {
@@ -683,20 +759,14 @@ impl WindowAnimations {
         match &animation.kind {
             AnimationKind::Open { progress } => {
                 let p = progress.clamp(0.0, 1.0);
-                let scale = open_scale + (1.0 - open_scale) * p;
-                let size = target_size.upscale(scale);
-                let loc = target_loc
-                    + Point::from((
-                        (target_size.w - size.w) / 2.0,
-                        (target_size.h - size.h) / 2.0,
-                    ));
+                let rect = scaled_about_centre(
+                    Rectangle::new(target_loc, target_size),
+                    open_scale(amplitude, p),
+                );
                 AnimatedVisual {
-                    loc,
-                    size,
-                    // `1 - (1-p)²`: rises fast so the window isn't translucent
-                    // through most of the grow-in, then smoothly asymptotes to
-                    // full opacity at p=1 — eased, with no saturation corner.
-                    alpha: (1.0 - (1.0 - p) * (1.0 - p)) as f32,
+                    loc: rect.loc,
+                    size: rect.size,
+                    alpha: open_alpha(p),
                     cap_content: false,
                 }
             }
@@ -705,20 +775,37 @@ impl WindowAnimations {
                 buffer_stale,
                 content_policy,
                 start_hold,
+                open_fade,
                 ..
-            } => AnimatedVisual {
-                loc: visual.loc,
-                size: visual.size,
-                alpha: 1.0,
-                // A frozen window renders at its seed ratio, uncapped: the seed
-                // reproduces exactly what was on screen before the action, which
-                // for a frame-converted seed (fullscreen at zoom) is not 1:1, and
-                // capping would visibly shrink the "frozen" window. The cap only
-                // applies once a degrade starts a leg running with stale content.
-                cap_content: !start_hold.is_held()
-                    && *buffer_stale
-                    && *content_policy == ContentPolicy::Cap,
-            },
+            } => {
+                // A chase carrying an open fade draws its own rect scaled and
+                // faded, so the window arrives at its destination instead of
+                // popping in at the placement rect it never showed.
+                let (rect, alpha) = match open_fade {
+                    Some(fade) => {
+                        let p = fade.clamp(0.0, 1.0);
+                        (
+                            scaled_about_centre(*visual, open_scale(amplitude, p)),
+                            open_alpha(p),
+                        )
+                    }
+                    None => (*visual, 1.0),
+                };
+                AnimatedVisual {
+                    loc: rect.loc,
+                    size: rect.size,
+                    alpha,
+                    // A frozen window renders at its seed ratio, uncapped: the
+                    // seed reproduces exactly what was on screen before the
+                    // action, which for a frame-converted seed (fullscreen at
+                    // zoom) is not 1:1, and capping would visibly shrink the
+                    // "frozen" window. The cap only applies once a degrade
+                    // starts a leg running with stale content.
+                    cap_content: !start_hold.is_held()
+                        && *buffer_stale
+                        && *content_policy == ContentPolicy::Cap,
+                }
+            }
         }
     }
 
@@ -824,6 +911,7 @@ impl WindowAnimations {
                 hold_deadline,
                 start_hold,
                 waits_for,
+                open_fade,
                 ..
             } => {
                 if !eligible {
@@ -848,6 +936,12 @@ impl WindowAnimations {
                     StartHold::Until(deadline) if now < deadline => return true,
                     StartHold::Until(_) => *start_hold = StartHold::Off,
                     StartHold::Off => {}
+                }
+                // Pinned at zero for the whole freeze by the returns above, so a
+                // frozen window draws nothing at all rather than fading in over
+                // the stale picture it was configured out of.
+                if let Some(fade) = open_fade {
+                    *fade += (1.0 - *fade) * frame_factor;
                 }
                 let target = Rectangle::new(
                     target_loc,

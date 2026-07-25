@@ -670,8 +670,11 @@ impl CompositorHandler for DriftWm {
                             // establishes a stable rect on its next settle.
                             self.refresh_stable_snap_rect(&StageWindow::Client(window.clone()));
                             // Scale+fade the window in. A window opening straight
-                            // into fullscreen/fit gets this open entry replaced
-                            // by the geometry entry started just below.
+                            // into fullscreen/fit runs both in this same commit,
+                            // so this entry is never drawn: the geometry entry
+                            // below takes its fade over and plays it at the
+                            // destination rect instead, and the window is never
+                            // shown at the placement rect it isn't keeping.
                             self.start_window_open_animation(&window);
 
                             if let Some(client_output) = self.pending_fullscreen.remove(&root) {

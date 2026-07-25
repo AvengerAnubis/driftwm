@@ -453,7 +453,7 @@ fn size_request_equal_to_committed_never_holds() {
     let committed = window.geometry().size;
     // Request the size the window already has, then move it — the size request
     // must be discarded, leaving a pure position chase that settles.
-    f.state().animate_window_geometry(&window, committed);
+    f.state().animate_window_geometry(&window, committed, None);
     f.state()
         .map_window(window.clone(), Point::from((700, 300)), false);
     assert!(
@@ -492,7 +492,7 @@ fn an_unacked_request_is_bounded_by_both_deadlines() {
     let committed = window.geometry().size;
     let bigger = Size::from((committed.w + 300, committed.h + 300));
     let seed = f.state().stage.position_of(&window).unwrap().to_f64();
-    f.state().animate_window_geometry(&window, bigger);
+    f.state().animate_window_geometry(&window, bigger, None);
     f.state()
         .map_window(window.clone(), Point::from((700, 300)), false);
 
@@ -575,7 +575,7 @@ fn a_commit_resolves_the_outstanding_request() {
     // An outstanding size request the client has not yet committed.
     let committed = window.geometry().size;
     let requested = Size::from((committed.w + 100, committed.h + 100));
-    f.state().animate_window_geometry(&window, requested);
+    f.state().animate_window_geometry(&window, requested, None);
     let base = Instant::now();
     for _ in 0..60 {
         f.state().tick_window_animations_at(TICK, base);
@@ -630,7 +630,7 @@ fn a_client_chosen_size_also_resolves_the_request() {
 
     let committed = window.geometry().size;
     let requested = Size::from((committed.w + 200, committed.h + 200));
-    f.state().animate_window_geometry(&window, requested);
+    f.state().animate_window_geometry(&window, requested, None);
     let base = Instant::now();
     for _ in 0..60 {
         f.state().tick_window_animations_at(TICK, base);
@@ -930,6 +930,10 @@ fn exit_from_mid_entry_continues_from_the_current_visual() {
     f.state()
         .map_window(window.clone(), Point::from((100, 100)), false);
     let eid = element_id(&mut f, &window);
+    // Let the window finish opening: a fullscreen armed while its open fade has
+    // never been drawn takes that fade over and seeds at the fullscreen rect,
+    // which is a different transition from the grow this test drives.
+    tick_until_settled(&mut f);
 
     f.client(id).window(&surface).set_fullscreen(None);
     f.double_roundtrip(id);
@@ -2009,6 +2013,7 @@ fn a_frozen_resize_renders_uncapped_at_its_seed_ratio() {
         Some(Size::from((1896, 1056))),
         crate::state::window_animation::GeometryRole::FullscreenEntry { was_pinned: false },
         crate::state::window_animation::ContentPolicy::Cap,
+        None,
     );
     let base = Instant::now();
     for _ in 0..10 {
@@ -2306,7 +2311,7 @@ fn a_frozen_resize_that_moves_off_screen_is_still_drawn() {
     // Resize and relocate in one action: the entry freezes on the rect the window
     // occupies now, while the stage already holds the far-away destination.
     f.state()
-        .animate_window_geometry(&window, Size::from((900, 700)));
+        .animate_window_geometry(&window, Size::from((900, 700)), None);
     f.state()
         .map_window(window.clone(), Point::from((6000, 6000)), false);
     assert!(f.state().window_animations.start_held(eid), "frozen");
@@ -2342,8 +2347,11 @@ fn a_sub_threshold_resize_carries_no_request() {
     tick_until_settled(&mut f);
 
     let committed = window.geometry().size;
-    f.state()
-        .animate_window_geometry(&window, Size::from((committed.w + 10, committed.h + 3)));
+    f.state().animate_window_geometry(
+        &window,
+        Size::from((committed.w + 10, committed.h + 3)),
+        None,
+    );
     assert!(
         !f.state().window_animations.start_held(eid),
         "a resize this small has nothing worth waiting for"
@@ -2353,7 +2361,7 @@ fn a_sub_threshold_resize_carries_no_request() {
     tick_until_settled(&mut f);
 
     f.state()
-        .animate_window_geometry(&window, Size::from((committed.w + 11, committed.h)));
+        .animate_window_geometry(&window, Size::from((committed.w + 11, committed.h)), None);
     assert!(
         f.state().window_animations.start_held(eid),
         "one pixel more is a real resize, and freezes like one"
@@ -2471,7 +2479,7 @@ fn a_same_size_request_never_freezes() {
     tick_until_settled(&mut f);
 
     let committed = window.geometry().size;
-    f.state().animate_window_geometry(&window, committed);
+    f.state().animate_window_geometry(&window, committed, None);
     f.state()
         .map_window(window.clone(), Point::from((700, 300)), false);
     assert!(
@@ -2509,7 +2517,7 @@ fn a_request_carrying_retarget_refreezes_and_bumps_the_generation() {
     // (Unfitting back to the size the client still has would be a same-size
     // request, resolved at the seed with nothing new to wait for.)
     f.state()
-        .animate_window_geometry(&window, Size::from((900, 700)));
+        .animate_window_geometry(&window, Size::from((900, 700)), None);
     let second = f.state().window_animations.generation_of(eid).unwrap();
     assert!(
         second > first,
@@ -2745,6 +2753,7 @@ fn a_resize_bake_carries_one_texel_per_drawn_pixel() {
                     output: output.name(),
                 },
                 crate::state::window_animation::ContentPolicy::Cap,
+                None,
             );
 
             let visual = f
