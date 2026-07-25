@@ -2743,3 +2743,284 @@ fn an_adopted_slot_is_never_frozen() {
         "a Stretch entry never start-holds"
     );
 }
+
+/// Fullscreen a window with the camera parked far from the origin, so
+/// `HomeToggle` reads "not at home" and takes its go-home branch.
+fn fullscreen_away_from_home(f: &mut Fixture) -> (ClientId, ClientSurface, Window) {
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(f, id, "fs", (800, 600));
+    let window = window_by_app_id(f, "fs").unwrap();
+    reset_view(f);
+    f.state().set_camera(Point::from((5000.0, 5000.0)));
+    f.state().update_output_from_camera();
+
+    f.state().enter_fullscreen(&window, Some(output));
+    f.double_roundtrip(id);
+    super::adopt_last_configure(f, id, &surface);
+    tick_until_settled(f);
+
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&window, serial);
+    (id, surface, window)
+}
+
+/// Going home from fullscreen snaps the camera in one frame, so the window snaps
+/// with it: no geometry entry outlives the action, nothing stays frozen, and the
+/// windowed chrome is there the moment it returns.
+#[test]
+fn home_toggle_leaves_fullscreen_instantly() {
+    let mut f = Fixture::new();
+    let (_id, _surface, window) = fullscreen_away_from_home(&mut f);
+    let eid = element_id(&mut f, &window);
+    seed_resize_capture(&mut f, eid);
+
+    f.state().execute_action(&Action::HomeToggle);
+
+    assert!(
+        !f.state().stage.is_fullscreen(&window),
+        "the action left fullscreen"
+    );
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "leaving no geometry entry to play out over the snapped camera"
+    );
+    assert_eq!(
+        chrome_alpha(&mut f, &window),
+        1.0,
+        "so the windowed chrome is already back, with no frozen picture holding it off"
+    );
+    assert_eq!(
+        f.state().debug_counters()["resize_captures"],
+        0,
+        "and no content stashed for the crossfade that never runs"
+    );
+    assert!(
+        f.state().camera_target().is_none() && f.state().zoom_target().is_none(),
+        "the camera half stays the instant snap it always was"
+    );
+}
+
+/// The return trip is the same deal from the other side: the second HomeToggle
+/// re-enters fullscreen with the camera set directly, so the window arrives at
+/// full size rather than growing into it.
+#[test]
+fn home_toggle_returns_to_fullscreen_instantly() {
+    let mut f = Fixture::new();
+    let (id, surface, window) = fullscreen_away_from_home(&mut f);
+
+    f.state().execute_action(&Action::HomeToggle);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "the trip out left nothing running"
+    );
+
+    f.state().execute_action(&Action::HomeToggle);
+
+    assert!(
+        f.state().stage.is_fullscreen(&window),
+        "the saved fullscreen came back"
+    );
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "without a growth leg into the locked viewport"
+    );
+    assert!(
+        f.state().chrome_fullscreen(&window),
+        "and with the fullscreen look already on screen"
+    );
+}
+
+/// A touch tier-crossing exits fullscreen before the action is even dispatched,
+/// so the leg it arms is past the guard in `execute_action` by the time
+/// HomeToggle runs. The snap has to take that one down too.
+#[test]
+fn home_toggle_after_a_pre_exited_fullscreen_is_instant() {
+    let mut f = Fixture::new();
+    let (_id, _surface, window) = fullscreen_away_from_home(&mut f);
+    let output = f.state().active_output().unwrap();
+
+    // What the touch grab does ahead of dispatching the threshold action.
+    f.state().pre_exited_fullscreen = Some(window.clone());
+    f.state().exit_fullscreen_on(&output);
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "the pre-exit armed a shrink leg"
+    );
+
+    f.state().execute_action(&Action::HomeToggle);
+
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "which the snap took down with it"
+    );
+    assert_eq!(
+        chrome_alpha(&mut f, &window),
+        1.0,
+        "leaving the windowed picture on screen, not a frozen fullscreen one"
+    );
+}
+
+/// The instant paths are the ones that snap: the plain fullscreen keybinding
+/// still animates in both directions.
+#[test]
+fn toggle_fullscreen_still_animates() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (800, 600));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    reset_view(&mut f);
+    tick_until_settled(&mut f);
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&window, serial);
+
+    f.state().execute_action(&Action::ToggleFullscreen);
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "entering fullscreen animates"
+    );
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    tick_until_settled(&mut f);
+
+    f.state().execute_action(&Action::ToggleFullscreen);
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "and so does leaving it"
+    );
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    tick_until_settled(&mut f);
+}
+
+/// Sending a fullscreen window to the next monitor is a teleport, not a second
+/// fullscreen entry: it is already at full size, so nothing animates.
+#[test]
+fn send_to_output_moves_a_fullscreen_window_instantly() {
+    let mut f = Fixture::new();
+    let out1 = f.add_output(1, (1920, 1080));
+    let out2 = f.add_output(2, (1280, 720));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (400, 300));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    let eid = element_id(&mut f, &window);
+
+    f.state().enter_fullscreen(&window, Some(out1));
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    tick_until_settled(&mut f);
+    seed_resize_capture(&mut f, eid);
+
+    f.state()
+        .execute_action(&Action::SendToOutput(Direction::Right));
+
+    assert_eq!(
+        f.state().stage.fullscreen_output_of(&window),
+        Some(out2.name().as_str()),
+        "the window moved monitor"
+    );
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "with no geometry entry left by either half of the handover"
+    );
+    assert_eq!(
+        f.state().debug_counters()["resize_captures"],
+        0,
+        "and no content stashed for a leg that never runs"
+    );
+    assert!(
+        f.state().chrome_fullscreen(&window),
+        "and no windowed chrome flashing over the move"
+    );
+}
+
+/// The plain canvas case is a stage reposition and always was instant — pin it so
+/// a future move path can't quietly grow a leg.
+#[test]
+fn send_to_output_moves_a_canvas_window_instantly() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let out2 = f.add_output(2, (1280, 720));
+    // Both outputs default to a camera on the canvas origin, so their viewports
+    // overlap; pan out2 away so output_for_window can tell where the window landed.
+    crate::state::output_state(&out2).camera = Point::from((5000.0, 5000.0));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    tick_until_settled(&mut f);
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&window, serial);
+
+    f.state()
+        .execute_action(&Action::SendToOutput(Direction::Right));
+
+    assert_eq!(
+        f.state().output_for_window(&window).map(|o| o.name()),
+        Some(out2.name()),
+        "the window moved monitor"
+    );
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "without arming a move leg"
+    );
+}
+
+/// Pin/unpin flips the window between canvas and screen space — at zoom != 1 its
+/// on-screen size changes outright. That stays instant in both directions, and
+/// takes any stashed content with it rather than stranding a crossfade half.
+#[test]
+fn pin_toggle_stays_instant_in_both_directions() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state().with_output_state(|os| os.zoom = 0.5);
+    f.state().update_output_from_camera();
+    tick_until_settled(&mut f);
+    let eid = element_id(&mut f, &window);
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&window, serial);
+
+    seed_resize_capture(&mut f, eid);
+    f.state().execute_action(&Action::TogglePinToScreen);
+    assert!(f.state().is_pinned(&window), "the window pinned");
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "pinning armed no entry across the space flip"
+    );
+    assert_eq!(
+        f.state().debug_counters()["resize_captures"],
+        0,
+        "and dropped the content stashed for a leg that never runs"
+    );
+
+    seed_resize_capture(&mut f, eid);
+    f.state().execute_action(&Action::TogglePinToScreen);
+    assert!(!f.state().is_pinned(&window), "the window unpinned");
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "and unpinning armed no entry either"
+    );
+    assert_eq!(
+        f.state().debug_counters()["resize_captures"],
+        0,
+        "with the stash dropped again"
+    );
+}
