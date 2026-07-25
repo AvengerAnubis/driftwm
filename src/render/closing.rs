@@ -40,6 +40,18 @@ fn fade_out_alpha(progress: f64) -> f32 {
     (1.0 - p * p) as f32
 }
 
+/// Alpha of the outgoing half of a resize crossfade at `progress`: `1 - p`.
+///
+/// Linear rather than the eased [`fade_out_alpha`], because this is a morph and
+/// not a departure. Both pictures are stretched into the same interpolated rect,
+/// so the old one distorts further the longer it stays — exactly where the eased
+/// curve holds it near-opaque (0.91 at p=0.3) — and the chase covers most of the
+/// shape change in its first frames. Linear hands over to real content while the
+/// stretch is still small.
+fn crossfade_out_alpha(progress: f64) -> f32 {
+    (1.0 - progress.clamp(0.0, 1.0)) as f32
+}
+
 /// One surface of a captured window tree: an Rc-cloned GL texture and where it
 /// sits relative to the window's render origin (logical, pre-scale).
 struct BakedSurface {
@@ -283,7 +295,7 @@ impl ResizeCrossfade {
         let texture = TextureRenderElement::from_texture_buffer(
             loc,
             &self.buffer,
-            Some(fade_out_alpha(self.progress) * opacity as f32),
+            Some(crossfade_out_alpha(self.progress) * opacity as f32),
             Some(super::texel_src(self.texels)),
             Some(size),
             Kind::Unspecified,
