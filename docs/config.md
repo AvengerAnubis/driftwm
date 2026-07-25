@@ -1069,7 +1069,7 @@ Default: `0.5`
 
 ## Outputs
 
-Per-output configuration. Each [[outputs]] entry matches by connector name. Find connector names with wlr-randr or check driftwm logs at startup. Outputs without a matching entry default to scale 1.0. Winit backend ignores [[outputs]] entries.
+Per-output configuration. Each [[outputs]] entry matches by connector name. Find connector names with wlr-randr or check driftwm logs at startup. Outputs without a matching entry default to scale 1.0. On the winit backend only `position` applies — mode, scale and transform belong to the host window.
 
 `name = "*"` is a wildcard entry: it applies to any connected output that has no exact-name entry (exact entries always win). A fixed `position` makes no sense on the wildcard — it's ignored (falls back to "auto").
 
