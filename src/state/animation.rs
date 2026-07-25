@@ -54,19 +54,28 @@ impl DriftWm {
         )
     }
 
-    /// Whether the picture on screen for `window` is a fullscreen one — no
-    /// compositor chrome. Normally that is stage membership, but a frozen resize
-    /// keeps showing its pre-action frame long after the stage has flipped, and
-    /// that frame has to keep the chrome it was drawn with.
-    pub(crate) fn chrome_fullscreen(&self, window: &Window) -> bool {
-        self.chrome_fullscreen_of(self.stage.id_of(window), window)
+    /// How opaque the compositor chrome around `window` is. Stage fullscreen
+    /// membership answers this as a hard on/off, but a geometry leg crosses
+    /// between two pictures: it starts on the one its freeze held and ends on
+    /// whatever the live window wears, so the chrome fades between them instead
+    /// of popping. `id` is passed in because the render loop resolves it once per
+    /// window per output.
+    pub(crate) fn chrome_alpha_of(&self, id: Option<ElementId>, window: &Window) -> f32 {
+        let live = if self.stage.is_fullscreen(window) {
+            0.0
+        } else {
+            1.0
+        };
+        id.and_then(|id| self.window_animations.chrome_ramp(id))
+            .map_or(live, |(from, travelled)| {
+                super::window_animation::chrome_alpha(from, live, travelled)
+            })
     }
 
-    /// [`Self::chrome_fullscreen`] for a caller that has already resolved the id
-    /// (the render loop resolves it once per window per output).
-    pub(crate) fn chrome_fullscreen_of(&self, id: Option<ElementId>, window: &Window) -> bool {
-        id.and_then(|id| self.window_animations.frozen_fullscreen(id))
-            .unwrap_or_else(|| self.stage.is_fullscreen(window))
+    /// Whether the picture on screen for `window` wears no compositor chrome at
+    /// all — the settled fullscreen look, or a freeze still holding it.
+    pub(crate) fn chrome_fullscreen(&self, window: &Window) -> bool {
+        self.chrome_alpha_of(self.stage.id_of(window), window) <= 0.0
     }
 
     /// Whether the picture on screen for `window` is a screen-pinned one.

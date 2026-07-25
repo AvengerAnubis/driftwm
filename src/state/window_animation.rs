@@ -95,6 +95,14 @@ pub(crate) fn content_scale(
     }
 }
 
+/// Chrome opacity partway through a geometry leg: `from` is what the picture the
+/// leg started on wore, `live` what the window wears now, `travelled` how far the
+/// leg has come. Fullscreen is the only transition where the two ends differ, so
+/// every other window gets a constant out of this.
+pub(crate) fn chrome_alpha(from: f32, live: f32, travelled: f32) -> f32 {
+    from + (live - from) * travelled
+}
+
 /// Coordinate space a geometry chase runs in. Canvas entries render through the
 /// camera transform; a pinned window's entry is `Screen`, chasing its pin's
 /// screen position under zoom 1 (a canvas chase would mis-size at zoom≠1 and
@@ -384,20 +392,40 @@ impl WindowAnimations {
         }
     }
 
-    /// Whether the picture `id`'s freeze is holding on screen is a fullscreen
-    /// one — `None` when nothing is frozen and the live stage answer applies.
-    pub fn frozen_fullscreen(&self, id: ElementId) -> Option<bool> {
-        match self.animations.get(&id) {
-            Some(WindowAnimation {
-                kind:
-                    AnimationKind::Geometry {
-                        start_hold,
-                        picture,
-                        ..
-                    },
-            }) if start_hold.is_held() => Some(picture.fullscreen_on.is_some()),
-            _ => None,
-        }
+    /// The chrome opacity `id`'s picture started from, and how far its leg has
+    /// travelled toward whatever the *live* window wears. `None` when no geometry
+    /// entry governs it and the live answer stands alone.
+    ///
+    /// Interpolating between the two ends the fullscreen chrome pop: bar, border
+    /// and shadow used to blink out on the frame the freeze released, while the
+    /// window was still small and had the whole leg left to grow. It also makes
+    /// the ramp direction fall out of the two pictures rather than out of the
+    /// role, which a retarget can restate mid-transition. Only alpha ramps —
+    /// border *width* stays full throughout, since shrinking it reads as jarring.
+    pub fn chrome_ramp(&self, id: ElementId) -> Option<(f32, f32)> {
+        let Some(WindowAnimation {
+            kind:
+                AnimationKind::Geometry {
+                    start_hold,
+                    picture,
+                    progress,
+                    ..
+                },
+        }) = self.animations.get(&id)
+        else {
+            return None;
+        };
+        let from = if picture.fullscreen_on.is_some() {
+            0.0
+        } else {
+            1.0
+        };
+        let travelled = if start_hold.is_held() {
+            0.0
+        } else {
+            progress.clamp(0.0, 1.0) as f32
+        };
+        Some((from, travelled))
     }
 
     /// The entry frozen on a fullscreen picture covering `output`. Nothing has
@@ -726,6 +754,46 @@ impl WindowAnimations {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod chrome_alpha_tests {
+    use super::*;
+
+    /// Chrome opacity for a picture that wears it (windowed) and one that does
+    /// not (fullscreen), as the two ends of a leg.
+    const WINDOWED: f32 = 1.0;
+    const FULLSCREEN: f32 = 0.0;
+
+    /// A fullscreen enter hands the chrome over across the whole grow instead of
+    /// blinking it out on the frame the client redraws — when the window is still
+    /// small and has its entire leg left to play.
+    #[test]
+    fn a_fullscreen_entry_fades_the_chrome_out_over_the_leg() {
+        assert_eq!(chrome_alpha(WINDOWED, FULLSCREEN, 0.0), 1.0);
+        assert_eq!(chrome_alpha(WINDOWED, FULLSCREEN, 0.5), 0.5);
+        assert_eq!(chrome_alpha(WINDOWED, FULLSCREEN, 1.0), 0.0);
+    }
+
+    /// The exit is the same ramp read the other way: the frozen picture is the
+    /// bare fullscreen one and the chrome arrives as the window shrinks back.
+    #[test]
+    fn a_fullscreen_exit_fades_the_chrome_in_over_the_leg() {
+        assert_eq!(chrome_alpha(FULLSCREEN, WINDOWED, 0.0), 0.0);
+        assert_eq!(chrome_alpha(FULLSCREEN, WINDOWED, 0.5), 0.5);
+        assert_eq!(chrome_alpha(FULLSCREEN, WINDOWED, 1.0), 1.0);
+    }
+
+    /// Every leg that does not cross the fullscreen boundary — a fit, a fill, a
+    /// nudge, a resize of an already-fullscreen window — has both ends equal, so
+    /// the ramp is inert and the chrome never flickers.
+    #[test]
+    fn a_leg_between_like_pictures_never_moves_the_chrome() {
+        for travelled in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert_eq!(chrome_alpha(WINDOWED, WINDOWED, travelled), 1.0);
+            assert_eq!(chrome_alpha(FULLSCREEN, FULLSCREEN, travelled), 0.0);
         }
     }
 }

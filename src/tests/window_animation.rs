@@ -64,6 +64,13 @@ fn reset_view(f: &mut Fixture) {
     f.state().update_output_from_camera();
 }
 
+/// Opacity of the compositor chrome around `window`, exactly as the render loop
+/// resolves it.
+fn chrome_alpha(f: &mut Fixture, window: &Window) -> f32 {
+    let id = f.state().stage.id_of(window);
+    f.state().chrome_alpha_of(id, window)
+}
+
 fn element_id(f: &mut Fixture, window: &Window) -> ElementId {
     f.state()
         .stage
@@ -1940,7 +1947,9 @@ fn a_frozen_resize_renders_uncapped_at_its_seed_ratio() {
 /// the *windowed* picture on screen for the length of its budget after that.
 /// Chrome follows the picture, not the membership — stripping the bar, border and
 /// shadow (and uncropping a CSD client's own shadow) at the action would leave a
-/// motionless frame wearing the wrong dress for the whole freeze.
+/// motionless frame wearing the wrong dress for the whole freeze. The client's
+/// redraw then starts the exchange rather than finishing it: the chrome fades out
+/// across the grow instead of blinking off while the window is still small.
 #[test]
 fn a_frozen_fullscreen_enter_keeps_its_windowed_chrome() {
     let mut f = Fixture::new();
@@ -1962,16 +1971,30 @@ fn a_frozen_fullscreen_enter_keeps_its_windowed_chrome() {
         f.state().stage.is_fullscreen(&window),
         "the stage flipped the instant the action ran"
     );
-    assert!(
-        !f.state().chrome_fullscreen(&window),
+    assert_eq!(
+        chrome_alpha(&mut f, &window),
+        1.0,
         "but the picture on screen is still the windowed one, chrome and all"
     );
 
-    // The redraw the freeze was waiting for: now the picture IS fullscreen.
+    // The redraw the freeze was waiting for. The window starts growing here, and
+    // the chrome starts leaving with it — neither is done yet.
     super::adopt_last_configure(&mut f, id, &surface);
+    assert_eq!(
+        chrome_alpha(&mut f, &window),
+        1.0,
+        "the leg has not travelled yet, so the chrome is all still there"
+    );
+    f.state().tick_window_animations(TICK);
+    let mid = chrome_alpha(&mut f, &window);
+    assert!(
+        mid > 0.0 && mid < 1.0,
+        "it hands over across the leg rather than at one frame ({mid})"
+    );
+    tick_until_settled(&mut f);
     assert!(
         f.state().chrome_fullscreen(&window),
-        "the client redrew fullscreen, so the chrome goes with it"
+        "and is gone once the window fills the output"
     );
 
     f.state().exit_fullscreen_on(&output);
@@ -2005,8 +2028,9 @@ fn a_frozen_fullscreen_exit_keeps_its_fullscreen_chrome() {
         !f.state().stage.is_fullscreen(&window),
         "the stage let it go the instant the action ran"
     );
-    assert!(
-        f.state().chrome_fullscreen(&window),
+    assert_eq!(
+        chrome_alpha(&mut f, &window),
+        0.0,
         "but the picture on screen is still the fullscreen one, so no chrome"
     );
 
@@ -2014,17 +2038,25 @@ fn a_frozen_fullscreen_exit_keeps_its_fullscreen_chrome() {
     f.state()
         .map_window(window.clone(), Point::from((from.x + 40, from.y)), false);
     f.state().animate_window_move_from(&window, from);
-    assert!(
-        f.state().chrome_fullscreen(&window),
+    assert_eq!(
+        chrome_alpha(&mut f, &window),
+        0.0,
         "a nudge moves the freeze, it does not redress the frozen picture"
     );
 
     super::adopt_last_configure(&mut f, id, &surface);
+    f.state().tick_window_animations(TICK);
+    let mid = chrome_alpha(&mut f, &window);
     assert!(
-        !f.state().chrome_fullscreen(&window),
-        "the windowed redraw brings the chrome back"
+        mid > 0.0 && mid < 1.0,
+        "the windowed redraw brings the chrome back across the shrink ({mid})"
     );
     tick_until_settled(&mut f);
+    assert_eq!(
+        chrome_alpha(&mut f, &window),
+        1.0,
+        "and it is fully there once the window is back"
+    );
 }
 
 /// A *resize* landing on a frozen exit is a new request, so it re-freezes and
@@ -2048,8 +2080,9 @@ fn a_fit_during_a_fullscreen_exit_freeze_keeps_the_frozen_chrome() {
     f.state().exit_fullscreen_on(&output);
     f.double_roundtrip(id);
     let generation = f.state().window_animations.generation_of(eid);
-    assert!(
-        f.state().chrome_fullscreen(&window),
+    assert_eq!(
+        chrome_alpha(&mut f, &window),
+        0.0,
         "the exit froze the fullscreen picture, which wears no chrome"
     );
 
@@ -2064,17 +2097,20 @@ fn a_fit_during_a_fullscreen_exit_freeze_keeps_the_frozen_chrome() {
         f.state().window_animations.start_held(eid),
         "and waits for the client's redraw in turn"
     );
-    assert!(
-        f.state().chrome_fullscreen(&window),
+    assert_eq!(
+        chrome_alpha(&mut f, &window),
+        0.0,
         "the picture it is waiting on is still the fullscreen one"
     );
 
+    // Only the client's redraw changes it, and then only gradually — the fit's
+    // leg is where the chrome the frozen picture never had arrives.
     super::adopt_last_configure(&mut f, id, &surface);
-    assert!(
-        !f.state().chrome_fullscreen(&window),
-        "only the client's redraw changes it"
-    );
+    f.state().tick_window_animations(TICK);
+    let mid = chrome_alpha(&mut f, &window);
+    assert!(mid > 0.0 && mid < 1.0, "the chrome fades in ({mid})");
     tick_until_settled(&mut f);
+    assert_eq!(chrome_alpha(&mut f, &window), 1.0);
 }
 
 /// A fullscreen exit lets go of stage membership at the action, but for the

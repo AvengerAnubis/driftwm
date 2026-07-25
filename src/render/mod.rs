@@ -844,9 +844,11 @@ pub fn compose_frame(
         // below want the id.
         let element_id = state.stage.id_of(window);
         // Not stage membership: a resize freeze holds the pre-action picture on
-        // screen after the stage has flipped, and that picture keeps the chrome it
-        // was drawn with (see `FrozenPicture`).
-        let is_fullscreen = state.chrome_fullscreen_of(element_id, window);
+        // screen after the stage has flipped, and a fullscreen leg trades the
+        // chrome for the bare picture gradually instead of at one frame. Chrome
+        // is built for as long as any of it is still visible.
+        let chrome_alpha = state.chrome_alpha_of(element_id, window);
+        let is_fullscreen = chrome_alpha <= 0.0;
         let has_ssd = !is_fullscreen
             && state
                 .decorations
@@ -978,6 +980,9 @@ pub fn compose_frame(
         let client_blur = client_blur_rects.as_ref().is_some_and(|r| !r.is_empty());
         let wants_blur = blur_enabled && (applied.as_ref().is_some_and(|r| r.blur) || client_blur);
         let opacity = applied.as_ref().and_then(|r| r.opacity).unwrap_or(1.0) * visual_alpha as f64;
+        // Bar, border and shadow ride the fullscreen ramp on top of the window's
+        // own opacity; `chrome_alpha` is 1 for every other window.
+        let chrome_opacity = opacity * chrome_alpha as f64;
 
         // A resize crossfade rides the window's own transform, so the old content
         // lands on the interpolated visual rect for Canvas and Screen entries
@@ -1093,8 +1098,8 @@ pub fn compose_frame(
             {
                 let bar_physical: Point<f64, Physical> =
                     Point::from((loc_phys.x as f64, loc_phys.y as f64 - bar_h_phys));
-                let bar_alpha = if opacity < 1.0 {
-                    Some(opacity as f32)
+                let bar_alpha = if chrome_opacity < 1.0 {
+                    Some(chrome_opacity as f32)
                 } else {
                     None
                 };
@@ -1176,7 +1181,7 @@ pub fn compose_frame(
                     effective_bw,
                     border_color,
                     is_focused,
-                    opacity,
+                    chrome_opacity,
                     scale,
                     zoom,
                     window_animation,
@@ -1204,7 +1209,7 @@ pub fn compose_frame(
                     &shader,
                     body_logical,
                     (effective_corner_radius + effective_bw) as f32,
-                    opacity,
+                    chrome_opacity,
                     scale,
                     zoom,
                     window_animation,
@@ -1260,7 +1265,7 @@ pub fn compose_frame(
                         effective_bw,
                         border_color,
                         is_focused,
-                        opacity,
+                        chrome_opacity,
                         scale,
                         zoom,
                         window_animation,
@@ -1286,7 +1291,7 @@ pub fn compose_frame(
                         &shader,
                         body_logical,
                         (effective_corner_radius + effective_bw) as f32,
-                        opacity,
+                        chrome_opacity,
                         scale,
                         zoom,
                         window_animation,
