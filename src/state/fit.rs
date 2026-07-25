@@ -144,6 +144,10 @@ impl DriftWm {
         let Some(output) = self.active_output() else {
             return;
         };
+        // This fit owns the output's view from here on, whether it parks its pan
+        // or applies it below. A pan parked on some other window's freeze was
+        // promised to an action this one has just superseded.
+        self.window_animations.drop_pending_views_on(&output.name());
         let Some(id) = frozen else {
             let mut os = output_state(&output);
             os.momentum.stop();

@@ -3291,6 +3291,64 @@ fn a_fit_that_is_never_acked_parks_its_pan_until_the_degrade() {
     );
 }
 
+/// Two fits inside one freeze: the second one owns the camera. Both park a pan
+/// on their own window's entry, both stamp the same untouched viewport, and
+/// nothing about the payloads says which came last — so without a sweep the
+/// camera lands wherever the first client to redraw happens to send it, which is
+/// the window the user fitted *before* the one they just fitted. Reachable with
+/// no user timing at all: a client that opens two windows both requesting
+/// maximize produces exactly this.
+#[test]
+fn a_second_fit_supersedes_the_first_fits_parked_pan() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let first = map_window(&mut f, id, "a", (400, 300));
+    let second = map_window(&mut f, id, "b", (400, 300));
+    let w1 = window_by_app_id(&mut f, "a").unwrap();
+    let w2 = window_by_app_id(&mut f, "b").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(w1.clone(), Point::from((100, 100)), false);
+    f.state()
+        .map_window(w2.clone(), Point::from((1300, 700)), false);
+    tick_until_settled(&mut f);
+
+    let superseded = fit_target_camera(&mut f, &w1);
+    f.state().fit_window(&w1);
+    let want_camera = fit_target_camera(&mut f, &w2);
+    assert!(
+        dist(superseded, want_camera) > 50.0,
+        "the two fits must aim somewhere different, or the camera assertion \
+         below passes whichever pan wins"
+    );
+    f.state().fit_window(&w2);
+    let (eid1, eid2) = (element_id(&mut f, &w1), element_id(&mut f, &w2));
+    assert!(
+        f.state().window_animations.start_held(eid1)
+            && f.state().window_animations.start_held(eid2),
+        "precondition: both fits froze, so both had a pan to park"
+    );
+
+    // The first window redraws first, so its freeze is the first to release.
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &first);
+    f.state().tick_window_animations(TICK);
+    assert!(
+        f.state().camera_target().is_none(),
+        "the first fit's pan belongs to an action the second one superseded"
+    );
+
+    super::adopt_last_configure(&mut f, id, &second);
+    f.state().tick_window_animations(TICK);
+    let camera_target = f.state().camera_target();
+    assert!(
+        camera_target.is_some_and(|c| dist(c, want_camera) < 1e-6),
+        "the camera lands on the window that was fitted last, got \
+         {camera_target:?} want {want_camera:?}"
+    );
+}
+
 /// A resize too small to carry a request has nothing to freeze over, so there
 /// is nothing for the pan to wait on either — it arms at the action.
 #[test]

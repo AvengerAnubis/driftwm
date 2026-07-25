@@ -540,6 +540,21 @@ impl WindowAnimations {
         }
     }
 
+    /// Drop every view move parked for `output`. A parked move is a per-output
+    /// effect held on per-entry state, so the action that supersedes one has to
+    /// sweep it itself: two fits inside one freeze park identical viewports on
+    /// two entries, and at release time nothing can tell the stale payload from
+    /// the live one — whichever freeze happens to release first would win.
+    pub fn drop_pending_views_on(&mut self, output: &str) {
+        for animation in self.animations.values_mut() {
+            if let AnimationKind::Geometry { pending_view, .. } = &mut animation.kind
+                && pending_view.as_ref().is_some_and(|v| v.output == output)
+            {
+                *pending_view = None;
+            }
+        }
+    }
+
     /// Take the view move parked on `id`, if any.
     pub fn take_pending_view(&mut self, id: ElementId) -> Option<PendingView> {
         match self.animations.get_mut(&id) {
