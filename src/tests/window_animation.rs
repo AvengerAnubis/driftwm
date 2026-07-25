@@ -1574,6 +1574,83 @@ fn repeated_nudges_never_extend_a_freeze() {
     );
 }
 
+/// The far end follows the same rule: a nudge at the endpoint moves the wait, it
+/// does not re-open its budget. Otherwise a held nudge key refreshes the endpoint
+/// deadline faster than it expires and parks the window on a size the client
+/// never took, for as long as the key is down.
+#[test]
+fn repeated_nudges_never_extend_an_endpoint_hold() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.state().fit_window(&window);
+    let base = Instant::now();
+    f.state().tick_window_animations_at(TICK, base);
+
+    // Past the start budget the leg degrades and runs to the requested endpoint,
+    // where the endpoint hold anchors its deadline.
+    let parked = base + PAST_HOLD;
+    for _ in 0..MAX_TICKS {
+        f.state().tick_window_animations_at(TICK, parked);
+        if !f.state().window_animations.start_held(eid) {
+            break;
+        }
+    }
+    for _ in 0..60 {
+        f.state().tick_window_animations_at(TICK, parked);
+    }
+    let endpoint = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .expect("the endpoint hold keeps it alive");
+
+    // Key repeat: a nudge every 100ms, each re-converging on the requested rect.
+    for step in 1..=4 {
+        let now = parked + Duration::from_millis(100 * step);
+        let from = f.state().stage.position_of(&window).unwrap();
+        f.state()
+            .map_window(window.clone(), Point::from((from.x + 40, from.y)), false);
+        f.state().animate_window_move_from(&window, from);
+        for _ in 0..20 {
+            f.state().tick_window_animations_at(TICK, now);
+        }
+        let v = f
+            .state()
+            .window_animations
+            .geometry_visual_rect(eid)
+            .expect("still waiting on the request");
+        assert!(
+            (v.size.w - endpoint.size.w).abs() <= 0.5,
+            "still holding the requested size before the original deadline \
+             (step {step}, {v:?})"
+        );
+    }
+
+    // 400ms of nudging bought no extra budget: the request is dropped on the
+    // deadline the endpoint hold anchored, and the rect walks back down.
+    let past = parked + crate::state::window_animation::MAX_ENDPOINT_HOLD + TICK;
+    f.state().tick_window_animations_at(TICK, past);
+    f.state().tick_window_animations_at(TICK, past);
+    let released = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .expect("the release leg is still in flight");
+    assert!(
+        released.size.w < endpoint.size.w - 1.0,
+        "the endpoint budget expired on schedule ({endpoint:?} -> {released:?})"
+    );
+}
+
 /// Sliding an adopted window keeps its slot hold: the same hold, moving. Taking
 /// the mover's policy would flip it to capped and snap the content down to the
 /// client's own size mid-slide.
@@ -1947,6 +2024,106 @@ fn a_frozen_fullscreen_exit_keeps_its_fullscreen_chrome() {
         !f.state().chrome_fullscreen(&window),
         "the windowed redraw brings the chrome back"
     );
+    tick_until_settled(&mut f);
+}
+
+/// A *resize* landing on a frozen exit is a new request, so it re-freezes and
+/// re-arms — but the picture on screen is still the fullscreen one it froze on,
+/// so the chrome stamp has to survive. Restating it from the fit's role would pop
+/// a bar, border and shadow onto a motionless fullscreen frame.
+#[test]
+fn a_fit_during_a_fullscreen_exit_freeze_keeps_the_frozen_chrome() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (800, 600));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    tick_until_settled(&mut f);
+
+    f.state().exit_fullscreen_on(&output);
+    f.double_roundtrip(id);
+    let generation = f.state().window_animations.generation_of(eid);
+    assert!(
+        f.state().chrome_fullscreen(&window),
+        "the exit froze the fullscreen picture, which wears no chrome"
+    );
+
+    // A fit while that frame is still up: a genuinely new request, so the freeze
+    // re-arms — but not on a new picture.
+    f.state().fit_window(&window);
+    assert!(
+        f.state().window_animations.generation_of(eid) > generation,
+        "the fit superseded the exit's request"
+    );
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "and waits for the client's redraw in turn"
+    );
+    assert!(
+        f.state().chrome_fullscreen(&window),
+        "the picture it is waiting on is still the fullscreen one"
+    );
+
+    super::adopt_last_configure(&mut f, id, &surface);
+    assert!(
+        !f.state().chrome_fullscreen(&window),
+        "only the client's redraw changes it"
+    );
+    tick_until_settled(&mut f);
+}
+
+/// The mirror: an exit armed while the *enter* is still frozen must not strip the
+/// chrome off the windowed picture that freeze is holding. Filled first, so the
+/// exit restores to a size the client does not have and the retarget genuinely
+/// carries a request.
+#[test]
+fn a_fullscreen_exit_during_the_enter_freeze_keeps_the_windowed_chrome() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (400, 300));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.state().fill_window(&window);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    f.double_roundtrip(id);
+    tick_until_settled(&mut f);
+
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    let generation = f.state().window_animations.generation_of(eid);
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the enter waits for the client to redraw fullscreen"
+    );
+    assert!(
+        !f.state().chrome_fullscreen(&window),
+        "the picture on screen is still the windowed one"
+    );
+
+    // Fullscreen off again, inside the same freeze.
+    f.state().exit_fullscreen_on(&output);
+    assert!(
+        f.state().window_animations.generation_of(eid) > generation,
+        "restoring a size the client does not have is a new request"
+    );
+    assert!(
+        !f.state().chrome_fullscreen(&window),
+        "the frame never became fullscreen, so it keeps its chrome"
+    );
+
+    super::adopt_last_configure(&mut f, id, &surface);
     tick_until_settled(&mut f);
 }
 

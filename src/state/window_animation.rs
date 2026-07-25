@@ -148,7 +148,8 @@ enum AnimationKind {
         /// anything other than the request reads as "client chose its own".
         last_committed_size: Size<i32, Logical>,
         /// Set on first reaching the endpoint while the request is still
-        /// outstanding; releases the hold once it passes.
+        /// outstanding; releases the hold once it passes. Belongs to the request,
+        /// so a position-only retarget carries it rather than re-opening it.
         hold_deadline: Option<Instant>,
         /// The pre-leg freeze. Deliberately its own state rather than derived
         /// from `requested_size`: the degrade path keeps the request (the chase
@@ -156,10 +157,11 @@ enum AnimationKind {
         /// contradict the degrade.
         start_hold: StartHold,
         /// Whether the picture the freeze holds on screen is a fullscreen one,
-        /// i.e. wears no compositor chrome. Stamped when the freeze is armed and
-        /// held for its duration: the stage flips membership at the action, half
-        /// a second before the client redraws into it, so reading it live would
-        /// strip (or add) chrome around a motionless pre-action frame.
+        /// i.e. wears no compositor chrome. Stamped when a freeze is armed from an
+        /// unfrozen state and held for as long as that picture is: the stage flips
+        /// membership at the action, half a second before the client redraws into
+        /// it, so reading it live would strip (or add) chrome around a motionless
+        /// pre-action frame.
         chrome_fullscreen: bool,
         /// Bumped by every request-carrying (re)start. Stamps the captured old
         /// content so a stale capture can never be paired with a newer leg.
@@ -260,22 +262,30 @@ impl WindowAnimations {
             *progress = 0.0;
             *entry_space = space;
             *entry_role = role;
-            *hold_deadline = None;
             *last_committed_size = committed_size;
-            // A position-only retarget is the same hold, moving: it leaves the
-            // outstanding request, the buffer's staleness, the content policy and
-            // the freeze's remaining budget exactly as they were, so a nudged
-            // window mid-resize keeps holding (capped) and a nudged adopted window
-            // keeps filling its slot. Re-arming the freeze instead would let a held
-            // nudge key refresh the deadline on every repeat and freeze the window
-            // indefinitely. Only a retarget that carries a size request restates
-            // them — a new request makes the buffer stale by definition and brings
-            // its own policy.
+            // A position-only retarget is the same wait, moving: it leaves the
+            // outstanding request, the buffer's staleness, the content policy, both
+            // holds' remaining budgets and the frozen picture's chrome stamp exactly
+            // as they were, so a nudged window mid-resize keeps holding (capped) and
+            // a nudged adopted window keeps filling its slot. Refreshing a budget
+            // instead would let a held nudge key outrun either deadline and hold the
+            // window indefinitely. Only a retarget that carries a size request
+            // restates them — a new request makes the buffer stale by definition,
+            // brings its own policy, and legitimately re-opens both budgets.
             if requested_size.is_some() {
                 *entry_request = requested_size;
                 *buffer_stale = true;
                 *entry_policy = content_policy;
-                *entry_chrome = chrome_fullscreen;
+                *hold_deadline = None;
+                // While the picture is frozen nothing can change it but the client's
+                // redraw, and that releases the freeze — so the stamp taken when it
+                // froze still describes what is on screen. Restating it from the
+                // interrupting action's role would dress a motionless frame for a
+                // side it is not showing (a fit during a fullscreen exit's freeze
+                // would pop chrome onto a still-fullscreen picture).
+                if !start_hold.is_held() {
+                    *entry_chrome = chrome_fullscreen;
+                }
                 // A brand new resize: freeze again from wherever the visual is,
                 // and invalidate any content captured for the previous request.
                 self.generation += 1;
