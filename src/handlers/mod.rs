@@ -159,7 +159,7 @@ impl WaylandDndGrabHandler for DriftWm {
         serial: Serial,
         type_: dnd::GrabType,
     ) {
-        self.dnd_icon = icon.map(|surface| crate::state::DndIcon {
+        let dnd_icon = icon.map(|surface| crate::state::DndIcon {
             surface,
             offset: (0, 0).into(),
         });
@@ -177,6 +177,10 @@ impl WaylandDndGrabHandler for DriftWm {
                 touch.set_grab(self, grab, serial);
             }
         }
+        // set_grab tears down any grab already in place, and a DnD grab going
+        // down that way reports cancelled() — which clears dnd_icon. Publish
+        // the new icon after that, or a restarted drag drops its own icon.
+        self.dnd_icon = dnd_icon;
     }
 }
 impl dnd::DndGrabHandler for DriftWm {
@@ -187,6 +191,10 @@ impl dnd::DndGrabHandler for DriftWm {
         _seat: Seat<Self>,
         _location: Point<f64, Logical>,
     ) {
+        self.dnd_icon = None;
+    }
+
+    fn cancelled(&mut self, _seat: Seat<Self>, _location: Point<f64, Logical>) {
         self.dnd_icon = None;
     }
 }
