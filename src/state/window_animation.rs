@@ -134,6 +134,22 @@ pub(crate) enum GeometryRole {
     },
 }
 
+/// The output a frozen *fullscreen* picture covers, and the viewport it covers
+/// it under. Fullscreen pictures wear no compositor chrome, and while one is
+/// frozen its output has to keep hiding everything underneath.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FullscreenCover {
+    pub output: String,
+    /// The camera and zoom the picture was frozen under. A canvas-space picture
+    /// only covers its output for as long as the output still shows this view:
+    /// an action that starts a camera move mid-freeze — a fit dispatched out of
+    /// fullscreen retargets the exit's entry, which keeps this stamp — slides the
+    /// picture off the very output it claims to be hiding, and the cull would
+    /// leave that pan crossing black.
+    pub camera: Point<f64, Logical>,
+    pub zoom: f64,
+}
+
 /// What the picture a freeze holds on screen was drawn as. Stamped when a freeze
 /// is armed from an unfrozen state and held for as long as that picture is: the
 /// stage flips membership at the action, a third of a second before the client
@@ -141,10 +157,8 @@ pub(crate) enum GeometryRole {
 /// uncover — a motionless pre-action frame.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FrozenPicture {
-    /// The output a *fullscreen* picture covers; `None` for a windowed one.
-    /// Fullscreen pictures wear no compositor chrome, and while one is frozen its
-    /// output has to keep hiding everything underneath.
-    pub fullscreen_on: Option<String>,
+    /// `Some` for a fullscreen picture, `None` for a windowed one.
+    pub fullscreen_on: Option<FullscreenCover>,
     /// Drawn in the screen-pinned z-bucket, marked pinned on its title bar.
     pub pinned: bool,
 }
@@ -428,16 +442,28 @@ impl WindowAnimations {
         Some((from, travelled))
     }
 
-    /// The entry frozen on a fullscreen picture covering `output`. Nothing has
-    /// moved yet, so that picture is still what the output shows — whatever the
-    /// stage now says, and whatever the leg has since been retargeted to.
-    pub fn frozen_fullscreen_on(&self, output: &str) -> Option<ElementId> {
+    /// The entry frozen on a fullscreen picture covering `output`, which is
+    /// showing `camera`/`zoom`. Nothing has moved yet, so that picture is still
+    /// what the output shows — whatever the stage now says, and whatever the leg
+    /// has since been retargeted to — for as long as the view it was stamped
+    /// under holds. Compared exactly: a view that drifted by a hair still reports
+    /// no cover, and the only cost of that is drawing a scene the picture hides.
+    pub fn frozen_fullscreen_on(
+        &self,
+        output: &str,
+        camera: Point<f64, Logical>,
+        zoom: f64,
+    ) -> Option<ElementId> {
         self.animations.iter().find_map(|(id, a)| match &a.kind {
             AnimationKind::Geometry {
                 start_hold,
                 picture,
                 ..
-            } if start_hold.is_held() && picture.fullscreen_on.as_deref() == Some(output) => {
+            } if start_hold.is_held()
+                && picture.fullscreen_on.as_ref().is_some_and(|cover| {
+                    cover.output == output && cover.camera == camera && cover.zoom == zoom
+                }) =>
+            {
                 Some(*id)
             }
             _ => None,

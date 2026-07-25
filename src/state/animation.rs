@@ -15,7 +15,7 @@ use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 use smithay::output::Output;
 
 use super::window_animation::{
-    AnimSpace, AnimatedVisual, ContentPolicy, FrozenPicture, GeometryRole,
+    AnimSpace, AnimatedVisual, ContentPolicy, FrozenPicture, FullscreenCover, GeometryRole,
 };
 use super::{DriftWm, FocusTarget, output_state};
 
@@ -199,15 +199,27 @@ impl DriftWm {
         }
         // What the picture this leg starts from looked like — see
         // [`GeometryRole`] and [`FrozenPicture`].
+        let covered_output = match &role {
+            GeometryRole::FullscreenEntry { .. } => None,
+            GeometryRole::FullscreenExit { output } => self.output_by_name(output),
+            GeometryRole::Normal => window
+                .wl_surface()
+                .and_then(|s| self.find_fullscreen_output_for_surface(&s)),
+        };
         let picture = FrozenPicture {
-            fullscreen_on: match &role {
-                GeometryRole::FullscreenEntry { .. } => None,
-                GeometryRole::FullscreenExit { output } => Some(output.clone()),
-                GeometryRole::Normal => window
-                    .wl_surface()
-                    .and_then(|s| self.find_fullscreen_output_for_surface(&s))
-                    .map(|o| o.name()),
-            },
+            fullscreen_on: covered_output.map(|o| {
+                // The exit restores the camera before arming this, so the live
+                // view is the one the seed was converted into.
+                let (camera, zoom) = {
+                    let os = output_state(&o);
+                    (os.camera, os.zoom)
+                };
+                FullscreenCover {
+                    output: o.name(),
+                    camera,
+                    zoom,
+                }
+            }),
             pinned: match &role {
                 GeometryRole::FullscreenEntry { was_pinned } => *was_pinned,
                 // Every other leg — the exit's re-pin included — is armed after
@@ -319,21 +331,51 @@ impl DriftWm {
     /// after the stage has already let it go — a waybar popping in over a
     /// motionless fullscreen frame is the same leak from the other side.
     pub(crate) fn is_output_visually_fullscreen(&self, output: &Output) -> bool {
-        if self
-            .window_animations
-            .frozen_fullscreen_on(&output.name())
-            .is_some()
-        {
+        if self.frozen_fullscreen_cover(output).is_some() {
             return true;
         }
-        if !self.is_output_fullscreen(output) {
-            return false;
+        self.is_output_fullscreen(output) && self.fullscreen_entry_on(output).is_none()
+    }
+
+    /// The frozen fullscreen picture still covering `output` — one held under the
+    /// view the output is showing right now.
+    fn frozen_fullscreen_cover(&self, output: &Output) -> Option<ElementId> {
+        let (camera, zoom) = {
+            let os = output_state(output);
+            (os.camera, os.zoom)
+        };
+        self.window_animations
+            .frozen_fullscreen_on(&output.name(), camera, zoom)
+    }
+
+    /// The camera and zoom the *scene* on `output` renders through: its live
+    /// viewport, except while a fullscreen entry is growing, when everything but
+    /// the entering window keeps the pre-fullscreen view (see `compose_frame`).
+    /// The background caches gate their redraws on this, so they have to agree
+    /// with the composer about which view a frame was drawn at.
+    pub(crate) fn world_view(&self, output: &Output) -> (Point<f64, Logical>, f64) {
+        let (camera, zoom, parked) = {
+            let os = output_state(output);
+            (
+                os.camera,
+                os.zoom,
+                os.fullscreen_return.as_ref().map(|r| (r.camera, r.zoom)),
+            )
+        };
+        match parked {
+            Some(view) if self.fullscreen_entry_on(output).is_some() => view,
+            _ => (camera, zoom),
         }
-        self.fullscreen_window_on(output).is_none_or(|window| {
-            self.stage
-                .id_of(&window)
-                .is_none_or(|id| !self.window_animations.fullscreen_entry_active(id))
-        })
+    }
+
+    /// The window whose fullscreen *entry* is still growing on `output`. Until it
+    /// lands, the output is not covered and the scene behind it still shows.
+    pub(crate) fn fullscreen_entry_on(&self, output: &Output) -> Option<Window> {
+        let window = self.fullscreen_window_on(output)?;
+        let id = self.stage.id_of(&window)?;
+        self.window_animations
+            .fullscreen_entry_active(id)
+            .then_some(window)
     }
 
     /// The canvas rect the frame composer culls a window on: the bounding box it
@@ -358,8 +400,7 @@ impl DriftWm {
     /// which the stage no longer lists there — without it the cull that hides
     /// everything under a fullscreen picture would hide that picture too.
     pub(crate) fn visually_fullscreen_window_on(&self, output: &Output) -> Option<Window> {
-        self.window_animations
-            .frozen_fullscreen_on(&output.name())
+        self.frozen_fullscreen_cover(output)
             .and_then(|id| self.stage.window_by_id(id))
             .and_then(|element| element.client())
             .cloned()

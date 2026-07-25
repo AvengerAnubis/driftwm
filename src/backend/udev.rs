@@ -1270,14 +1270,10 @@ fn render_frame(
     data.display_handle.flush_clients().ok();
 
     // Read per-output state for this frame
-    let (cur_camera, cur_zoom, last_cam, last_zoom) = {
+    let (cur_camera, cur_zoom) = data.world_view(output);
+    let (last_cam, last_zoom) = {
         let os = crate::state::output_state(output);
-        (
-            os.camera,
-            os.zoom,
-            os.last_rendered_camera,
-            os.last_rendered_zoom,
-        )
+        (os.last_rendered_camera, os.last_rendered_zoom)
     };
 
     // Update background element
@@ -1439,9 +1435,10 @@ fn render_frame(
 
     // Record camera+zoom for next-frame change detection
     {
+        let (camera, zoom) = data.world_view(output);
         let mut os = crate::state::output_state(output);
-        os.last_rendered_camera = os.camera;
-        os.last_rendered_zoom = os.zoom;
+        os.last_rendered_camera = camera;
+        os.last_rendered_zoom = zoom;
     }
     data.write_state_file_if_dirty();
 

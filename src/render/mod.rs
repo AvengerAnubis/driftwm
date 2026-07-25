@@ -728,10 +728,19 @@ pub fn compose_frame(
 
     // Read per-output state directly — active_output() follows the pointer,
     // which is wrong when rendering an output the pointer isn't on.
-    let (camera, zoom) = {
+    let (live_camera, live_zoom) = {
         let os = crate::state::output_state(output);
         (os.camera, os.zoom)
     };
+    // Entering fullscreen parks the viewport at zoom 1 in one step, but the
+    // window only covers the output at the end of its growth — so for those few
+    // frames the whole scene behind it would pop to the parked view. Draw the
+    // world through the pre-fullscreen view instead: it is culled outright the
+    // moment the leg lands, so it never has to travel anywhere and the park stays
+    // the implementation detail it is. Only the entering window itself reads the
+    // live view below, since that is the frame its growth was seeded in.
+    let entering_fullscreen = state.fullscreen_entry_on(output);
+    let (camera, zoom) = state.world_view(output);
 
     // A just-re-created `cached_bg` carries placeholder camera=(0,0)/zoom=1.0
     // (see `init_background`), so without this it renders one frame at the wrong
@@ -923,8 +932,15 @@ pub fn compose_frame(
         // output-relative `screen_pos` with zoom 1.0 (identity), normal windows
         // use the camera transform. `zoom` is shadowed so every downstream
         // scale (clip, border, shadow, blur, rescale) follows automatically.
+        // A window growing into fullscreen is the one thing on the output that
+        // belongs to the parked view rather than the world behind it.
+        let (view_camera, view_zoom) = if entering_fullscreen.as_ref() == Some(window) {
+            (live_camera, live_zoom)
+        } else {
+            (camera, zoom)
+        };
         let Some((render_loc, zoom)) =
-            state.window_render_transform(window, Some(output), camera, zoom)
+            state.window_render_transform(window, Some(output), view_camera, view_zoom)
         else {
             continue;
         };
@@ -1716,10 +1732,9 @@ fn build_output_outline_elements(
             continue;
         }
 
-        let (other_camera, other_zoom) = {
-            let os = crate::state::output_state(other);
-            (os.camera, os.zoom)
-        };
+        // The view that output is showing its canvas at, which through a
+        // fullscreen entry is still the pre-park one.
+        let (other_camera, other_zoom) = state.world_view(other);
         let other_size = crate::state::output_logical_size(other);
 
         let other_canvas =
