@@ -17,7 +17,7 @@ use smithay::output::Output;
 use super::window_animation::{
     AnimSpace, AnimatedVisual, ContentPolicy, FrozenPicture, FullscreenCover, GeometryRole,
 };
-use super::{DriftWm, FocusTarget, PendingView, output_state};
+use super::{DriftWm, FocusTarget, PendingView, StageWindow, output_state};
 
 /// A compositor resize smaller than this (per axis) carries no request at all.
 /// It is not worth freezing the window, stashing its content, flattening that on
@@ -86,12 +86,6 @@ impl DriftWm {
             .unwrap_or_else(|| self.is_pinned(window))
     }
 
-    fn window_geometry_grab_active(&self, window: &Window) -> bool {
-        window
-            .wl_surface()
-            .is_some_and(|s| self.window_under_interactive_grab(window, &s))
-    }
-
     /// True if a canvas rect intersects some output that can actually draw it
     /// (live, not DPMS-off). Animations intersecting no such output complete
     /// instantly, so they never wedge the udev idle fast-path.
@@ -122,7 +116,7 @@ impl DriftWm {
         let Some(id) = self.stage.id_of(window) else {
             return;
         };
-        if self.window_geometry_grab_active(window) {
+        if self.element_under_interactive_grab(&StageWindow::Client(window.clone())) {
             return;
         }
         let loc = self.stage.position_of(window).unwrap_or_default();
@@ -160,7 +154,7 @@ impl DriftWm {
     #[allow(clippy::too_many_arguments)]
     fn start_geometry_entry(
         &mut self,
-        window: &Window,
+        element: &StageWindow,
         seed: Rectangle<f64, Logical>,
         space: AnimSpace,
         requested_size: Option<Size<i32, Logical>>,
@@ -169,10 +163,10 @@ impl DriftWm {
         content_policy: ContentPolicy,
         waits_for: Option<ElementId>,
     ) {
-        let Some(id) = self.stage.id_of(window) else {
+        let Some(id) = self.stage.id_of(element) else {
             return;
         };
-        if self.window_geometry_grab_active(window) {
+        if self.element_under_interactive_grab(element) {
             return;
         }
         let eligible = match &space {
@@ -182,7 +176,7 @@ impl DriftWm {
         if !eligible {
             return;
         }
-        let committed = window.geometry().size;
+        let committed = element.geometry().size;
         // A request the window cannot visibly answer is no request at all: drop
         // it here, once, so the freeze `start_geometry` arms and the capture
         // dropped below can never disagree about whether a resize is starting.
@@ -203,7 +197,9 @@ impl DriftWm {
         let covered_output = match &role {
             GeometryRole::FullscreenEntry { .. } => None,
             GeometryRole::FullscreenExit { output } => self.output_by_name(output),
-            GeometryRole::Normal => window
+            // A stand-in has no surface and is never fullscreen, so this is
+            // `None` for one — which is the right answer, not a shortcut.
+            GeometryRole::Normal => element
                 .wl_surface()
                 .and_then(|s| self.find_fullscreen_output_for_surface(&s)),
         };
@@ -229,7 +225,7 @@ impl DriftWm {
                 GeometryRole::FullscreenEntry { was_pinned } => *was_pinned,
                 // Every other leg — the exit's re-pin included — is armed after
                 // whatever pin change it rides, so live describes the picture.
-                _ => self.is_pinned(window),
+                _ => self.is_pinned(element),
             },
         };
         self.window_animations.start_geometry(
@@ -268,7 +264,7 @@ impl DriftWm {
         let old_loc = self.stage.position_of(window).unwrap_or_default();
         let seed = self.geometry_seed(id, old_loc, window.geometry().size);
         self.start_geometry_entry(
-            window,
+            &StageWindow::Client(window.clone()),
             seed,
             AnimSpace::Canvas,
             Some(to_size),
@@ -291,7 +287,7 @@ impl DriftWm {
         content_policy: ContentPolicy,
     ) {
         self.start_geometry_entry(
-            window,
+            &StageWindow::Client(window.clone()),
             seed,
             space,
             requested_size,
@@ -314,10 +310,21 @@ impl DriftWm {
         from_loc: Point<i32, Logical>,
         waits_for: Option<ElementId>,
     ) {
-        let Some(id) = self.stage.id_of(window) else {
+        self.animate_element_move_from(&StageWindow::Client(window.clone()), from_loc, waits_for);
+    }
+
+    /// [`Self::animate_window_move_from`] for any stage element — a suspended
+    /// stand-in pushed by a cluster shift slides like the window it stands for.
+    pub(crate) fn animate_element_move_from(
+        &mut self,
+        element: &StageWindow,
+        from_loc: Point<i32, Logical>,
+        waits_for: Option<ElementId>,
+    ) {
+        let Some(id) = self.stage.id_of(element) else {
             return;
         };
-        let size = window.geometry().size;
+        let size = element.geometry().size;
         // Keep an in-flight entry's visual; otherwise seed at the old position.
         let seed = self
             .window_animations
@@ -327,7 +334,7 @@ impl DriftWm {
                 Rectangle::new(v.loc, v.size)
             });
         self.start_geometry_entry(
-            window,
+            element,
             seed,
             AnimSpace::Canvas,
             None,
@@ -458,20 +465,15 @@ impl DriftWm {
             .collect();
 
         for (id, geo) in self.window_animations.scoping_entries() {
-            // An entry whose window or pin has vanished mid-chase can never be
+            // An entry whose element or pin has vanished mid-chase can never be
             // ticked to convergence; drop it (same instant-complete outcome as
             // ineligible) so it can't wedge `has_active_animations` true forever.
-            let resolved = self
-                .stage
-                .window_by_id(id)
-                .cloned()
-                .and_then(|element| element.client().cloned().map(|c| (element, c)));
-            let Some((element, client)) = resolved else {
+            let Some(element) = self.stage.window_by_id(id).cloned() else {
                 self.window_animations.remove(id);
                 self.drop_resize_crossfade(id);
                 continue;
             };
-            let live_size = client.geometry().size.to_f64();
+            let live_size = StageElement::size(&element).to_f64();
             let target = match &geo {
                 Some((AnimSpace::Screen(name), _)) => self
                     .stage

@@ -452,13 +452,13 @@ impl PointerGrab<DriftWm> for MoveGrab {
 
     fn unset(&mut self, data: &mut DriftWm) {
         data.clear_edge_pan(&self.output);
-        match &self.target {
-            // A client move armed `interactive_move` at grab install (guarding
-            // relaunch adoption); balance it here. A stand-in never arms it.
-            ClusterMember::Client(w) => data.disarm_interactive_move(w),
-            // A stand-in's settled position (including a cross-output teleport)
-            // is durable — persist it on the session-store debounce.
-            ClusterMember::Suspended(_) => data.session_store_mark_dirty(),
+        // Both arms armed `interactive_move` at grab install (guarding relaunch
+        // adoption and animation starts); balance it here.
+        data.disarm_interactive_move(&self.target);
+        // A stand-in's settled position (including a cross-output teleport) is
+        // durable — persist it on the session-store debounce.
+        if matches!(self.target, ClusterMember::Suspended(_)) {
+            data.session_store_mark_dirty();
         }
         // A pick-mode promote is the only move that sets grab_cursor (title-bar
         // / alt+drag / gesture / pinned moves never do, and resize grabs can't
@@ -769,9 +769,9 @@ impl TouchGrab<DriftWm> for MoveGrab {
         // Mirrors the pointer unset so touch and pointer can't diverge on how
         // they persist a settled move, regardless of which arm actually fires
         // for touch.
-        match &self.target {
-            ClusterMember::Client(w) => data.disarm_interactive_move(w),
-            ClusterMember::Suspended(_) => data.session_store_mark_dirty(),
+        data.disarm_interactive_move(&self.target);
+        if matches!(self.target, ClusterMember::Suspended(_)) {
+            data.session_store_mark_dirty();
         }
     }
 }

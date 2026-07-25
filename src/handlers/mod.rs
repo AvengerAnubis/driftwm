@@ -4,7 +4,7 @@ pub mod layer_shell;
 pub mod xdg_shell;
 
 use crate::decorations::DecorationKey;
-use crate::state::{DriftWm, FocusIntent, FocusTarget};
+use crate::state::{DriftWm, FocusIntent, FocusTarget, StageWindow};
 use driftwm::window_ext::WindowExt;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::{
@@ -336,7 +336,7 @@ impl XdgActivationHandler for DriftWm {
                 // interactive move/resize grab: teleporting it would fight the
                 // grab. Transient (unlike the carve-outs above), so leave the
                 // pending relaunch to its TTL and don't dismiss the stand-in.
-                if self.window_under_interactive_grab(&window, &root) {
+                if self.element_under_interactive_grab(&StageWindow::Client(window.clone())) {
                     return;
                 }
                 self.adopt_relaunched(&window, &root, sid);

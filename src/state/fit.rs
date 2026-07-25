@@ -376,35 +376,31 @@ impl DriftWm {
         // in `handlers/compositor.rs` once the client acks the exit configure.
     }
 
-    /// Snapshot each client cluster member's pre-shift canvas position, so the
-    /// shift can be animated after the stage moves them.
+    /// Snapshot each cluster member's pre-shift canvas position, so the shift
+    /// can be animated after the stage moves them.
     fn cluster_member_positions(
         &self,
         members: &[StageWindow],
-    ) -> Vec<(Window, smithay::utils::Point<i32, smithay::utils::Logical>)> {
+    ) -> Vec<(StageWindow, Point<i32, Logical>)> {
         members
             .iter()
-            .filter_map(|m| {
-                let client = m.client()?.clone();
-                let loc = self.stage.position_of(m)?;
-                Some((client, loc))
-            })
+            .filter_map(|m| Some((m.clone(), self.stage.position_of(m)?)))
             .collect()
     }
 
-    /// Animate each client cluster member from its captured pre-shift position
-    /// to its new (already-applied) stage position, held back until `primary`'s
-    /// own resize freeze releases so the push and the window pushing it start on
-    /// the same tick. `primary`'s entry does not exist yet here — the wait is
+    /// Animate each cluster member from its captured pre-shift position to its
+    /// new (already-applied) stage position, held back until `primary`'s own
+    /// resize freeze releases so the push and the window pushing it start on the
+    /// same tick. `primary`'s entry does not exist yet here — the wait is
     /// resolved at tick time, and one that never resolves is simply dropped.
     fn animate_cluster_shift(
         &mut self,
-        old_locs: Vec<(Window, smithay::utils::Point<i32, smithay::utils::Logical>)>,
+        old_locs: Vec<(StageWindow, Point<i32, Logical>)>,
         primary: Option<ElementId>,
     ) {
         for (member, old_loc) in old_locs {
             if self.stage.position_of(&member) != Some(old_loc) {
-                self.animate_window_move_from(&member, old_loc, primary);
+                self.animate_element_move_from(&member, old_loc, primary);
             }
         }
     }

@@ -895,6 +895,7 @@ impl DriftWm {
             button,
             location: pos,
         };
+        self.arm_interactive_move(&s.id);
         let grab = MoveGrab::new(start_data, s.id, origin, output, cluster_members);
         pointer.set_grab(self, grab, serial, Focus::Clear);
         true

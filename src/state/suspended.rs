@@ -24,7 +24,7 @@ use driftwm::window_ext::WindowExt;
 
 use crate::decorations::DecorationKey;
 use crate::grabs::ResizeState;
-use crate::state::{DriftWm, StageWindow, SuspendedId, SuspendedWindow};
+use crate::state::{ClusterMember, DriftWm, StageWindow, SuspendedId, SuspendedWindow};
 use crate::surface_tree::focus_belongs_to_toplevel;
 
 /// A close whose `toplevel_destroyed` should convert into a suspended window,
@@ -308,27 +308,33 @@ impl DriftWm {
         candidates.first().map(|(sid, _)| *sid)
     }
 
-    /// A window mid-interactive-move or -resize is being driven by a live grab;
-    /// adopting it into a stand-in slot would fight that grab (the next motion
-    /// snaps it back, button-up reseeds the snap rect). Unlike the durable
-    /// fullscreen/pinned/widget/dialog carve-outs this is transient, so the
-    /// caller leaves the pending relaunch to its TTL rather than dismissing.
-    pub(crate) fn window_under_interactive_grab(
-        &self,
-        window: &Window,
-        surface: &WlSurface,
-    ) -> bool {
-        if self.interactive_move.iter().any(|w| w == window) {
+    /// An element mid-interactive-move or -resize is being driven by a live
+    /// grab, so nothing may reposition it out from under that grab: adopting a
+    /// window into a stand-in slot would be fought by the next motion (which
+    /// snaps it back, with button-up reseeding the snap rect), and an animation
+    /// entry would re-seed its leg on every motion and rubber-band behind the
+    /// cursor. Unlike the durable fullscreen/pinned/widget/dialog carve-outs
+    /// this is transient, so the relaunch caller leaves the pending relaunch to
+    /// its TTL rather than dismissing.
+    pub(crate) fn element_under_interactive_grab(&self, element: &StageWindow) -> bool {
+        if self
+            .interactive_move
+            .contains(&ClusterMember::from_element(element))
+        {
             return true;
         }
-        with_states(surface, |states| {
-            !matches!(
-                *states
-                    .data_map
-                    .get_or_insert(|| std::cell::RefCell::new(ResizeState::Idle))
-                    .borrow(),
-                ResizeState::Idle
-            )
+        // The resize half is a client-side protocol state, so it answers for
+        // clients only; a stand-in's resize grab is compositor-side.
+        element.wl_surface().is_some_and(|surface| {
+            with_states(&surface, |states| {
+                !matches!(
+                    *states
+                        .data_map
+                        .get_or_insert(|| std::cell::RefCell::new(ResizeState::Idle))
+                        .borrow(),
+                    ResizeState::Idle
+                )
+            })
         })
     }
 
@@ -575,6 +581,12 @@ impl DriftWm {
                 shrink: self.config.effects.animation_scale,
                 progress: 0.0,
             });
+        }
+
+        // The tick reaps an entry whose id no longer resolves, but only on the
+        // next tick — one stale frame of a slide that has nothing left to slide.
+        if let Some(eid) = self.stage.id_of(&element) {
+            self.window_animations.remove(eid);
         }
 
         self.stage.remove(&element);

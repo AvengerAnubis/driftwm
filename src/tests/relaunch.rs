@@ -1005,7 +1005,7 @@ fn mid_move_grab_defers_adoption_then_adopts_when_it_ends() {
     let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
 
     // The window is under a live interactive move grab; the token arrives.
-    f.state().interactive_move.push(win.clone());
+    f.state().arm_interactive_move(&win);
     present_token(&mut f, cid, &existing, token.clone());
 
     // Bail, not adopt: the window stayed put, the stand-in and pending survive.
@@ -1026,7 +1026,7 @@ fn mid_move_grab_defers_adoption_then_adopts_when_it_ends() {
     assert_eq!(token_count(&mut f), 1, "the token was not deregistered");
 
     // The drag ends; the same still-registered token now adopts.
-    f.state().interactive_move.clear();
+    f.state().disarm_interactive_move(&win);
     present_token(&mut f, cid, &existing, token);
 
     let adopted = window_by_app_id(&mut f, "myapp").expect("adopted once the grab ended");

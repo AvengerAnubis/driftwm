@@ -322,6 +322,9 @@ pub(crate) fn compose_capture_elements(
                     focused,
                     launching,
                     1.0,
+                    // Captures and screenshots want the settled frame, never a
+                    // mid-slide one — deliberately un-animated, like the client
+                    // arm below.
                     None,
                     &state.config.decorations,
                     state.decoration_scale,
@@ -808,9 +811,30 @@ pub fn compose_frame(
                     Point::<i32, Logical>::from((loc.x - pad, loc.y - bar - pad)),
                     Size::<i32, Logical>::from((size.w + 2 * pad, size.h + bar + 2 * pad)),
                 );
-                if !visible_rect.overlaps(bbox) {
+                let element_id = state.stage.id_of(element);
+                if !visible_rect.overlaps(state.window_cull_rect(element_id, bbox)) {
                     continue;
                 }
+                // A stand-in's entry is position-only, so the whole slide lives
+                // in `offset` and there is no stretch: its visual size always
+                // equals the live size, both being `StageElement::size`.
+                let animation = element_id.and_then(|id| {
+                    let v = state.animated_visual(id, loc.to_f64(), size.to_f64());
+                    (v.loc != loc.to_f64()).then(|| {
+                        let physical_zoom = output_scale * zoom;
+                        WindowRenderAnimation {
+                            origin: Point::from((
+                                (loc.x as f64 - camera.x) * physical_zoom,
+                                (loc.y as f64 - camera.y) * physical_zoom,
+                            )),
+                            offset: Point::from((
+                                (v.loc.x - loc.x as f64) * physical_zoom,
+                                (v.loc.y - loc.y as f64) * physical_zoom,
+                            )),
+                            scale: Scale::from(1.0),
+                        }
+                    })
+                });
                 let focused = state.gated_suspended_focus() == Some(s.id);
                 let launching = state.is_suspended_launching(s.id);
                 let border_shader = state.render.border_shader.clone();
@@ -822,7 +846,7 @@ pub fn compose_frame(
                     focused,
                     launching,
                     1.0,
-                    None,
+                    animation,
                     &state.config.decorations,
                     state.decoration_scale,
                     &mut state.decorations,

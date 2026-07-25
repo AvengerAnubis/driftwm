@@ -706,13 +706,15 @@ pub struct DriftWm {
     pub on_demand_layer: Option<WlSurface>,
     /// The active popup keyboard/pointer grab, if any. See [`PopupGrabState`].
     pub popup_grab: Option<PopupGrabState>,
-    /// Windows under an active interactive `MoveGrab`, tracked so the
-    /// relaunch adopt path can tell whether *this* window is being dragged right
-    /// now — a plain "any grab active" check would wrongly block adoption while
-    /// some other window is being moved. A multiset (not an `Option`) because a
-    /// pointer move and a touch move can run on different windows at once; grabs
-    /// push on install and remove on unset.
-    pub interactive_move: Vec<Window>,
+    /// Stage elements under an active interactive `MoveGrab`, tracked so the
+    /// relaunch adopt path and the animation start path can tell whether *this*
+    /// element is being dragged right now — a plain "any grab active" check
+    /// would wrongly block them while something else is being moved. Stand-ins
+    /// are drag targets too, hence [`ClusterMember`] rather than `Window`. A
+    /// multiset (not an `Option`) because a pointer move and a touch move can
+    /// run on different elements at once; grabs push on install and remove on
+    /// unset.
+    pub interactive_move: Vec<ClusterMember>,
 
     pub held_action: Option<(u32, driftwm::config::Action, Instant)>,
 
@@ -1228,17 +1230,18 @@ impl DriftWm {
             .cloned()
     }
 
-    /// Record `window` as under a fresh interactive move grab. Called at grab
+    /// Record `target` as under a fresh interactive move grab. Called at grab
     /// install (not first motion) so a press-and-hold with no motion is still
     /// guarded; balanced by `disarm_interactive_move` on grab unset.
-    pub fn arm_interactive_move(&mut self, window: &Window) {
-        self.interactive_move.push(window.clone());
+    pub fn arm_interactive_move<T: Clone + Into<ClusterMember>>(&mut self, target: &T) {
+        self.interactive_move.push(target.clone().into());
     }
 
-    /// Drop one `window` entry armed by `arm_interactive_move`. Removes a single
+    /// Drop one `target` entry armed by `arm_interactive_move`. Removes a single
     /// occurrence so overlapping pointer/touch moves stay balanced.
-    pub fn disarm_interactive_move(&mut self, window: &Window) {
-        if let Some(i) = self.interactive_move.iter().position(|w| w == window) {
+    pub fn disarm_interactive_move<T: Clone + Into<ClusterMember>>(&mut self, target: &T) {
+        let target = target.clone().into();
+        if let Some(i) = self.interactive_move.iter().position(|m| *m == target) {
             self.interactive_move.remove(i);
         }
     }

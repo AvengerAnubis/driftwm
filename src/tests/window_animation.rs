@@ -779,7 +779,7 @@ fn no_entry_starts_under_an_interactive_grab() {
     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
     f.state().raise_and_focus(&window, serial);
 
-    f.state().interactive_move.push(window.clone());
+    f.state().arm_interactive_move(&window);
     f.state()
         .execute_action(&Action::NudgeWindow(Direction::Right));
     assert_eq!(
@@ -787,7 +787,7 @@ fn no_entry_starts_under_an_interactive_grab() {
         0,
         "no geometry entry started while the window was grabbed"
     );
-    f.state().interactive_move.clear();
+    f.state().disarm_interactive_move(&window);
 }
 
 /// An output is visually fullscreen only once the fullscreen-entry animation
