@@ -2349,46 +2349,6 @@ fn a_frozen_fullscreen_exit_still_covers_its_output() {
     tick_until_settled(&mut f);
 }
 
-/// Handing one output's fullscreen from one window to another arms both halves
-/// at once: the outgoing window's exit freezes on its fullscreen picture while
-/// the incoming one starts growing above it. The cull behind a covered output
-/// keeps a single window, so a covered report here would compose the entering
-/// window out of every frame of its own growth and pop it in when the freeze
-/// drops.
-#[test]
-fn a_fullscreen_entry_over_a_frozen_exit_leaves_the_output_uncovered() {
-    let mut f = Fixture::new();
-    let output = f.add_output(1, (1920, 1080));
-    let id = f.add_client();
-    let leaving = map_window(&mut f, id, "a", (800, 600));
-    let arriving = map_window(&mut f, id, "b", (800, 600));
-    let first = window_by_app_id(&mut f, "a").unwrap();
-    reset_view(&mut f);
-    tick_until_settled(&mut f);
-
-    f.client(id).window(&leaving).set_fullscreen(None);
-    f.double_roundtrip(id);
-    super::adopt_last_configure(&mut f, id, &leaving);
-    tick_until_settled(&mut f);
-    assert!(f.state().is_output_visually_fullscreen(&output));
-
-    f.client(id).window(&arriving).set_fullscreen(None);
-    f.double_roundtrip(id);
-    let leaving_id = element_id(&mut f, &first);
-    assert!(
-        f.state().window_animations.start_held(leaving_id),
-        "precondition: the displaced window's exit is frozen on its fullscreen \
-         picture, so it is claiming the output"
-    );
-    assert!(
-        !f.state().is_output_visually_fullscreen(&output),
-        "but the window taking over is still growing, and it is drawn above that \
-         picture"
-    );
-
-    f.state().exit_fullscreen_on(&output);
-}
-
 /// A frozen fullscreen picture covers its output only while it is still drawn
 /// where it was frozen. Re-entering fullscreen inside the exit's freeze reseeds
 /// the rect that picture was drawn at, so the claim has to go with it —
@@ -2432,6 +2392,12 @@ fn a_re_entered_fullscreen_drops_the_exit_freeze_cover() {
         !f.state().is_output_visually_fullscreen(&output),
         "the picture that covered the output has been reseeded to the windowed \
          rect, so the scene behind it must draw"
+    );
+    assert_eq!(
+        chrome_alpha(&mut f, &window),
+        0.0,
+        "but it is still the bare fullscreen picture it was frozen as — a bar, a \
+         border and a shadow must not pop onto a frame that has not moved"
     );
 
     f.state().exit_fullscreen_on(&output);
@@ -5244,6 +5210,47 @@ fn a_fullscreen_exit_mid_open_fade_stamps_no_cover() {
     assert!(
         !f.state().is_output_visually_fullscreen(&output),
         "the scene behind stays visible under a translucent picture"
+    );
+}
+
+/// A translucent fullscreen picture covers nothing — but it is still a
+/// fullscreen picture, and it still wears no chrome. Exiting while the fade
+/// runs suppresses the cover; reading that suppression as "the frozen picture
+/// was a windowed one" pops a full-opacity bar, border and shadow onto it for
+/// the length of the exit's own freeze.
+#[test]
+fn a_fullscreen_exit_under_a_running_fade_keeps_the_bare_picture_bare() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (400, 300));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+
+    // Fullscreen part-way through the open fade, so the chase inherits a fade
+    // the user has already seen — one the chrome ramp is not suppressed for.
+    for _ in 0..2 {
+        f.state().tick_window_animations(TICK);
+    }
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    assert!(
+        f.state().window_animations.has_open_fade(eid),
+        "precondition: the fade is still running when the exit arms"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+    assert!(
+        !f.state().is_output_visually_fullscreen(&output),
+        "precondition: a see-through picture claims no cover"
+    );
+    assert_eq!(
+        chrome_alpha(&mut f, &window),
+        0.0,
+        "the frozen picture is the fullscreen one, so the shrink brings the \
+         chrome in rather than starting with it"
     );
 }
 

@@ -225,40 +225,41 @@ impl DriftWm {
         }
         // What the picture this leg starts from looked like — see
         // [`GeometryRole`] and [`FrozenPicture`].
-        let covered_output = if open_fade.is_some() {
-            // A picture drawn translucent cannot claim to cover its output: the
-            // cull behind a fullscreen cover would hide the scene while the
-            // window said to be hiding it is still see-through.
-            None
-        } else {
-            match &role {
-                GeometryRole::FullscreenEntry { .. } => None,
-                GeometryRole::FullscreenExit { output } => self.output_by_name(output),
-                // A stand-in has no surface and is never fullscreen, so this is
-                // `None` for one — which is the right answer, not a shortcut.
-                GeometryRole::Normal => element
-                    .wl_surface()
-                    .and_then(|s| self.find_fullscreen_output_for_surface(&s)),
-            }
+        let fullscreen_output = match &role {
+            GeometryRole::FullscreenEntry { .. } => None,
+            GeometryRole::FullscreenExit { output } => self.output_by_name(output),
+            // A stand-in has no surface and is never fullscreen, so this is
+            // `None` for one — which is the right answer, not a shortcut.
+            GeometryRole::Normal => element
+                .wl_surface()
+                .and_then(|s| self.find_fullscreen_output_for_surface(&s)),
         };
         let picture = FrozenPicture {
-            fullscreen_on: covered_output.map(|o| {
-                // A re-pinned exit draws in screen space and covers the output
-                // wherever the canvas goes (see `FullscreenCover::view`) —
-                // stamping a view on it would uncover the scene under a picture
-                // that is still hiding it, and pop the layer bar back over a
-                // motionless fullscreen frame.
-                let view = matches!(space, AnimSpace::Canvas).then(|| {
-                    let os = output_state(&o);
-                    // The exit restores the camera before arming this, so the live
-                    // view is the one the seed was converted into.
-                    (os.camera, os.zoom)
-                });
-                FullscreenCover {
-                    output: o.name(),
-                    view,
-                }
-            }),
+            // A picture drawn translucent cannot claim to cover its output: the
+            // cull behind a fullscreen cover would hide the scene while the
+            // window said to be hiding it is still see-through. It is still a
+            // fullscreen picture, and `bare` below says so.
+            fullscreen_on: fullscreen_output
+                .clone()
+                .filter(|_| open_fade.is_none())
+                .map(|o| {
+                    // A re-pinned exit draws in screen space and covers the output
+                    // wherever the canvas goes (see `FullscreenCover::view`) —
+                    // stamping a view on it would uncover the scene under a picture
+                    // that is still hiding it, and pop the layer bar back over a
+                    // motionless fullscreen frame.
+                    let view = matches!(space, AnimSpace::Canvas).then(|| {
+                        let os = output_state(&o);
+                        // The exit restores the camera before arming this, so the live
+                        // view is the one the seed was converted into.
+                        (os.camera, os.zoom)
+                    });
+                    FullscreenCover {
+                        output: o.name(),
+                        view,
+                    }
+                }),
+            bare: fullscreen_output.is_some(),
             pinned: match &role {
                 GeometryRole::FullscreenEntry { was_pinned } => *was_pinned,
                 // Every other leg — the exit's re-pin included — is armed after

@@ -192,8 +192,16 @@ pub(crate) struct FullscreenCover {
 /// uncover — a motionless pre-action frame.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FrozenPicture {
-    /// `Some` for a fullscreen picture, `None` for a windowed one.
+    /// The output this picture still hides, if it hides one — coverage, and
+    /// nothing else. Deliberately not the witness for [`Self::bare`] as well:
+    /// the two answer different questions about the same frame and each has
+    /// cases where only one holds. A translucent fullscreen picture hides
+    /// nothing yet wears no chrome; a picture whose rect has been reseeded
+    /// elsewhere hides nothing either, and is still whatever it was drawn as.
     pub fullscreen_on: Option<FullscreenCover>,
+    /// Drawn with no compositor chrome at all — the fullscreen look. What the
+    /// chrome hand-over ramps *from*.
+    pub bare: bool,
     /// Drawn in the screen-pinned z-bucket, marked pinned on its title bar.
     pub pinned: bool,
     /// There is no earlier picture at all: this entry took over an open fade
@@ -382,12 +390,13 @@ impl WindowAnimations {
         {
             if replace_visual || *entry_space != space {
                 *visual = seed;
-                // A frozen picture is drawn at that rect, so rewriting it — or
-                // reading it in another coordinate frame — leaves any output the
-                // picture claimed to cover uncovered. Keeping the claim culls the
-                // scene on a monitor nothing is hiding any more, which draws
-                // black. The dress the picture wears is untouched: the seed of a
-                // reframing retarget is the same picture re-expressed.
+                // A frozen picture hides an output by being drawn across it, so
+                // rewriting the rect it is drawn at — or reading that rect in
+                // another coordinate frame — ends the coverage. Keeping the claim
+                // culls the scene on a monitor nothing is hiding any more, which
+                // draws black. Coverage only: what the picture is drawn *as* has
+                // not changed, and restating that here would redress a frame that
+                // has not moved.
                 entry_picture.fullscreen_on = None;
             }
             // A retarget always starts a fresh leg from wherever the visual is,
@@ -634,11 +643,7 @@ impl WindowAnimations {
         if picture.undrawn {
             return None;
         }
-        let from = if picture.fullscreen_on.is_some() {
-            0.0
-        } else {
-            1.0
-        };
+        let from = if picture.bare { 0.0 } else { 1.0 };
         let travelled = chrome_travelled.clamp(0.0, 1.0) as f32;
         Some((from, travelled))
     }
