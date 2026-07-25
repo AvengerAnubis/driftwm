@@ -86,6 +86,24 @@ impl DriftWm {
             .unwrap_or_else(|| self.is_pinned(window))
     }
 
+    /// Whether that picture takes the screen-pinned z-bucket, which draws above
+    /// every normal window. It does not on an output a fullscreen picture is
+    /// covering (`output_fullscreen`, passed in because the composer resolves it
+    /// once per output): the only windows drawn there are fullscreen pictures,
+    /// and the bucket would invert them — an exit that re-pinned on its way out
+    /// would draw over the very window taking its fullscreen over, for the whole
+    /// handover. Sharing one bucket leaves the stage's z-order to decide. The pin
+    /// *marker* still follows [`Self::pinned_picture_of`], and a covering picture
+    /// wears no title bar to put it on anyway.
+    pub(crate) fn draws_pinned_on(
+        &self,
+        id: Option<ElementId>,
+        window: &Window,
+        output_fullscreen: bool,
+    ) -> bool {
+        !output_fullscreen && self.pinned_picture_of(id, window)
+    }
+
     /// True if a canvas rect intersects some output that can actually draw it
     /// (live, not DPMS-off). Animations intersecting no such output complete
     /// instantly, so they never wedge the udev idle fast-path.
@@ -458,20 +476,15 @@ impl DriftWm {
     /// after the stage has already let it go — a waybar popping in over a
     /// motionless fullscreen frame is the same leak from the other side.
     pub(crate) fn is_output_visually_fullscreen(&self, output: &Output) -> bool {
-        // A growing entry beats a frozen exit cover, even though both can be in
-        // flight at once on one output: taking one window's fullscreen away and
-        // giving it to another arms both. The cull this report drives keeps a
-        // single window, so answering "covered" would compose the entering window
-        // — the one drawn above the frozen picture — out of its own growth.
-        if self.fullscreen_entry_on(output).is_some() {
-            return false;
+        if self.frozen_fullscreen_cover(output).is_some() {
+            return true;
         }
-        self.frozen_fullscreen_cover(output).is_some() || self.is_output_fullscreen(output)
+        self.is_output_fullscreen(output) && self.fullscreen_entry_on(output).is_none()
     }
 
     /// The frozen fullscreen picture still covering `output` — one held under the
     /// view the output is showing right now.
-    fn frozen_fullscreen_cover(&self, output: &Output) -> Option<ElementId> {
+    pub(crate) fn frozen_fullscreen_cover(&self, output: &Output) -> Option<ElementId> {
         let (camera, zoom) = {
             let os = output_state(output);
             (os.camera, os.zoom)
@@ -534,16 +547,34 @@ impl DriftWm {
         }
     }
 
-    /// The one window a visually fullscreen `output` shows. Normally the stage's
-    /// fullscreen window; through an exit freeze it is the window on its way out,
-    /// which the stage no longer lists there — without it the cull that hides
-    /// everything under a fullscreen picture would hide that picture too.
-    pub(crate) fn visually_fullscreen_window_on(&self, output: &Output) -> Option<Window> {
-        self.frozen_fullscreen_cover(output)
+    /// The windows a visually fullscreen `output` shows, and the only ones its
+    /// cull keeps. Normally just the stage's fullscreen window; through an exit
+    /// freeze it is the window on its way out, which the stage no longer lists
+    /// there — without it the cull that hides everything under a fullscreen
+    /// picture would hide that picture too.
+    ///
+    /// Both, when one window's fullscreen is being handed to another: the
+    /// outgoing exit's freeze still holds its picture across the output while
+    /// the incoming window grows into it. Keeping one would compose the incoming
+    /// window out of every frame of its own growth. Everything else on the output
+    /// really is hidden — the stage keeps fullscreen windows topmost, so nothing
+    /// but these two is above the picture doing the covering.
+    pub(crate) fn visually_fullscreen_windows_on(&self, output: &Output) -> Vec<Window> {
+        let mut windows: Vec<Window> = Vec::new();
+        let covering = self
+            .frozen_fullscreen_cover(output)
             .and_then(|id| self.stage.window_by_id(id))
             .and_then(|element| element.client())
-            .cloned()
-            .or_else(|| self.fullscreen_window_on(output))
+            .cloned();
+        windows.extend(covering);
+        // The same window on both sides is one picture, not two: a re-entered
+        // fullscreen exits and enters on one element.
+        if let Some(live) = self.fullscreen_window_on(output)
+            && !windows.contains(&live)
+        {
+            windows.push(live);
+        }
+        windows
     }
 
     pub(crate) fn tick_window_animations(&mut self, dt: Duration) {

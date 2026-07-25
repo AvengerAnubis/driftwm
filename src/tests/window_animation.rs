@@ -2336,8 +2336,8 @@ fn a_frozen_fullscreen_exit_still_covers_its_output() {
         "but the picture covering the output has not moved yet"
     );
     assert_eq!(
-        f.state().visually_fullscreen_window_on(&output).as_ref(),
-        Some(&window),
+        f.state().visually_fullscreen_windows_on(&output),
+        vec![window.clone()],
         "and the window drawing it is the one on its way out"
     );
 
@@ -2347,6 +2347,139 @@ fn a_frozen_fullscreen_exit_still_covers_its_output() {
         "the redraw is windowed, so the output is uncovered from that frame on"
     );
     tick_until_settled(&mut f);
+}
+
+/// Handing one output's fullscreen from one window to another arms both halves
+/// at once: the outgoing window's exit freezes on its fullscreen picture while
+/// the incoming one grows into it. The output stays covered — nothing may pop in
+/// under a motionless fullscreen frame — but its cull has to keep both pictures,
+/// or the incoming window is composed out of every frame of its own growth and
+/// pops in when the freeze drops.
+#[test]
+fn a_fullscreen_handover_draws_both_the_frozen_exit_and_the_growing_entry() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let leaving = map_window(&mut f, id, "a", (800, 600));
+    let arriving = map_window(&mut f, id, "b", (800, 600));
+    let first = window_by_app_id(&mut f, "a").unwrap();
+    let second = window_by_app_id(&mut f, "b").unwrap();
+    reset_view(&mut f);
+    tick_until_settled(&mut f);
+
+    f.client(id).window(&leaving).set_fullscreen(None);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &leaving);
+    tick_until_settled(&mut f);
+    assert!(f.state().is_output_visually_fullscreen(&output));
+
+    f.client(id).window(&arriving).set_fullscreen(None);
+    f.double_roundtrip(id);
+    let leaving_id = element_id(&mut f, &first);
+    let arriving_id = element_id(&mut f, &second);
+    assert_eq!(
+        f.state().frozen_fullscreen_cover(&output),
+        Some(leaving_id),
+        "precondition: the displaced window's exit is frozen on its fullscreen \
+         picture, and that picture is still covering the output"
+    );
+    assert!(
+        f.state().is_output_visually_fullscreen(&output),
+        "so the output stays covered — the panels must not come back over it"
+    );
+    let shown = f.state().visually_fullscreen_windows_on(&output);
+    assert!(
+        shown.contains(&first) && shown.contains(&second),
+        "but both draw: the frozen picture and the window growing into it, got \
+         {} of 2",
+        shown.len()
+    );
+
+    // The entry lands well before the exit's 300ms budget does, and the cover
+    // reasserts alone for the rest of it — the incoming window must not vanish.
+    // `now` is pinned so the outgoing client's silence can't expire its freeze.
+    super::adopt_last_configure(&mut f, id, &arriving);
+    let base = Instant::now();
+    for _ in 0..30 {
+        f.state().tick_window_animations_at(TICK, base);
+    }
+    assert!(
+        !f.state()
+            .window_animations
+            .fullscreen_entry_active(arriving_id),
+        "precondition: the incoming window's growth has landed"
+    );
+    assert_eq!(
+        f.state().frozen_fullscreen_cover(&output),
+        Some(leaving_id),
+        "precondition: the exit is still frozen after the entry landed"
+    );
+    assert!(
+        f.state()
+            .visually_fullscreen_windows_on(&output)
+            .contains(&second),
+        "the window that now owns the output's fullscreen still draws over the \
+         frame on its way out"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+}
+
+/// The z-order half of the same handover. The outgoing window re-pins on its way
+/// out, so its frozen picture claims the screen-pinned bucket that draws above
+/// every normal window — including the one growing into the fullscreen it is
+/// handing over. On a covered output the fullscreen pictures share one bucket
+/// instead, so stage z-order decides and the incoming window is on top.
+#[test]
+fn a_fullscreen_handover_from_a_pinned_window_does_not_bury_the_incoming_one() {
+    let mut f = Fixture::with_config(
+        Config::from_toml("[[window_rules]]\napp_id = \"p\"\npinned_to_screen = true\n").unwrap(),
+    );
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let leaving = map_window(&mut f, id, "p", (400, 300));
+    let arriving = map_window(&mut f, id, "b", (800, 600));
+    let first = window_by_app_id(&mut f, "p").unwrap();
+    let second = window_by_app_id(&mut f, "b").unwrap();
+    reset_view(&mut f);
+    tick_until_settled(&mut f);
+
+    f.state().enter_fullscreen(&first, Some(output.clone()));
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &leaving);
+    tick_until_settled(&mut f);
+
+    f.client(id).window(&arriving).set_fullscreen(None);
+    f.double_roundtrip(id);
+    let leaving_id = f.state().stage.id_of(&first);
+    let arriving_id = f.state().stage.id_of(&second);
+    assert!(
+        f.state().pinned_picture_of(leaving_id, &first),
+        "precondition: the exit re-pinned, so its frozen picture wears the pin"
+    );
+    let covered = f.state().is_output_visually_fullscreen(&output);
+    assert!(
+        covered,
+        "precondition: the frozen picture still covers the output"
+    );
+    assert!(
+        !f.state().draws_pinned_on(leaving_id, &first, covered),
+        "the outgoing picture gives up the bucket that would draw it over the \
+         window taking its fullscreen"
+    );
+    assert!(
+        !f.state().draws_pinned_on(arriving_id, &second, covered),
+        "so both fullscreen pictures share one, and stage z-order puts the \
+         incoming window on top"
+    );
+    assert!(
+        f.state()
+            .visually_fullscreen_windows_on(&output)
+            .contains(&second),
+        "and the incoming window survives the cull"
+    );
+
+    f.state().exit_fullscreen_on(&output);
 }
 
 /// A frozen fullscreen picture covers its output only while it is still drawn
@@ -2377,9 +2510,10 @@ fn a_re_entered_fullscreen_drops_the_exit_freeze_cover() {
     // Exit, then straight back in — before the client has drawn anything at its
     // windowed size, so the exit is still frozen on the fullscreen picture.
     f.state().exit_fullscreen_on(&output);
-    assert!(
-        f.state().is_output_visually_fullscreen(&output),
-        "the exit's freeze holds the fullscreen picture on the output"
+    assert_eq!(
+        f.state().frozen_fullscreen_cover(&output),
+        Some(eid),
+        "the exit's freeze holds the fullscreen picture across the output"
     );
 
     f.state().enter_fullscreen(&window, Some(output.clone()));
@@ -2388,8 +2522,9 @@ fn a_re_entered_fullscreen_drops_the_exit_freeze_cover() {
         "precondition: nothing released the freeze, so only the reseed can drop \
          the cover"
     );
-    assert!(
-        !f.state().is_output_visually_fullscreen(&output),
+    assert_eq!(
+        f.state().frozen_fullscreen_cover(&output),
+        None,
         "the picture that covered the output has been reseeded to the windowed \
          rect, so the scene behind it must draw"
     );
@@ -2401,6 +2536,49 @@ fn a_re_entered_fullscreen_drops_the_exit_freeze_cover() {
     );
 
     f.state().exit_fullscreen_on(&output);
+}
+
+/// The cross-output form, which no keybinding guard covers: a client already
+/// fullscreen on one monitor asks for fullscreen on another. The enter tears the
+/// first one down, arming an exit cover on the same element, then reseeds that
+/// element onto the second monitor. The first monitor now names a window that
+/// renders nothing there at all, so holding the cover leaves it black.
+#[test]
+fn a_cross_output_fullscreen_drops_the_cover_on_the_output_it_left() {
+    let mut f = Fixture::new();
+    let first = f.add_output(1, (1920, 1080));
+    let second = f.add_output(2, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (800, 600));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.state().enter_fullscreen(&window, Some(first.clone()));
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    tick_until_settled(&mut f);
+    assert!(f.state().is_output_visually_fullscreen(&first));
+
+    f.state().enter_fullscreen(&window, Some(second.clone()));
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "precondition: nothing released the freeze the teardown armed"
+    );
+    assert_eq!(
+        f.state().stage.fullscreen_output_of(&window),
+        Some(second.name().as_str()),
+        "precondition: the window is fullscreen on the other monitor now"
+    );
+    assert_eq!(
+        f.state().frozen_fullscreen_cover(&first),
+        None,
+        "so the monitor it left is covered by nothing and must draw its scene"
+    );
+    assert!(!f.state().is_output_visually_fullscreen(&first));
+
+    f.state().exit_fullscreen_on(&second);
 }
 
 /// Entering fullscreen unpins at the action, but the freeze then holds the

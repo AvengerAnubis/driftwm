@@ -709,12 +709,14 @@ pub fn compose_frame(
 
     let name = output.name();
     let output_fullscreen = state.is_output_visually_fullscreen(output);
-    // The fullscreen window fully occludes its output: only it, the overlay
-    // layer, and the cursor render; everything beneath is culled below. Pinned
-    // windows count as top-tier toplevels and get covered like the top layer.
-    // Resolved visually, so an exit still frozen on the fullscreen picture keeps
-    // showing that picture instead of being culled along with everything else.
-    let fullscreen_window = state.visually_fullscreen_window_on(output);
+    // The fullscreen picture fully occludes its output: only what draws at or
+    // above it, the overlay layer, and the cursor render; everything beneath is
+    // culled below. Pinned windows count as top-tier toplevels and get covered
+    // like the top layer. Resolved visually, so an exit still frozen on the
+    // fullscreen picture keeps showing that picture instead of being culled
+    // along with everything else — and so does a window growing into the
+    // fullscreen that exit is handing over.
+    let fullscreen_windows = state.visually_fullscreen_windows_on(output);
     let mut did_init_bg = false;
     if output_fullscreen {
         // Fullscreen fully occludes the canvas: free its chunk caches and skip
@@ -865,7 +867,7 @@ pub fn compose_frame(
         let Some(loc) = state.stage.position_of(window) else {
             continue;
         };
-        if output_fullscreen && fullscreen_window.as_ref() != Some(window) {
+        if output_fullscreen && !fullscreen_windows.contains(window) {
             continue;
         }
         let geom_loc = window.geometry().loc;
@@ -893,11 +895,12 @@ pub fn compose_frame(
         // canvas/screen frame from the same source, and the animation reference
         // frame has to agree with it.
         let is_pinned = state.is_pinned(window);
-        // Where the picture *sits*: z-bucket, blur layer, title-bar marker.
-        // Entering fullscreen unpins at the action, and the freeze then holds the
-        // pinned picture on screen for the rest of its budget — nothing may
-        // restack over a frame that isn't moving.
+        // Whether the picture wears the pin: its title-bar marker, and normally
+        // its z-bucket and blur layer too. Entering fullscreen unpins at the
+        // action, and the freeze then holds the pinned picture on screen for the
+        // rest of its budget — nothing may restack over a frame that isn't moving.
         let shows_pinned = state.pinned_picture_of(element_id, window);
+        let bucket_pinned = state.draws_pinned_on(element_id, window, output_fullscreen);
         let is_focused = focused_surface.as_ref().is_some_and(|f| *f == *wl_surface);
         let effective_mode = driftwm::config::effective_decoration_mode(
             applied.as_ref().and_then(|r| r.decoration.as_ref()),
@@ -1086,7 +1089,7 @@ pub fn compose_frame(
 
         // Test pinned BEFORE `is_widget`: a pinned *widget* must land in the
         // pinned bucket (above normal), not `zoomed_widgets` (below normal).
-        let target = if shows_pinned {
+        let target = if bucket_pinned {
             &mut zoomed_pinned
         } else if is_widget {
             &mut zoomed_widgets
@@ -1446,7 +1449,7 @@ pub fn compose_frame(
                     elem_count,
                     // Must follow the bucket the elements went into, since the
                     // blur splices by that bucket's prefix offset.
-                    layer: if shows_pinned {
+                    layer: if bucket_pinned {
                         BlurLayer::Pinned
                     } else if is_widget {
                         BlurLayer::Widget
