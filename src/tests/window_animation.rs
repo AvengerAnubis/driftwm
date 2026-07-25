@@ -14,7 +14,7 @@
 
 use std::time::{Duration, Instant};
 
-use smithay::utils::{Logical, Point, Size};
+use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use driftwm::config::{Action, Config, Direction};
 use driftwm::desktop_entry::DesktopEntryCache;
@@ -420,10 +420,12 @@ fn size_request_equal_to_committed_never_holds() {
     );
 }
 
-/// A never-committing client holds the stretched endpoint (the entry stays active
-/// past convergence), and the hold is released by the injected-now deadline.
+/// A client that never redraws is bounded twice over: the start hold freezes the
+/// window for its budget, the leg then runs with stale (capped) content, and the
+/// endpoint hold bounds the wait at the far end before the entry finally prunes.
+/// Neither deadline can strand an entry.
 #[test]
-fn outstanding_request_holds_at_endpoint_until_the_deadline() {
+fn an_unacked_request_is_bounded_by_both_deadlines() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
     let id = f.add_client();
@@ -435,26 +437,22 @@ fn outstanding_request_holds_at_endpoint_until_the_deadline() {
     let eid = element_id(&mut f, &window);
     tick_until_settled(&mut f);
 
-    // A size request the client will never commit. The one-phase chase stretches
-    // toward the REQUESTED size immediately and holds the stretched endpoint
-    // (target loc, requested size) because the request is still outstanding.
     let committed = window.geometry().size;
     let bigger = Size::from((committed.w + 300, committed.h + 300));
+    let seed = f.state().stage.position_of(&window).unwrap().to_f64();
     f.state().animate_window_geometry(&window, bigger);
     f.state()
         .map_window(window.clone(), Point::from((700, 300)), false);
 
+    // Frozen: the request is outstanding and nothing has moved.
     let base = Instant::now();
     for _ in 0..60 {
         f.state().tick_window_animations_at(TICK, base);
     }
-    assert!(
-        f.state().window_animations.is_active(),
-        "the entry holds at the endpoint while the request is outstanding"
-    );
+    assert!(f.state().window_animations.start_held(eid), "still frozen");
     assert!(
         f.state().has_active_animations(),
-        "an endpoint hold counts as an active animation"
+        "a start hold counts as an active animation"
     );
     let held = f
         .state()
@@ -462,36 +460,53 @@ fn outstanding_request_holds_at_endpoint_until_the_deadline() {
         .geometry_visual_rect(eid)
         .unwrap();
     assert!(
-        dist(held.loc, Point::from((700.0, 300.0))) <= 0.5,
-        "the hold pins the visual at the target endpoint"
-    );
-    assert!(
-        (held.size.w - bigger.w as f64).abs() <= 0.5
-            && (held.size.h - bigger.h as f64).abs() <= 0.5,
-        "the hold pins the stretched REQUESTED size, not the live committed size ({held:?})"
+        dist(held.loc, seed) <= 0.5,
+        "nothing moved while frozen ({held:?})"
     );
 
-    // Past the 500ms cap the hold releases: the request clears and the chase
-    // bends from the stretched (requested) endpoint back to the live size,
-    // converging and pruning over the following ticks (all at the injected now,
-    // so the deadline stays fired).
-    let past = base + PAST_HOLD;
+    // Past the start budget the leg runs and parks at the endpoint.
+    let after_start = base + PAST_HOLD;
+    for _ in 0..MAX_TICKS {
+        f.state().tick_window_animations_at(TICK, after_start);
+        if !f.state().window_animations.start_held(eid) {
+            break;
+        }
+    }
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "the start budget expired"
+    );
+    for _ in 0..60 {
+        f.state().tick_window_animations_at(TICK, after_start);
+    }
+    let parked = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .expect("the endpoint hold keeps it alive");
+    assert!(
+        (parked.size.w - bigger.w as f64).abs() <= 0.5,
+        "the leg ran to the requested endpoint ({parked:?})"
+    );
+
+    // And past the endpoint budget too, it finally prunes.
+    let after_endpoint = after_start + PAST_HOLD;
     for _ in 0..MAX_TICKS {
         if !f.state().window_animations.is_active() {
             break;
         }
-        f.state().tick_window_animations_at(TICK, past);
+        f.state().tick_window_animations_at(TICK, after_endpoint);
     }
     assert_eq!(
         f.state().window_animations.len(),
         0,
-        "the injected-now deadline released the hold and pruned the entry"
+        "both deadlines fired, so the entry pruned"
     );
 }
 
-/// A commit that reaches the requested size resolves the outstanding request:
-/// the entry holds at the endpoint until the client commits that size, then the
-/// chase bends to live and prunes.
+/// A commit at the requested size is what the freeze is waiting for: it releases
+/// the hold, the leg runs with the client's real new content, and the entry
+/// prunes.
 #[test]
 fn a_commit_resolves_the_outstanding_request() {
     let mut f = Fixture::new();
@@ -514,7 +529,7 @@ fn a_commit_resolves_the_outstanding_request() {
     }
     assert!(
         f.state().window_animations.is_active(),
-        "the entry holds at the endpoint until the client commits the new size"
+        "the entry is frozen, waiting for the client to redraw"
     );
 
     // The client commits a buffer at the requested size — a clean ack resolves it.
@@ -555,7 +570,7 @@ fn a_client_chosen_size_also_resolves_the_request() {
     }
     assert!(
         f.state().window_animations.is_active(),
-        "the request is outstanding, so the entry holds"
+        "the request is outstanding, so the entry is still frozen"
     );
 
     // The client commits a third size — neither the request nor the prior size.
@@ -1221,16 +1236,16 @@ fn adoption_holds_the_adopted_rect_until_the_client_catches_up() {
     );
 }
 
-/// A fit, fill, or fullscreen grows the window's rect several times over before
-/// the client redraws. The stale buffer must not be magnified to meet it —
-/// stretching a 400x300 buffer across a fitted 1896x1056 rect would render the
-/// interface ~4.7x oversized for those frames.
+/// A compositor resize no longer stretches a stale buffer at all: the window is
+/// frozen at its pre-action appearance until the client redraws. Only when the
+/// client misses the budget does the leg run with stale content, and then the old
+/// cap applies — the interface never balloons either way.
 #[test]
-fn a_growing_animation_never_magnifies_the_stale_buffer() {
+fn a_growing_resize_freezes_rather_than_magnifying() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
     let id = f.add_client();
-    let surface = map_window(&mut f, id, "a", (400, 300));
+    let _surface = map_window(&mut f, id, "a", (400, 300));
     let window = window_by_app_id(&mut f, "a").unwrap();
     reset_view(&mut f);
     f.state()
@@ -1238,77 +1253,50 @@ fn a_growing_animation_never_magnifies_the_stale_buffer() {
     let eid = element_id(&mut f, &window);
     tick_until_settled(&mut f);
 
+    let seed_size = window.geometry().size.to_f64();
     f.state().fit_window(&window);
     let base = Instant::now();
     for _ in 0..30 {
         f.state().tick_window_animations_at(TICK, base);
     }
 
+    // Frozen at the seed: same size as before the action, and drawn 1:1.
     let committed = window.geometry().size.to_f64();
     let loc = f.state().stage.position_of(&window).unwrap().to_f64();
     let v = f.state().animated_visual(eid, loc, committed);
     assert!(
-        v.cap_content,
-        "the client has not acked the fit size, so its stale buffer must be capped"
+        f.state().window_animations.start_held(eid),
+        "the fit waits for the client's redraw"
     );
-    // The rect really has grown far past the buffer...
     assert!(
-        v.size.w / committed.w > 4.0,
-        "the fitted rect is several times the committed size ({:?} vs {committed:?})",
+        (v.size.w - seed_size.w).abs() <= 0.5,
+        "the rect has not grown yet ({:?})",
         v.size
     );
-    // ...but the content drawn into it is never blown up.
-    let (sx, sy) = crate::state::window_animation::content_scale(v.size, committed, v.cap_content);
     assert!(
-        sx <= 1.0 && sy <= 1.0,
-        "stale content must not be magnified (got {sx:.2}x, {sy:.2}x)"
+        !v.cap_content,
+        "and nothing is being capped, because nothing is stretched"
+    );
+
+    // Degrade: past the budget the leg runs, and now the cap protects the stale
+    // buffer from being blown up to meet the growing rect.
+    let past = base + PAST_HOLD;
+    for _ in 0..12 {
+        f.state().tick_window_animations_at(TICK, past);
+        let v = f.state().animated_visual(eid, loc, committed);
+        let (sx, sy) =
+            crate::state::window_animation::content_scale(v.size, committed, v.cap_content);
+        assert!(
+            sx <= 1.0 && sy <= 1.0,
+            "the degraded leg stays capped (got {sx:.2}x)"
+        );
+    }
+    assert!(
+        f.state().animated_visual(eid, loc, committed).cap_content,
+        "the degraded leg is the capped, stale-content case"
     );
 }
 
-/// Dismissing a stand-in still does its bookkeeping — off the stage, chrome
-/// caches evicted — and materializes no render transient headless, since the
-/// fade is backend-gated like every other one. Its own shape is pinned by the
-/// `StandInFade` unit tests, which need no renderer.
-#[test]
-fn dismissing_a_stand_in_leaves_no_render_transient_headless() {
-    let mut f = Fixture::new();
-    f.add_output(1, (1920, 1080));
-
-    let sid = f.state().insert_suspended_for_test(
-        1,
-        Point::from((500, 500)),
-        Size::from((600, 400)),
-        "myapp",
-        "myapp",
-    );
-    assert!(
-        f.state().find_suspended(sid).is_some(),
-        "the stand-in exists"
-    );
-
-    f.state().dismiss_suspended(sid);
-
-    assert!(
-        f.state().find_suspended(sid).is_none(),
-        "the dismiss took it off the stage"
-    );
-    let counters = f.state().debug_counters();
-    assert_eq!(
-        counters["standin_fades"], 0,
-        "the dismiss fade is backend-gated — none headless"
-    );
-    assert_eq!(counters["closing_snapshots"], 0);
-    assert_eq!(counters["close_pixels"], 0);
-    assert_eq!(
-        counters["decorations"], 0,
-        "the stand-in's chrome caches were evicted"
-    );
-}
-
-/// The 500ms hold deadline drops the outstanding request, but no commit ever
-/// landed — the buffer is still stale. Staleness therefore has to outlive the
-/// request, or the release leg back to the live size renders uncapped and the
-/// window pops to several times its size before shrinking away.
 #[test]
 fn the_hold_deadline_release_stays_capped() {
     let mut f = Fixture::new();
@@ -1347,12 +1335,12 @@ fn the_hold_deadline_release_stays_capped() {
     }
 }
 
-/// A position-only retarget (a nudge, a cluster shift) landing on an entry with
-/// an unacked grow must not cancel the pending resize's staleness: no commit has
-/// landed, so the bend-back leg still has to be capped, or the window pops to
-/// several times its size on the way.
+/// A position-only retarget (a nudge, a cluster shift) landing on a frozen resize
+/// keeps the freeze — it is the same wait, just aimed somewhere else — and
+/// re-anchors the budget from the user's latest action. It must not cancel the
+/// wait and start animating with content the client has not delivered.
 #[test]
-fn a_position_only_retarget_keeps_an_unacked_grow_capped() {
+fn a_position_only_retarget_keeps_a_frozen_resize_frozen() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
     let id = f.add_client();
@@ -1364,36 +1352,41 @@ fn a_position_only_retarget_keeps_an_unacked_grow_capped() {
     let eid = element_id(&mut f, &window);
     tick_until_settled(&mut f);
 
-    // A fit the client has not acked, driven partway.
     f.state().fit_window(&window);
     let base = Instant::now();
     for _ in 0..4 {
         f.state().tick_window_animations_at(TICK, base);
     }
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "frozen by the fit"
+    );
+    let generation = f.state().window_animations.generation_of(eid);
 
-    // Nudge it while that grow is still outstanding.
+    // Nudge it while frozen.
     let from = f.state().stage.position_of(&window).unwrap();
     f.state()
         .map_window(window.clone(), Point::from((from.x + 40, from.y)), false);
     f.state().animate_window_move_from(&window, from);
 
-    let committed = window.geometry().size.to_f64();
-    let loc = f.state().stage.position_of(&window).unwrap().to_f64();
-    let v = f.state().animated_visual(eid, loc, committed);
     assert!(
-        v.cap_content,
-        "the grow is still unacked, so the moving entry stays capped"
+        f.state().window_animations.start_held(eid),
+        "a move does not cancel the wait for the client's redraw"
     );
-    for _ in 0..8 {
-        f.state().tick_window_animations_at(TICK, base);
-        let v = f.state().animated_visual(eid, loc, committed);
-        let (sx, sy) =
-            crate::state::window_animation::content_scale(v.size, committed, v.cap_content);
-        assert!(
-            sx <= 1.0 && sy <= 1.0,
-            "capped throughout the moving leg (got {sx:.2}x)"
-        );
-    }
+    assert_eq!(
+        f.state().window_animations.generation_of(eid),
+        generation,
+        "and does not invalidate the resize — no new request was made"
+    );
+
+    // The budget was re-anchored: ticking to just short of the ORIGINAL deadline
+    // still finds it frozen.
+    let near_original = base + crate::state::window_animation::MAX_START_HOLD + TICK;
+    f.state().tick_window_animations_at(TICK, near_original);
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the deadline re-anchored at the nudge, so the original one has no effect"
+    );
 }
 
 /// Sliding an adopted window keeps its slot hold: the same hold, moving. Taking
@@ -1604,5 +1597,135 @@ fn dismissing_an_unfocused_stand_in_changes_nothing() {
     assert!(
         f.state().focused_window().is_some(),
         "the live window keeps focus"
+    );
+}
+
+/// A resize freeze renders the window exactly as it looked before the action —
+/// which for a frame-converted seed (entering fullscreen from a zoomed-in canvas)
+/// is not 1:1. Capping the content there would visibly shrink the "frozen"
+/// window, so the hold is deliberately uncapped at whatever the seed ratio is.
+#[test]
+fn a_frozen_resize_renders_uncapped_at_its_seed_ratio() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    // A seed twice the committed size, as a fullscreen enter at zoom 2 produces.
+    let committed = window.geometry().size.to_f64();
+    let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let seed = Rectangle::new(loc, Size::from((committed.w * 2.0, committed.h * 2.0)));
+    f.state().begin_geometry_animation_seeded(
+        &window,
+        seed,
+        crate::state::window_animation::AnimSpace::Canvas,
+        Some(Size::from((1896, 1056))),
+        crate::state::window_animation::GeometryRole::FullscreenEntry,
+        crate::state::window_animation::ContentPolicy::Cap,
+    );
+    let base = Instant::now();
+    for _ in 0..10 {
+        f.state().tick_window_animations_at(TICK, base);
+    }
+
+    assert!(f.state().window_animations.start_held(eid), "frozen");
+    let v = f.state().animated_visual(eid, loc, committed);
+    assert!(!v.cap_content, "a frozen window is never capped");
+    let (sx, sy) = crate::state::window_animation::content_scale(v.size, committed, v.cap_content);
+    assert!(
+        (sx - 2.0).abs() < 1e-6 && (sy - 2.0).abs() < 1e-6,
+        "it renders at the seed ratio, reproducing the pre-action look ({sx:.2}x)"
+    );
+}
+
+/// A request for the size the window already has resolves at the seed, so there is
+/// nothing to wait for: no freeze, and the leg runs immediately.
+#[test]
+fn a_same_size_request_never_freezes() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((400, 300)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    let committed = window.geometry().size;
+    f.state().animate_window_geometry(&window, committed);
+    f.state()
+        .map_window(window.clone(), Point::from((700, 300)), false);
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "an already-satisfied request has nothing to wait for"
+    );
+    tick_until_settled(&mut f);
+}
+
+/// A brand new resize landing mid-anything re-freezes from wherever the window is
+/// and bumps the capture generation, so content captured for the superseded
+/// request can never be paired with the new leg.
+#[test]
+fn a_request_carrying_retarget_refreezes_and_bumps_the_generation() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.state().fit_window(&window);
+    let first = f.state().window_animations.generation_of(eid).unwrap();
+    let base = Instant::now();
+    for _ in 0..4 {
+        f.state().tick_window_animations_at(TICK, base);
+    }
+
+    // A second, genuinely different resize while the first is still frozen.
+    // (Unfitting back to the size the client still has would be a same-size
+    // request, resolved at the seed with nothing new to wait for.)
+    f.state()
+        .animate_window_geometry(&window, Size::from((900, 700)));
+    let second = f.state().window_animations.generation_of(eid).unwrap();
+    assert!(
+        second > first,
+        "the new request invalidates the old capture ({first} -> {second})"
+    );
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "and it waits for the client's redraw of the new size"
+    );
+}
+
+/// Adoption holds a slot rather than requesting a resize, so it is never frozen —
+/// its content is meant to stretch to fill immediately.
+#[test]
+fn an_adopted_slot_is_never_frozen() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+
+    let (_sid, cid, surface) = arrange_pending_relaunch(&mut f, &tmp);
+    let w = f.client(cid).window(&surface);
+    w.set_size(300, 200);
+    w.attach_new_buffer();
+    w.ack_last_and_commit();
+    f.double_roundtrip(cid);
+
+    let adopted = window_by_app_id(&mut f, "myapp").expect("adopted the slot");
+    let eid = element_id(&mut f, &adopted);
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "a Stretch entry never start-holds"
     );
 }

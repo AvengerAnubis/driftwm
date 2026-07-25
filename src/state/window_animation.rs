@@ -17,6 +17,31 @@ const TARGET_MOVED_EPSILON: f64 = 0.5;
 /// A client that never commits the requested size holds the stretched endpoint
 /// no longer than this after first reaching it.
 pub(crate) const MAX_ENDPOINT_HOLD: Duration = Duration::from_millis(500);
+/// How long a compositor-initiated resize waits for the client's first redraw
+/// before giving up and animating with stale content. Same bound as the endpoint
+/// hold: a client that misses one misses both.
+pub(crate) const MAX_START_HOLD: Duration = MAX_ENDPOINT_HOLD;
+
+/// The freeze that precedes a compositor-initiated resize leg. Nothing moves
+/// until the client delivers the new size, so the leg can play with real content
+/// on both sides of the crossfade instead of stretching a stale buffer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum StartHold {
+    /// Not holding — the leg advances normally.
+    Off,
+    /// Armed at seed; the deadline anchors on the first tick, like the endpoint
+    /// hold, so a queued entry doesn't burn its budget before it is ticked.
+    Armed,
+    /// Frozen until this deadline, after which the leg degrades to animating
+    /// with capped stale content.
+    Until(Instant),
+}
+
+impl StartHold {
+    pub fn is_held(self) -> bool {
+        !matches!(self, StartHold::Off)
+    }
+}
 
 /// The rendered stand-in for a window while an animation is playing: where its
 /// content is drawn, at what size, and how opaque. Named apart from the
@@ -120,6 +145,14 @@ enum AnimationKind {
         /// Set on first reaching the endpoint while the request is still
         /// outstanding; releases the hold once it passes.
         hold_deadline: Option<Instant>,
+        /// The pre-leg freeze. Deliberately its own state rather than derived
+        /// from `requested_size`: the degrade path keeps the request (the chase
+        /// target comes from it) while `p` advances, so a predicate would
+        /// contradict the degrade.
+        start_hold: StartHold,
+        /// Bumped by every request-carrying (re)start. Stamps the captured old
+        /// content so a stale capture can never be paired with a newer leg.
+        generation: u64,
         role: GeometryRole,
     },
 }
@@ -131,6 +164,8 @@ struct WindowAnimation {
 #[derive(Default)]
 pub(crate) struct WindowAnimations {
     animations: HashMap<ElementId, WindowAnimation>,
+    /// Monotonic across all entries; see `Geometry::generation`.
+    generation: u64,
 }
 
 impl WindowAnimations {
@@ -196,6 +231,8 @@ impl WindowAnimations {
                     last_committed_size,
                     buffer_stale,
                     content_policy: entry_policy,
+                    start_hold,
+                    generation: entry_generation,
                 },
         }) = self.animations.get_mut(&id)
         {
@@ -221,9 +258,26 @@ impl WindowAnimations {
                 *entry_request = requested_size;
                 *buffer_stale = true;
                 *entry_policy = content_policy;
+                // A brand new resize: freeze again from wherever the visual is,
+                // and invalidate any content captured for the previous request.
+                self.generation += 1;
+                *entry_generation = self.generation;
+                *start_hold = if content_policy == ContentPolicy::Cap {
+                    StartHold::Armed
+                } else {
+                    StartHold::Off
+                };
+            } else if start_hold.is_held() {
+                // Still the same freeze, just moving — but re-anchor it, so the
+                // budget is measured from the user's latest action.
+                *start_hold = StartHold::Armed;
             }
             return;
         }
+        if requested_size.is_some() {
+            self.generation += 1;
+        }
+        let generation = self.generation;
         self.animations.insert(
             id,
             WindowAnimation {
@@ -238,10 +292,41 @@ impl WindowAnimations {
                     content_policy,
                     last_committed_size: committed_size,
                     hold_deadline: None,
+                    start_hold: if requested_size.is_some() && content_policy == ContentPolicy::Cap
+                    {
+                        StartHold::Armed
+                    } else {
+                        StartHold::Off
+                    },
+                    generation,
                     role,
                 },
             },
         );
+    }
+
+    /// Whether `id` is frozen before its resize leg. Test-only until the capture
+    /// stash lands — the pre-commit hook refreshes the stash off this.
+    #[cfg(test)]
+    pub fn start_held(&self, id: ElementId) -> bool {
+        matches!(
+            self.animations.get(&id),
+            Some(WindowAnimation {
+                kind: AnimationKind::Geometry { start_hold, .. }
+            }) if start_hold.is_held()
+        )
+    }
+
+    /// Capture generation of `id`'s current request, for pairing stashed content.
+    /// Test-only until the stash lands and consumes it.
+    #[cfg(test)]
+    pub fn generation_of(&self, id: ElementId) -> Option<u64> {
+        match self.animations.get(&id) {
+            Some(WindowAnimation {
+                kind: AnimationKind::Geometry { generation, .. },
+            }) => Some(*generation),
+            _ => None,
+        }
     }
 
     /// The current visual rect of a geometry entry in its own space, if any.
@@ -326,12 +411,20 @@ impl WindowAnimations {
                 visual,
                 buffer_stale,
                 content_policy,
+                start_hold,
                 ..
             } => AnimatedVisual {
                 loc: visual.loc,
                 size: visual.size,
                 alpha: 1.0,
-                cap_content: *buffer_stale && *content_policy == ContentPolicy::Cap,
+                // A frozen window renders at its seed ratio, uncapped: the seed
+                // reproduces exactly what was on screen before the action, which
+                // for a frame-converted seed (fullscreen at zoom) is not 1:1.
+                // Capping would visibly shrink the "frozen" window. The cap is for
+                // a leg that runs with stale content, i.e. after a degrade.
+                cap_content: !start_hold.is_held()
+                    && *buffer_stale
+                    && *content_policy == ContentPolicy::Cap,
             },
         }
     }
@@ -346,6 +439,7 @@ impl WindowAnimations {
                     requested_size,
                     last_committed_size,
                     buffer_stale,
+                    start_hold,
                     ..
                 },
         }) = self.animations.get_mut(&id)
@@ -365,6 +459,9 @@ impl WindowAnimations {
                 *requested_size = None;
                 // Only an actual commit clears staleness.
                 *buffer_stale = false;
+                // The redraw the freeze was waiting for: release it so the leg
+                // can play with real content on both sides.
+                *start_hold = StartHold::Off;
             }
             *last_committed_size = committed_size;
         }
@@ -404,10 +501,23 @@ impl WindowAnimations {
                 progress,
                 requested_size,
                 hold_deadline,
+                start_hold,
                 ..
             } => {
                 if !eligible {
                     return false;
+                }
+                // Frozen: nothing advances until the client redraws (handled in
+                // `on_window_commit`) or the budget runs out, which degrades to
+                // animating with capped stale content.
+                match *start_hold {
+                    StartHold::Armed => {
+                        *start_hold = StartHold::Until(now + MAX_START_HOLD);
+                        return true;
+                    }
+                    StartHold::Until(deadline) if now < deadline => return true,
+                    StartHold::Until(_) => *start_hold = StartHold::Off,
+                    StartHold::Off => {}
                 }
                 let target = Rectangle::new(
                     target_loc,
