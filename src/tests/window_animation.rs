@@ -834,7 +834,7 @@ fn conversion_drops_the_window_animation_entry() {
     );
     let counters = f.state().debug_counters();
     assert_eq!(counters["closing_snapshots"], 0);
-    assert_eq!(counters["adoption_fades"], 0);
+    assert_eq!(counters["standin_fades"], 0);
     assert_eq!(counters["close_pixels"], 0);
 
     // Tear the stand-in down for the baseline.
@@ -881,7 +881,7 @@ fn adoption_drops_entries_and_creates_no_render_transient() {
     );
     let counters = f.state().debug_counters();
     assert_eq!(
-        counters["adoption_fades"], 0,
+        counters["standin_fades"], 0,
         "the adoption crossfade is backend-gated — none headless"
     );
     assert_eq!(counters["closing_snapshots"], 0);
@@ -1253,5 +1253,45 @@ fn a_growing_animation_never_magnifies_the_stale_buffer() {
     assert!(
         sx <= 1.0 && sy <= 1.0,
         "stale content must not be magnified (got {sx:.2}x, {sy:.2}x)"
+    );
+}
+
+/// Dismissing a stand-in still does its bookkeeping — off the stage, chrome
+/// caches evicted — and materializes no render transient headless, since the fade
+/// is backend-gated like every other one. The fade's own shape (alpha curve and
+/// shrink) is pinned by the unit tests on `StandInFade`, which need no renderer.
+#[test]
+fn dismissing_a_stand_in_leaves_no_render_transient_headless() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((500, 500)),
+        Size::from((600, 400)),
+        "myapp",
+        "myapp",
+    );
+    assert!(
+        f.state().find_suspended(sid).is_some(),
+        "the stand-in exists"
+    );
+
+    f.state().dismiss_suspended(sid);
+
+    assert!(
+        f.state().find_suspended(sid).is_none(),
+        "the dismiss took it off the stage"
+    );
+    let counters = f.state().debug_counters();
+    assert_eq!(
+        counters["standin_fades"], 0,
+        "the dismiss fade is backend-gated — none headless"
+    );
+    assert_eq!(counters["closing_snapshots"], 0);
+    assert_eq!(counters["close_pixels"], 0);
+    assert_eq!(
+        counters["decorations"], 0,
+        "the stand-in's chrome caches were evicted"
     );
 }

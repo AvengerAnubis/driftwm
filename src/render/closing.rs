@@ -579,9 +579,10 @@ pub(crate) fn render_snapshots_for_output(
         .collect()
 }
 
-/// A departing suspended stand-in fading out over the live window that adopted
-/// its slot. Rendered via `push_suspended_element` with a decreasing alpha.
-pub(crate) struct AdoptionFade {
+/// A departing suspended stand-in fading out: either above the live window that
+/// adopted its slot, or on its own when dismissed. Rendered via
+/// `push_suspended_element` with a decreasing alpha, plus a shrink for a dismiss.
+pub(crate) struct StandInFade {
     pub suspended: Rc<SuspendedWindow>,
     pub loc: Point<i32, Logical>,
     /// The stand-in's launching and focused states as displayed when the fade
@@ -591,10 +592,15 @@ pub(crate) struct AdoptionFade {
     /// the fade would visibly change before fading out.
     pub launching: bool,
     pub focused: bool,
+    /// Scale the chrome shrinks toward by the end of the fade. A dismiss is a
+    /// close, so it uses `effects.animation_scale`; the adoption crossfade is a
+    /// representation exchange and passes `1.0`, which makes
+    /// [`Self::shrink_scale`] exactly 1 and leaves its elements untransformed.
+    pub shrink: f64,
     pub progress: f64,
 }
 
-impl AdoptionFade {
+impl StandInFade {
     pub fn tick(&mut self, frame_factor: f64) {
         self.progress += (1.0 - self.progress) * frame_factor;
     }
@@ -605,6 +611,12 @@ impl AdoptionFade {
 
     pub fn alpha(&self) -> f32 {
         fade_out_alpha(self.progress)
+    }
+
+    /// Current shrink factor. Exactly `1.0` for the whole fade when `shrink` is
+    /// `1.0`, so the adoption path never picks up a transform.
+    pub fn shrink_scale(&self) -> f64 {
+        1.0 - (1.0 - self.shrink) * self.progress.clamp(0.0, 1.0)
     }
 }
 
@@ -636,5 +648,58 @@ mod close_pixel_age_tests {
         ));
         // The bound itself still counts as fresh.
         assert!(close_pixels_fresh(captured, captured + MAX_CLOSE_PIXEL_AGE));
+    }
+}
+
+#[cfg(test)]
+mod standin_fade_tests {
+    use super::*;
+
+    fn fade(shrink: f64, progress: f64) -> StandInFade {
+        StandInFade {
+            suspended: Rc::new(crate::state::SuspendedWindow::new(
+                crate::state::SuspendedId(1),
+                Size::from((400, 300)),
+                driftwm::desktop_entry::AppIdentity {
+                    app_id: "a".into(),
+                    desktop_id: "a".into(),
+                    display_name: "a".into(),
+                },
+                driftwm::session::Origin::Explicit,
+                false,
+            )),
+            loc: Point::from((0, 0)),
+            launching: false,
+            focused: false,
+            shrink,
+            progress,
+        }
+    }
+
+    /// The adoption crossfade passes `1.0`, and it has to stay *exactly* 1 at
+    /// every progress: any drift would wrap its chrome in a transform and change
+    /// what is a purely alpha-only exchange today.
+    #[test]
+    fn an_unshrinking_fade_is_exactly_identity_throughout() {
+        for p in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert_eq!(fade(1.0, p).shrink_scale(), 1.0, "progress {p}");
+        }
+    }
+
+    /// A dismiss shrinks from 1 down to the configured amplitude, like a close.
+    #[test]
+    fn a_dismiss_fade_shrinks_to_its_amplitude() {
+        assert_eq!(fade(0.95, 0.0).shrink_scale(), 1.0);
+        assert_eq!(fade(0.95, 1.0).shrink_scale(), 0.95);
+        let mid = fade(0.95, 0.5).shrink_scale();
+        assert!(mid < 1.0 && mid > 0.95, "monotonic between the two ({mid})");
+    }
+
+    /// Alpha follows the same `1 - p^2` curve real closes use.
+    #[test]
+    fn a_dismiss_fade_uses_the_close_alpha_curve() {
+        assert_eq!(fade(0.95, 0.0).alpha(), 1.0);
+        assert_eq!(fade(0.95, 1.0).alpha(), 0.0);
+        assert!((fade(0.95, 0.3).alpha() - 0.91).abs() < 1e-6);
     }
 }

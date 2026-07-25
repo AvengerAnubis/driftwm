@@ -508,7 +508,7 @@ pub struct DriftWm {
     /// Flattened textures of closed windows, faded out after teardown.
     pub(crate) closing_snapshots: Vec<crate::render::ClosingSnapshot>,
     /// Departing stand-ins fading over the window that adopted their slot.
-    pub(crate) adoption_fades: Vec<crate::render::AdoptionFade>,
+    pub(crate) standin_fades: Vec<crate::render::StandInFade>,
     /// Content textures captured at unmap/teardown, keyed by root surface id,
     /// consumed when the close animation flattens.
     pub(crate) close_pixels: std::collections::HashMap<
@@ -1821,7 +1821,7 @@ impl DriftWm {
                 }
             }
         }
-        for fade in &self.adoption_fades {
+        for fade in &self.standin_fades {
             let rect = Rectangle::new(fade.loc, fade.suspended.size.get());
             if visible.overlaps(rect) {
                 return true;
@@ -1926,7 +1926,7 @@ impl DriftWm {
             || self.cursor.is_animated()
             || self.window_animations.is_active()
             || !self.closing_snapshots.is_empty()
-            || !self.adoption_fades.is_empty()
+            || !self.standin_fades.is_empty()
     }
 
     pub fn flush_middle_click(&mut self, press_time: u32, release_time: Option<u32>) {
@@ -2661,7 +2661,7 @@ impl DriftWm {
             ("real_close_marks", self.real_close_marks.len()),
             ("window_animations", self.window_animations.len()),
             ("closing_snapshots", self.closing_snapshots.len()),
-            ("adoption_fades", self.adoption_fades.len()),
+            ("standin_fades", self.standin_fades.len()),
             ("close_pixels", self.close_pixels.len()),
             ("unmap_snapshots", self.unmap_snapshots.len()),
             ("pending_relaunches", self.pending_relaunches.len()),

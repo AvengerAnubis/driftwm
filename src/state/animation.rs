@@ -51,7 +51,7 @@ impl DriftWm {
     /// True if a canvas rect intersects some output that can actually draw it
     /// (live, not DPMS-off). Animations intersecting no such output complete
     /// instantly, so they never wedge the udev idle fast-path.
-    fn canvas_rect_drawable(&self, rect: Rectangle<i32, Logical>) -> bool {
+    pub(crate) fn canvas_rect_drawable(&self, rect: Rectangle<i32, Logical>) -> bool {
         self.space.outputs().any(|o| {
             if self.dpms_off_outputs.contains(o) {
                 return false;
@@ -294,10 +294,10 @@ impl DriftWm {
         self.closing_snapshots.retain(|s| !s.is_done());
 
         let mut faded: Vec<crate::state::SuspendedId> = Vec::new();
-        for fade in &mut self.adoption_fades {
+        for fade in &mut self.standin_fades {
             fade.tick(frame_factor);
         }
-        self.adoption_fades.retain(|fade| {
+        self.standin_fades.retain(|fade| {
             if fade.is_done() {
                 faded.push(fade.suspended.id);
                 false
@@ -305,7 +305,7 @@ impl DriftWm {
                 true
             }
         });
-        // The fade re-inserted suspended chrome the adopt purged; re-purge it.
+        // The fade re-inserted suspended chrome its owner purged; re-purge it.
         for sid in faded {
             let key = crate::decorations::DecorationKey::Suspended(sid);
             self.decorations.remove(&key);

@@ -21,7 +21,7 @@ pub(crate) use blur::compile_blur_shaders;
 pub use blur::{BlurCache, SharedBlur};
 pub use capture::{render_capture_frames, render_screencopy, render_toplevel_captures};
 pub(crate) use closing::{
-    AdoptionFade, CloseChrome, ClosePixels, ClosingSnapshot, capture_close_pixels,
+    CloseChrome, ClosePixels, ClosingSnapshot, StandInFade, capture_close_pixels,
     close_pixels_fresh, snapshot_canvas, snapshot_screen,
 };
 pub use cursor::build_cursor_elements;
@@ -81,6 +81,10 @@ struct FadeRender {
     focused: bool,
     launching: bool,
     alpha: f32,
+    /// `None` unless the fade actually shrinks — an identity transform would
+    /// still change the element variant and drop its opaque regions, so the
+    /// adoption crossfade must keep taking the untransformed path.
+    animation: Option<WindowRenderAnimation>,
 }
 
 impl WindowRenderAnimation {
@@ -317,6 +321,7 @@ pub(crate) fn compose_capture_elements(
                     focused,
                     launching,
                     1.0,
+                    None,
                     &state.config.decorations,
                     state.decoration_scale,
                     &mut state.decorations,
@@ -805,6 +810,7 @@ pub fn compose_frame(
                     focused,
                     launching,
                     1.0,
+                    None,
                     &state.config.decorations,
                     state.decoration_scale,
                     &mut state.decorations,
@@ -1380,15 +1386,33 @@ pub fn compose_frame(
         // the chrome caches key on both, so re-resolving them would re-rasterize
         // the label and re-color the bar mid-fade.
         let fades: Vec<FadeRender> = state
-            .adoption_fades
+            .standin_fades
             .iter()
             .filter(|f| visible_rect.overlaps(Rectangle::new(f.loc, f.suspended.size.get())))
-            .map(|f| FadeRender {
-                suspended: f.suspended.clone(),
-                loc: f.loc,
-                focused: f.focused,
-                launching: f.launching,
-                alpha: f.alpha(),
+            .map(|f| {
+                let shrink = f.shrink_scale();
+                let size = f.suspended.size.get();
+                let bar = state.config.decorations.title_bar_height;
+                // Shrink toward the centre of the frame the stand-in occupied
+                // (its body plus the bar strip above it).
+                let centre = Point::<f64, Physical>::from((
+                    (f.loc.x as f64 - camera.x + size.w as f64 / 2.0) * zoom * output_scale,
+                    (f.loc.y as f64 - camera.y - bar as f64 / 2.0 + size.h as f64 / 2.0)
+                        * zoom
+                        * output_scale,
+                ));
+                FadeRender {
+                    suspended: f.suspended.clone(),
+                    loc: f.loc,
+                    focused: f.focused,
+                    launching: f.launching,
+                    alpha: f.alpha(),
+                    animation: (shrink < 1.0).then(|| WindowRenderAnimation {
+                        origin: centre,
+                        offset: Point::default(),
+                        scale: Scale::from(shrink),
+                    }),
+                }
             })
             .collect();
         for fade in fades {
@@ -1401,6 +1425,7 @@ pub fn compose_frame(
                 fade.focused,
                 fade.launching,
                 fade.alpha,
+                fade.animation,
                 &state.config.decorations,
                 state.decoration_scale,
                 &mut state.decorations,

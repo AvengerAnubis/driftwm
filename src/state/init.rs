@@ -294,7 +294,7 @@ impl DriftWm {
             render: RenderCache::new(),
             window_animations: Default::default(),
             closing_snapshots: Vec::new(),
-            adoption_fades: Vec::new(),
+            standin_fades: Vec::new(),
             close_pixels: std::collections::HashMap::new(),
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,

@@ -410,11 +410,13 @@ impl DriftWm {
             // fade keeps the chrome the user was actually looking at.
             let launching = self.is_suspended_launching(sid);
             let focused = self.gated_suspended_focus() == Some(sid);
-            self.adoption_fades.push(crate::render::AdoptionFade {
+            self.standin_fades.push(crate::render::StandInFade {
                 suspended: s.clone(),
                 loc: pos,
                 launching,
                 focused,
+                // A representation exchange, not a close: alpha only.
+                shrink: 1.0,
                 progress: 0.0,
             });
         }
@@ -523,6 +525,29 @@ impl DriftWm {
             self.window_focus,
             Some(crate::state::FocusIntent::Suspended(sid)) if sid == id
         );
+
+        // Fade the stand-in out like a real window close. The chrome textures
+        // live on the Rc, so retaining it here — before the cache evictions
+        // below — keeps them renderable after the stage entry is gone. Skipped
+        // when it would never be seen (headless, or off every drawable output).
+        let rect = self
+            .stage
+            .position_of(&StageWindow::Suspended(s.clone()))
+            .map(|loc| (loc, s.size.get()));
+        if self.backend.is_some()
+            && let Some((loc, size)) = rect
+            && self.canvas_rect_drawable(Rectangle::new(loc, size))
+        {
+            let focused = self.gated_suspended_focus() == Some(id);
+            self.standin_fades.push(crate::render::StandInFade {
+                suspended: s.clone(),
+                loc,
+                launching: self.is_suspended_launching(id),
+                focused,
+                shrink: self.config.effects.animation_scale,
+                progress: 0.0,
+            });
+        }
 
         self.stage.remove(&StageWindow::Suspended(s));
         self.decorations.remove(&DecorationKey::Suspended(id));
