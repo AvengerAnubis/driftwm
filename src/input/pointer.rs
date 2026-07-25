@@ -959,6 +959,7 @@ impl DriftWm {
             touch_slots: 0,
             locked_ratio: None,
         };
+        self.arm_interactive_move(&s.id);
         pointer.set_grab(self, grab, serial, Focus::Clear);
     }
 

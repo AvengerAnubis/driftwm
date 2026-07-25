@@ -308,9 +308,14 @@ impl PointerGrab<DriftWm> for ResizeGrab {
         match &self.target {
             // A client resize arms the commit-time reposition via
             // `WaitingForLastCommit`; a stand-in has no client to configure, so
-            // persist its settled size on the session-store debounce instead.
+            // persist its settled size on the session-store debounce instead,
+            // and balance the grab-target entry its install armed (a client's
+            // resize is witnessed by the surface's own `ResizeState`).
             ClusterMember::Client(_) => self.finalize(),
-            ClusterMember::Suspended(_) => data.session_store_mark_dirty(),
+            ClusterMember::Suspended(id) => {
+                data.disarm_interactive_move(id);
+                data.session_store_mark_dirty();
+            }
         }
         // Common to both arms: refresh every resolved member's stable snap rect
         // so a later close can reconstruct the cluster. The client primary's own
@@ -741,7 +746,10 @@ impl TouchGrab<DriftWm> for ResizeGrab {
         // would lose the app's shape when the pointer next reappears.
         match &self.target {
             ClusterMember::Client(_) => self.finalize(),
-            ClusterMember::Suspended(_) => data.session_store_mark_dirty(),
+            ClusterMember::Suspended(id) => {
+                data.disarm_interactive_move(id);
+                data.session_store_mark_dirty();
+            }
         }
         for member in &self.cluster_resize.members {
             if let Some(element) = member.window.resolve(&data.stage) {
