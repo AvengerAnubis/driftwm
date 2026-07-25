@@ -163,6 +163,9 @@ fn fitting_straight_out_of_fullscreen_centers_the_window() {
     f.double_roundtrip(id);
     super::adopt_last_configure(&mut f, id, &surface);
     f.double_roundtrip(id);
+    // The fit's pan rides the window's freeze, so it is only armed once a window
+    // tick sees the ack release it.
+    f.state().tick_window_animations(TICK);
     settle(&mut f);
 
     let usable = f.state().get_usable_area();

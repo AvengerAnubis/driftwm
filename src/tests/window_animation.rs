@@ -883,8 +883,8 @@ fn the_scene_keeps_its_view_until_the_fullscreen_entry_lands() {
 
 /// A frozen fullscreen picture claims to cover its output, and that claim culls
 /// everything underneath. It is only good while the output still shows the view
-/// the picture froze under: a fit dispatched out of fullscreen retargets the
-/// exit's entry (keeping its stamp) and pans the camera away, and holding the
+/// the picture froze under: a pan gesture, its momentum or a navigation action
+/// during the exit's freeze slides the picture off that output, and holding the
 /// claim through that would leave the pan crossing black.
 #[test]
 fn a_camera_move_ends_a_frozen_fullscreen_cover() {
@@ -3104,5 +3104,302 @@ fn pin_toggle_stays_instant_in_both_directions() {
         f.state().debug_counters()["resize_captures"],
         0,
         "with the stash dropped again"
+    );
+}
+
+/// The fit's own destination, computed the same way `compute_fit_geometry` does:
+/// the usable area's center subtracted from the window's pre-fit visual center.
+/// Read before `fit_window` runs, since that is the state its internal
+/// computation sees too.
+fn fit_target_camera(f: &mut Fixture, window: &Window) -> Point<f64, Logical> {
+    let usable = f.state().get_usable_area();
+    let usable_center: Point<f64, Logical> = Point::from((
+        usable.loc.x as f64 + usable.size.w as f64 / 2.0,
+        usable.loc.y as f64 + usable.size.h as f64 / 2.0,
+    ));
+    let visual_center = f.state().window_visual_center(window).unwrap();
+    Point::from((
+        visual_center.x - usable_center.x,
+        visual_center.y - usable_center.y,
+    ))
+}
+
+/// The camera pan for an off-center fit is parked behind the window's resize
+/// freeze, not armed at the action — otherwise the pan and the resize read as
+/// two separate motions instead of one.
+#[test]
+fn a_fit_on_an_off_center_window_parks_its_pan_until_the_ack() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    let want_camera = fit_target_camera(&mut f, &window);
+    assert!(
+        dist(want_camera, Point::from((0.0, 0.0))) > 50.0,
+        "the fixture must actually be off-center, or a zero-length pan would \
+         pass this test whether or not it ever ran"
+    );
+
+    f.state().fit_window(&window);
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the resize is well above the sub-threshold floor, so it freezes"
+    );
+    assert!(
+        f.state().camera_target().is_none(),
+        "the pan is parked behind the freeze, not armed at the action"
+    );
+
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    f.double_roundtrip(id);
+    assert!(
+        f.state().camera_target().is_none(),
+        "the ack alone does not arm it — a window-animation tick has to see \
+         the release"
+    );
+
+    f.state().tick_window_animations(TICK);
+    let camera_target = f.state().camera_target();
+    assert!(
+        camera_target.is_some_and(|c| dist(c, want_camera) < 1e-6),
+        "the released pan lands on the fit's own destination, got \
+         {camera_target:?} want {want_camera:?}"
+    );
+}
+
+/// The far end a client never acks: the parked pan is still waiting behind the
+/// freeze right up to the budget's edge, and the degrade that finally moves the
+/// leg (with stale content) releases the pan along with it — the same tick, the
+/// same predicate as the commit path.
+#[test]
+fn a_fit_that_is_never_acked_parks_its_pan_until_the_degrade() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    let want_camera = fit_target_camera(&mut f, &window);
+
+    f.state().fit_window(&window);
+    assert!(
+        f.state().camera_target().is_none(),
+        "parked behind the freeze"
+    );
+
+    let base = Instant::now();
+    for _ in 0..30 {
+        f.state().tick_window_animations_at(TICK, base);
+    }
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "still frozen — nothing has acked"
+    );
+    assert!(
+        f.state().camera_target().is_none(),
+        "still parked while the freeze holds"
+    );
+
+    let past = base + PAST_HOLD;
+    f.state().tick_window_animations_at(TICK, past);
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "the budget expiring degrades the leg"
+    );
+    let camera_target = f.state().camera_target();
+    assert!(
+        camera_target.is_some_and(|c| dist(c, want_camera) < 1e-6),
+        "the degrade releases the parked pan too, got {camera_target:?} want \
+         {want_camera:?}"
+    );
+}
+
+/// A resize too small to carry a request has nothing to freeze over, so there
+/// is nothing for the pan to wait on either — it arms at the action.
+#[test]
+fn a_sub_threshold_fit_arms_its_pan_immediately() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    // Fit once for real, and let the client catch up, so the window is already
+    // sitting at the fit's own target size.
+    f.state().fit_window(&window);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    f.double_roundtrip(id);
+    tick_until_settled(&mut f);
+
+    // Fitting an already-fit window asks for the same size it already has: the
+    // resize carries no request at all, so nothing freezes.
+    f.state().fit_window(&window);
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "a sub-threshold resize has nothing to freeze over"
+    );
+    assert!(
+        f.state().camera_target().is_some(),
+        "with no freeze to wait on, the pan arms immediately instead of parking"
+    );
+}
+
+/// A camera move that lands during the freeze — a pan, momentum, a navigation
+/// action — takes ownership of the viewport. The fit's own pan must not yank it
+/// back once the freeze finally releases; it is dropped instead.
+#[test]
+fn a_camera_move_during_a_fit_freeze_drops_the_parked_pan() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    tick_until_settled(&mut f);
+
+    f.state().fit_window(&window);
+    assert!(
+        f.state().camera_target().is_none(),
+        "parked behind the freeze"
+    );
+
+    // The user pans mid-freeze: a deliberate move that takes the viewport.
+    let moved_to = Point::from((123.0, 45.0));
+    f.state().set_camera(moved_to);
+
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    f.double_roundtrip(id);
+    f.state().tick_window_animations(TICK);
+
+    assert!(
+        f.state().camera_target().is_none(),
+        "the parked pan is dropped, not applied over the user's move"
+    );
+    assert_eq!(
+        f.state().camera(),
+        moved_to,
+        "and the camera is left exactly where the user put it"
+    );
+}
+
+/// A request-carrying retarget mid-freeze — fullscreen entering, then leaving,
+/// both before the fit's own freeze ever gets acked — supersedes the fit's
+/// request each time, and the second's own action owns the transition from
+/// there: the fit's parked pan does not survive to whatever release finally
+/// comes.
+#[test]
+fn fullscreen_mid_fit_freeze_supersedes_the_parked_pan() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.state().fit_window(&window);
+    assert!(
+        f.state().camera_target().is_none(),
+        "parked behind the fit's freeze"
+    );
+
+    f.state().enter_fullscreen(&window, Some(output.clone()));
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the entry is still frozen, now on the fullscreen request"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+    assert!(
+        !f.state().is_output_fullscreen(&output),
+        "back out before ever acking either configure"
+    );
+
+    // Neither retarget was ever acked, so only the degrade ends the freeze —
+    // the same predicate that fires the pending pan on a real commit.
+    let base = Instant::now();
+    for _ in 0..30 {
+        f.state().tick_window_animations_at(TICK, base);
+    }
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "still frozen — nothing has acked"
+    );
+    let past = base + PAST_HOLD;
+    f.state().tick_window_animations_at(TICK, past);
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "the budget expiring degrades the leg"
+    );
+
+    assert!(
+        f.state().camera_target().is_none(),
+        "the fit's pan never lands once fullscreen has superseded its freeze"
+    );
+}
+
+/// Cancelling a window's animation outright (`TogglePinToScreen` is one of
+/// several actions that do) takes the geometry entry down with it — and any pan
+/// parked on that entry goes too. A frozen entry cannot complete on its own, so
+/// there is no later moment for the pan to land.
+#[test]
+fn cancelling_a_frozen_fit_drops_its_parked_pan() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    tick_until_settled(&mut f);
+
+    f.state().fit_window(&window);
+    assert!(
+        f.state().camera_target().is_none(),
+        "parked behind the freeze"
+    );
+
+    f.state().execute_action(&Action::TogglePinToScreen);
+    assert!(f.state().is_pinned(&window), "the toggle pinned the window");
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "cancelling took the geometry entry — and the pan parked on it — down \
+         with it"
+    );
+
+    // The client still eventually redraws at the size the (now-cancelled) fit
+    // requested; that real commit must not resurrect a pan that was dropped.
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    f.double_roundtrip(id);
+    tick_until_settled(&mut f);
+    assert!(
+        f.state().camera_target().is_none(),
+        "no late pan lands for a freeze that was cancelled, not released"
     );
 }
