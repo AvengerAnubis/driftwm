@@ -364,6 +364,13 @@ impl WindowAnimations {
         {
             if replace_visual || *entry_space != space {
                 *visual = seed;
+                // A frozen picture is drawn at that rect, so rewriting it — or
+                // reading it in another coordinate frame — leaves any output the
+                // picture claimed to cover uncovered. Keeping the claim culls the
+                // scene on a monitor nothing is hiding any more, which draws
+                // black. The dress the picture wears is untouched: the seed of a
+                // reframing retarget is the same picture re-expressed.
+                entry_picture.fullscreen_on = None;
             }
             // A retarget always starts a fresh leg from wherever the visual is,
             // so the new leg takes a full (distance-independent) duration.
@@ -402,13 +409,14 @@ impl WindowAnimations {
                 // An open fade deliberately survives this: fullscreening a
                 // window and toggling it back off before the client acks
                 // retargets the same entry, and dropping the fade there would
-                // pop a window that has never been drawn to full opacity.
-                // While the picture is frozen nothing can change it but the client's
-                // redraw, and that releases the freeze — so the stamp taken when it
-                // froze still describes what is on screen. Restating it from the
-                // interrupting action's role would dress a motionless frame for a
-                // side it is not showing (a fit during a fullscreen exit's freeze
-                // would pop chrome onto a still-fullscreen picture).
+                // pop a window still arriving to full opacity.
+                // A frozen picture keeps the dress it was stamped with: nothing
+                // but the client's redraw changes what is on screen, and that
+                // releases the freeze. Restating it from the interrupting
+                // action's role would dress a motionless frame for a side it is
+                // not showing (a fit during a fullscreen exit's freeze would pop
+                // chrome onto a still-fullscreen picture). What that picture
+                // *covers* is a separate question, answered above.
                 if !start_hold.is_held() {
                     *entry_picture = picture;
                 }

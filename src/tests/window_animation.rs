@@ -2253,6 +2253,54 @@ fn a_frozen_fullscreen_exit_still_covers_its_output() {
     tick_until_settled(&mut f);
 }
 
+/// A frozen fullscreen picture covers its output only while it is still drawn
+/// where it was frozen. Re-entering fullscreen inside the exit's freeze reseeds
+/// the rect that picture was drawn at, so the claim has to go with it —
+/// otherwise the output keeps culling the whole scene while the window it names
+/// is a small one growing from the corner, and the uncovered band renders black.
+/// Driven pinned, where the exit's cover matches under any camera and no pan can
+/// expire it.
+#[test]
+fn a_re_entered_fullscreen_drops_the_exit_freeze_cover() {
+    let mut f = Fixture::with_config(
+        Config::from_toml("[[window_rules]]\napp_id = \"p\"\npinned_to_screen = true\n").unwrap(),
+    );
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "p", (400, 300));
+    let window = window_by_app_id(&mut f, "p").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.state().enter_fullscreen(&window, Some(output.clone()));
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    tick_until_settled(&mut f);
+
+    // Exit, then straight back in — before the client has drawn anything at its
+    // windowed size, so the exit is still frozen on the fullscreen picture.
+    f.state().exit_fullscreen_on(&output);
+    assert!(
+        f.state().is_output_visually_fullscreen(&output),
+        "the exit's freeze holds the fullscreen picture on the output"
+    );
+
+    f.state().enter_fullscreen(&window, Some(output.clone()));
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "precondition: nothing released the freeze, so only the reseed can drop \
+         the cover"
+    );
+    assert!(
+        !f.state().is_output_visually_fullscreen(&output),
+        "the picture that covered the output has been reseeded to the windowed \
+         rect, so the scene behind it must draw"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+}
+
 /// Entering fullscreen unpins at the action, but the freeze then holds the
 /// *pinned* picture on screen. Reading pin membership live restacks a frame that
 /// is not moving: it drops out of the bucket that draws above every normal
