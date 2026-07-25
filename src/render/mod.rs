@@ -932,9 +932,11 @@ pub fn compose_frame(
                         (v.loc.x - anim_ref.x) * physical_zoom,
                         (v.loc.y - anim_ref.y) * physical_zoom,
                     )),
-                    scale: Scale::from((
-                        v.size.w / target_size.w.max(1.0),
-                        v.size.h / target_size.h.max(1.0),
+                    // Never magnifies a buffer the client has not redrawn yet.
+                    scale: Scale::from(crate::state::window_animation::content_scale(
+                        v.size,
+                        target_size,
+                        v.content_stale,
                     )),
                 };
                 (v.alpha, Some(animation))

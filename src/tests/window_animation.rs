@@ -1209,3 +1209,49 @@ fn adoption_holds_the_adopted_rect_until_the_client_catches_up() {
         "still filling the slot ({held:?})"
     );
 }
+
+/// A fit, fill, or fullscreen grows the window's rect several times over before
+/// the client redraws. The rect is allowed to animate, but the stale buffer must
+/// not be magnified to meet it — stretching a 400x300 buffer across a fitted
+/// 1896x1056 rect renders the interface ~4.7x oversized for those frames, which
+/// is the "glimpse of a huge interface" this pins.
+#[test]
+fn a_growing_animation_never_magnifies_the_stale_buffer() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.state().fit_window(&window);
+    let base = Instant::now();
+    for _ in 0..30 {
+        f.state().tick_window_animations_at(TICK, base);
+    }
+
+    let committed = window.geometry().size.to_f64();
+    let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let v = f.state().animated_visual(eid, loc, committed);
+    assert!(
+        v.content_stale,
+        "the client has not acked the fit size, so its buffer is stale"
+    );
+    // The rect really has grown far past the buffer...
+    assert!(
+        v.size.w / committed.w > 4.0,
+        "the fitted rect is several times the committed size ({:?} vs {committed:?})",
+        v.size
+    );
+    // ...but the content drawn into it is never blown up.
+    let (sx, sy) =
+        crate::state::window_animation::content_scale(v.size, committed, v.content_stale);
+    assert!(
+        sx <= 1.0 && sy <= 1.0,
+        "stale content must not be magnified (got {sx:.2}x, {sy:.2}x)"
+    );
+}

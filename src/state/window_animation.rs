@@ -26,6 +26,34 @@ pub(crate) struct AnimatedVisual {
     pub loc: Point<f64, Logical>,
     pub size: Size<f64, Logical>,
     pub alpha: f32,
+    /// The client has not yet committed the size we asked for, so its buffer
+    /// does not match `size`. Callers must not magnify content in this state —
+    /// see [`content_scale`].
+    pub content_stale: bool,
+}
+
+/// Scale to draw a window's committed buffer at, to fill `visual` on screen.
+///
+/// Minifying a stale buffer reads fine, but *magnifying* one does not: a fit or
+/// fullscreen grows the rect several times over before the client redraws, and
+/// stretching the old buffer up to meet it renders the interface hugely
+/// oversized for those frames (4.7x for a 400x300 window fitting a 1080p
+/// output). So while content is stale the scale is capped at 1: the frame still
+/// animates, the stale pixels just sit at their true size until the ack lands.
+pub(crate) fn content_scale(
+    visual: Size<f64, Logical>,
+    committed: Size<f64, Logical>,
+    content_stale: bool,
+) -> (f64, f64) {
+    let (sx, sy) = (
+        visual.w / committed.w.max(1.0),
+        visual.h / committed.h.max(1.0),
+    );
+    if content_stale {
+        (sx.min(1.0), sy.min(1.0))
+    } else {
+        (sx, sy)
+    }
 }
 
 /// Coordinate space a geometry chase runs in. Canvas entries render through the
@@ -235,6 +263,7 @@ impl WindowAnimations {
                 loc: target_loc,
                 size: target_size,
                 alpha: 1.0,
+                content_stale: false,
             };
         };
         match &animation.kind {
@@ -254,12 +283,18 @@ impl WindowAnimations {
                     // through most of the grow-in, then smoothly asymptotes to
                     // full opacity at p=1 — eased, with no saturation corner.
                     alpha: (1.0 - (1.0 - p) * (1.0 - p)) as f32,
+                    content_stale: false,
                 }
             }
-            AnimationKind::Geometry { visual, .. } => AnimatedVisual {
+            AnimationKind::Geometry {
+                visual,
+                requested_size,
+                ..
+            } => AnimatedVisual {
                 loc: visual.loc,
                 size: visual.size,
                 alpha: 1.0,
+                content_stale: requested_size.is_some(),
             },
         }
     }
@@ -381,5 +416,37 @@ impl WindowAnimations {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod content_scale_tests {
+    use super::*;
+
+    fn size(w: f64, h: f64) -> Size<f64, Logical> {
+        Size::from((w, h))
+    }
+
+    /// Growing past the committed buffer is capped at 1 while it is stale — the
+    /// magnification that made a fit look like a huge interface.
+    #[test]
+    fn stale_content_is_never_magnified() {
+        let (sx, sy) = content_scale(size(1896.0, 1056.0), size(400.0, 300.0), true);
+        assert_eq!((sx, sy), (1.0, 1.0));
+    }
+
+    /// Shrinking a stale buffer reads fine, so minification is left alone.
+    #[test]
+    fn stale_content_still_minifies() {
+        let (sx, _) = content_scale(size(200.0, 150.0), size(400.0, 300.0), true);
+        assert_eq!(sx, 0.5);
+    }
+
+    /// Once the client has acked, the buffer matches the rect and the ratio is
+    /// used as-is (the open animation's grow-in relies on this).
+    #[test]
+    fn fresh_content_scales_freely() {
+        let (sx, sy) = content_scale(size(800.0, 600.0), size(400.0, 300.0), false);
+        assert_eq!((sx, sy), (2.0, 2.0));
     }
 }
