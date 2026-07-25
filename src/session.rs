@@ -46,9 +46,10 @@ pub struct SessionEntry {
     /// (SSD-origin).
     #[serde(default)]
     pub csd: bool,
-    /// Whether this entry held the focus at write time, so restore can hand the
-    /// focus back and a new window's auto placement anchors where the user left
-    /// off. At most one entry per file carries it: the write side clears it on
+    /// Whether this entry held the focus at write time — or was restored as
+    /// focused and never handed it over — so restore can hand the focus back and
+    /// a new window's auto placement anchors where the user left off. At most
+    /// one entry per file carries it: the write side clears it on
     /// carried-forward entries, whose focus belongs to a boot that's over.
     /// Additive: a file without this field defaults to unfocused.
     #[serde(default)]

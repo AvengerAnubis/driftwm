@@ -49,6 +49,9 @@ pub struct SessionStore {
     pub(crate) durable_bookmarks: BTreeMap<String, [f64; 2]>,
     /// The stand-in that materialized from the focused entry, waiting for
     /// `apply_restored_focus` to hand it the focus once the boot outputs exist.
+    /// Survives a refused hand-over: the write side re-emits the flag for it
+    /// while nothing else holds focus, so an off-screen boot defers the record
+    /// to the next one instead of erasing it.
     pub(crate) restore_focus: Option<SuspendedId>,
     /// A change is waiting for the debounce timer to write it.
     dirty: bool,
@@ -145,14 +148,21 @@ impl DriftWm {
     /// Hand the focus back to the stand-in the session recorded as focused, so a
     /// new window's auto placement anchors to the cluster the user left off on.
     /// Runs once the boot outputs and their seeded cameras exist, and only when
-    /// the stand-in is visible on some output at the fraction auto placement
-    /// itself demands of an anchor — otherwise relaunch and dismiss would point
-    /// at a window nobody can see.
+    /// enough of the stand-in shows on *some* output that the user can see what
+    /// they'd be relaunching or dismissing. The fraction is auto placement's,
+    /// but the scope is not: auto placement weighs an anchor against the active
+    /// output alone, so a stand-in restored onto another monitor holds the focus
+    /// yet still won't anchor a window opened on the active one.
+    ///
+    /// A refused hand-over leaves the record pending rather than dropping it, so
+    /// a boot that can't use it hands it to the next one (see
+    /// `build_session_envelope`).
     pub fn apply_restored_focus(&mut self) {
-        let Some(id) = self.session_store.restore_focus.take() else {
+        let Some(id) = self.session_store.restore_focus else {
             return;
         };
         let Some(standin) = self.find_suspended(id) else {
+            self.session_store.restore_focus = None;
             return;
         };
         let app_id = standin.identity.app_id.clone();
@@ -160,11 +170,12 @@ impl DriftWm {
         let visible = self.space.outputs().any(|output| {
             self.window_visible_at_least_on(&element, output, AUTO_PLACE_CLUSTER_THRESHOLD)
         });
-        if visible {
-            self.set_suspended_focus(id, SERIAL_COUNTER.next_serial());
-        } else {
-            tracing::debug!("restored focus for {app_id} dropped: its stand-in is off screen");
+        if !visible {
+            tracing::debug!("restored focus for {app_id} deferred: its stand-in is off screen");
+            return;
         }
+        self.session_store.restore_focus = None;
+        self.set_suspended_focus(id, SERIAL_COUNTER.next_serial());
     }
 
     /// Per-output cameras to restore on connect: the durable fresh-boot seed
@@ -258,6 +269,14 @@ impl DriftWm {
         // Focus *intent*, the same anchor auto placement reads, so a launcher's
         // transient keyboard focus at shutdown doesn't erase the real one.
         let focused = self.focused_anchor_element();
+        // A hand-over this boot refused keeps its flag while nobody else holds
+        // focus, so the ordinary `restore_camera = false` boot — stand-in lands
+        // off screen, grant declined — doesn't erase the record on its first
+        // write. A real focus supersedes and retires it.
+        if focused.is_some() {
+            self.session_store.restore_focus = None;
+        }
+        let pending_focus = self.session_store.restore_focus;
         // Z-ordered tail: suspended stand-ins + (with restore on) live windows.
         // Tally live windows per app so carried quit records can be deduped
         // against the apps that actually came back.
@@ -268,7 +287,9 @@ impl DriftWm {
             if let Some(s) = window.suspended() {
                 let loc = self.stage.position_of(window).unwrap_or_default();
                 let mut entry = suspended_entry(s, loc);
-                entry.focused = has_focus;
+                // `pending_focus` is `None` whenever anything holds focus, so
+                // the two sources can never flag two entries.
+                entry.focused = has_focus || pending_focus == Some(s.id);
                 tail.push(entry);
             } else if include_live
                 && let Some(mut entry) = self.live_window_entry(window, &mut next_live_id)
