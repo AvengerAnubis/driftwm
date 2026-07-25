@@ -1800,17 +1800,24 @@ impl DriftWm {
                 os.zoom,
             )
         };
-        camera_active || self.output_shows_window_animations(output, camera, zoom)
+        // No cutoff: a frozen entry draws nothing new, but its deadline can only
+        // fire from a tick, so it has to keep the loop awake.
+        camera_active || self.output_shows_window_animations(output, camera, zoom, None)
     }
 
     /// Whether any window animation, closing snapshot, or adoption fade has a
     /// visual rect intersecting `output`'s viewport. Caller passes the output's
     /// already-read camera/zoom so this never re-locks `output_state`.
+    ///
+    /// `frozen_cutoff` is `Some(now)` for the redraw side: an entry still frozen
+    /// at `now` repaints the identical picture every frame, so it is not a reason
+    /// to compose one.
     fn output_shows_window_animations(
         &self,
         output: &Output,
         camera: Point<f64, Logical>,
         zoom: f64,
+        frozen_cutoff: Option<Instant>,
     ) -> bool {
         let name = output.name();
         let viewport = output_logical_size(output);
@@ -1846,6 +1853,9 @@ impl DriftWm {
             }
         }
         for (id, geo) in self.window_animations.scoping_entries() {
+            if frozen_cutoff.is_some_and(|now| self.window_animations.frozen_at(id, now)) {
+                continue;
+            }
             match geo {
                 Some((window_animation::AnimSpace::Screen(o), _)) => {
                     if o == name {

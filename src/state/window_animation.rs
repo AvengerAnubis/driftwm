@@ -347,6 +347,30 @@ impl WindowAnimations {
         }
     }
 
+    /// Whether `id` is frozen and will still be frozen after a tick at `now` —
+    /// i.e. it will paint the same picture again. The tick that lets a budget
+    /// expire reports false, since that one does move the window.
+    pub fn frozen_at(&self, id: ElementId, now: Instant) -> bool {
+        match self.animations.get(&id) {
+            Some(WindowAnimation {
+                kind: AnimationKind::Geometry { start_hold, .. },
+            }) => match *start_hold {
+                StartHold::Off => false,
+                StartHold::Armed => true,
+                StartHold::Until(deadline) => now < deadline,
+            },
+            _ => false,
+        }
+    }
+
+    /// Whether any entry is frozen. The per-commit capture hook probes this
+    /// before the per-surface work that only a frozen window needs.
+    pub fn any_start_held(&self) -> bool {
+        self.animations.values().any(|a| {
+            matches!(&a.kind, AnimationKind::Geometry { start_hold, .. } if start_hold.is_held())
+        })
+    }
+
     /// Capture generation of `id`'s current request, for pairing stashed content.
     pub fn generation_of(&self, id: ElementId) -> Option<u64> {
         match self.animations.get(&id) {

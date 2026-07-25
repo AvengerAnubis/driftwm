@@ -274,9 +274,15 @@ impl DriftWm {
         let speed = self.config.effects.animation_speed;
         let frame_factor = 1.0 - (1.0 - speed).powf(dt.as_secs_f64() * 60.0);
 
-        // Mark the outputs that show an animation *this* tick before advancing,
-        // so the completing tick still presents the final resting frame and
-        // udev re-arms the next frame (rect-scoped; never mark_all_dirty).
+        // Mark the outputs that show a *moving* animation this tick, before
+        // advancing, so the completing tick still presents the final resting
+        // frame and udev re-arms the next frame (rect-scoped; never
+        // mark_all_dirty). A frozen entry holds one picture for up to half a
+        // second, so it is no reason to compose. It does still reach
+        // `redraws_needed` on udev, which marks every output with an active
+        // animation: that redraw is the pump for the ticks its own deadline needs,
+        // so skipping the compose there too would first need a timer to replace
+        // the pump.
         let affected: Vec<Output> = self
             .space
             .outputs()
@@ -285,7 +291,7 @@ impl DriftWm {
                     let os = output_state(o);
                     (os.camera, os.zoom)
                 };
-                self.output_shows_window_animations(o, camera, zoom)
+                self.output_shows_window_animations(o, camera, zoom, Some(now))
             })
             .cloned()
             .collect();
@@ -405,8 +411,10 @@ impl DriftWm {
     /// capture path (the flatten needs one anyway).
     pub(crate) fn stash_resize_content(&mut self, surface: &WlSurface) {
         // This hook runs on every commit of every surface, so cheap-out on the
-        // O(1) check before the surface-state read and the stage lookup.
-        if !self.window_animations.is_active() {
+        // O(1) checks before the surface-state read and the O(#windows) stage
+        // lookup. Only a frozen entry stashes anything, and most animations
+        // (open, moves) never freeze at all.
+        if !self.window_animations.any_start_held() {
             return;
         }
         let new_buffer = with_states(surface, |states| {

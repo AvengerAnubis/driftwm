@@ -1950,6 +1950,51 @@ fn a_frozen_fullscreen_exit_keeps_its_fullscreen_chrome() {
     tick_until_settled(&mut f);
 }
 
+/// A frozen window paints the identical picture every frame, so it must not
+/// drive a full compose per tick for half a second. It still has to count as an
+/// active animation, though: the deadline that ends the freeze can only fire from
+/// a tick, and the tick that fires it does move the window.
+#[test]
+fn a_frozen_entry_asks_for_no_redraw_but_keeps_ticking() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.state().fit_window(&window);
+    let base = Instant::now();
+    f.state().tick_window_animations_at(TICK, base);
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the fit froze the window"
+    );
+
+    f.state().redraws_needed.clear();
+    f.state().tick_window_animations_at(TICK, base);
+    assert!(
+        f.state().redraws_needed.is_empty(),
+        "a frozen tick composes nothing new"
+    );
+    assert!(
+        f.state().output_has_active_animations(&output),
+        "but the entry still keeps the loop awake, or its budget could never expire"
+    );
+
+    // The tick that lets the budget expire is a real frame: it starts the leg.
+    let past = base + PAST_HOLD;
+    f.state().tick_window_animations_at(TICK, past);
+    assert!(
+        !f.state().redraws_needed.is_empty(),
+        "the tick that unfreezes the window marks its output"
+    );
+}
+
 /// A request for the size the window already has resolves at the seed, so there is
 /// nothing to wait for: no freeze, and the leg runs immediately.
 #[test]
