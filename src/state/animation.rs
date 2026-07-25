@@ -8,6 +8,7 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use driftwm::canvas::{self, CanvasPos};
 use driftwm::stage::{ElementId, StageElement};
+use smithay::wayland::compositor::{BufferAssignment, SurfaceAttributes, with_states};
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 
@@ -118,6 +119,13 @@ impl DriftWm {
             return;
         }
         let committed = window.geometry().size;
+        // A brand new resize supersedes the last one: its captured content is for
+        // a request nobody waits on any more, and a live overlay belongs to a leg
+        // that no longer exists. Same filter `start_geometry` applies, so a
+        // request the window already satisfies leaves an in-flight fade alone.
+        if requested_size.is_some_and(|size| size != committed) {
+            self.drop_resize_crossfade(id);
+        }
         self.window_animations.start_geometry(
             id,
             seed,
@@ -266,6 +274,7 @@ impl DriftWm {
                 .and_then(|element| element.client().cloned().map(|c| (element, c)));
             let Some((element, client)) = resolved else {
                 self.window_animations.remove(id);
+                self.drop_resize_crossfade(id);
                 continue;
             };
             let live_size = client.geometry().size.to_f64();
@@ -287,6 +296,7 @@ impl DriftWm {
             };
             let Some((target_loc, eligible)) = target else {
                 self.window_animations.remove(id);
+                self.drop_resize_crossfade(id);
                 continue;
             };
             let keep = self.window_animations.tick_entry(
@@ -300,12 +310,26 @@ impl DriftWm {
             if !keep {
                 self.window_animations.remove(id);
             }
+            if !eligible {
+                // Instant-completed off-screen: there is no leg left to fade over.
+                self.drop_resize_crossfade(id);
+            } else if !self.window_animations.start_held(id) {
+                // Captured content is only good while the window is frozen. Any
+                // other exit from the freeze (the budget expiring) leaves stale
+                // pixels for a leg that already runs with them stretched.
+                self.resize_captures.drop_for(id);
+            }
         }
 
         for snapshot in &mut self.closing_snapshots {
             snapshot.tick(frame_factor);
         }
         self.closing_snapshots.retain(|s| !s.is_done());
+
+        for crossfade in self.resize_crossfades.values_mut() {
+            crossfade.tick(frame_factor);
+        }
+        self.resize_crossfades.retain(|_, c| !c.is_done());
 
         let mut faded: Vec<crate::state::SuspendedId> = Vec::new();
         for fade in &mut self.standin_fades {
@@ -332,12 +356,152 @@ impl DriftWm {
         }
     }
 
-    /// Resolve the outstanding request on a commit of an animated window.
+    /// Resolve the outstanding request on a commit of an animated window. A
+    /// commit that releases a start hold is also the crossfade's cue — the one
+    /// moment the old and new pictures both exist.
     pub(crate) fn resolve_window_animation_commit(&mut self, window: &Window) {
-        if let Some(id) = self.stage.id_of(window) {
-            self.window_animations
-                .on_window_commit(id, window.geometry().size);
+        let Some(id) = self.stage.id_of(window) else {
+            return;
+        };
+        let released = self
+            .window_animations
+            .on_window_commit(id, window.geometry().size);
+        if let Some(generation) = released {
+            self.start_resize_crossfade(window, id, generation);
         }
+    }
+
+    /// Clone the textures a frozen window is about to replace, so its resize leg
+    /// has an old picture to fade out. Cheap (Rc clones, no GPU work) and bounded
+    /// by the freeze — a commit or two; each refresh replaces the last, so the
+    /// fade starts from what was actually on screen. Renderer-gated, like every
+    /// capture path (the flatten needs one anyway).
+    pub(crate) fn stash_resize_content(&mut self, surface: &WlSurface) {
+        // This hook runs on every commit of every surface, so cheap-out on the
+        // O(1) check before the surface-state read and the stage lookup.
+        if !self.window_animations.is_active() {
+            return;
+        }
+        let new_buffer = with_states(surface, |states| {
+            matches!(
+                states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .pending()
+                    .buffer,
+                Some(BufferAssignment::NewBuffer(_))
+            )
+        });
+        if !new_buffer {
+            return;
+        }
+        let Some(window) = self.window_for_surface(surface) else {
+            return;
+        };
+        let Some(id) = self.stage.id_of(&window) else {
+            return;
+        };
+        if !self.window_animations.start_held(id) {
+            return;
+        }
+        let Some(generation) = self.window_animations.generation_of(id) else {
+            return;
+        };
+        // Pre-commit, both the textures and the geometry still describe the
+        // picture being retired.
+        let geometry = window.geometry();
+        let Some(mut backend) = self.backend.take() else {
+            return;
+        };
+        if let Some(pixels) = crate::render::capture_close_pixels(
+            backend.renderer(),
+            surface,
+            geometry,
+            Instant::now(),
+        ) {
+            self.resize_captures.stash(id, pixels, generation);
+        }
+        self.backend = Some(backend);
+    }
+
+    /// Flatten the content stashed while `window` was frozen into the fading half
+    /// of its resize crossfade. The stash is consumed either way; a generation
+    /// mismatch means it belongs to a superseded request, so it is dropped
+    /// rather than paired with this leg. Backend-gated.
+    fn start_resize_crossfade(&mut self, window: &Window, id: ElementId, generation: u64) {
+        let Some(capture) = self.resize_captures.take_for(id, generation) else {
+            return;
+        };
+        let Some(surface) = window.wl_surface().map(|s| s.into_owned()) else {
+            return;
+        };
+        // Clip like the live path clips, so the fade starts from the picture the
+        // window had. A fullscreen window and `decoration = "none"` pass their
+        // content through untouched, which is no clip at all — a radius-0 clip
+        // would still crop to the geometry rect.
+        let applied = driftwm::config::applied_rule(&surface);
+        let mode = driftwm::config::effective_decoration_mode(
+            applied.as_ref().and_then(|r| r.decoration.as_ref()),
+            &self.config.decorations.default_mode,
+        );
+        let bare = self.stage.is_fullscreen(window)
+            || matches!(mode, driftwm::config::DecorationMode::None);
+        let radius = if bare {
+            0.0
+        } else {
+            driftwm::config::effective_corner_radius(
+                applied.as_ref(),
+                mode,
+                &self.config.decorations,
+            ) as f32
+        };
+        // Under an SSD bar only the bottom corners round; the bar itself is not
+        // baked, it keeps drawing live above the fade.
+        let has_bar = self
+            .decorations
+            .contains_key(&crate::decorations::DecorationKey::Surface(surface.id()));
+        let corner_radius = if has_bar {
+            [0.0, 0.0, radius, radius]
+        } else {
+            [radius; 4]
+        };
+        let corner_clip = self.render.corner_clip_shader.clone();
+        let flatten_scale = match self.stage.pin_of(window) {
+            Some(site) => self
+                .output_by_name(&site.output)
+                .map_or(1.0, |o| o.current_scale().fractional_scale()),
+            None => {
+                let stage_pos = self.stage.position_of(window).unwrap_or_default();
+                self.flatten_scale_for_canvas_rect(Rectangle::new(
+                    stage_pos,
+                    capture.pixels.geometry.size,
+                ))
+            }
+        };
+        let Some(mut backend) = self.backend.take() else {
+            return;
+        };
+        let crossfade = crate::render::resize_crossfade(
+            backend.renderer(),
+            &capture.pixels,
+            flatten_scale,
+            if bare { None } else { corner_clip.as_ref() },
+            corner_radius,
+        );
+        self.backend = Some(backend);
+        if let Some(crossfade) = crossfade {
+            self.resize_crossfades.insert(id, crossfade);
+        }
+    }
+
+    /// Drop both halves of a resize crossfade for `id`: content stashed for a
+    /// flatten that will not happen, and an overlay already fading. Called
+    /// wherever the geometry entry itself is dropped — the id survives
+    /// `Stage::replace`, so the dead-id sweep alone would leave a stale overlay
+    /// on a stand-in.
+    pub(crate) fn drop_resize_crossfade(&mut self, id: ElementId) {
+        self.resize_captures.drop_for(id);
+        self.resize_crossfades.remove(&id);
     }
 
     /// Rasterization scale for a canvas rect: the max `output_scale·zoom` among

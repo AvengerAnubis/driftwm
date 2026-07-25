@@ -305,9 +305,8 @@ impl WindowAnimations {
         );
     }
 
-    /// Whether `id` is frozen before its resize leg. Test-only until the capture
-    /// stash lands — the pre-commit hook refreshes the stash off this.
-    #[cfg(test)]
+    /// Whether `id` is frozen before its resize leg. The pre-commit hook
+    /// refreshes its captured old content off this.
     pub fn start_held(&self, id: ElementId) -> bool {
         matches!(
             self.animations.get(&id),
@@ -318,8 +317,6 @@ impl WindowAnimations {
     }
 
     /// Capture generation of `id`'s current request, for pairing stashed content.
-    /// Test-only until the stash lands and consumes it.
-    #[cfg(test)]
     pub fn generation_of(&self, id: ElementId) -> Option<u64> {
         match self.animations.get(&id) {
             Some(WindowAnimation {
@@ -432,39 +429,52 @@ impl WindowAnimations {
     /// Resolve the outstanding request on a commit of the animated window: a
     /// clean ack (committed == request) or the client picking its own size
     /// both bend the chase to live; a size-unchanged commit does nothing.
-    pub fn on_window_commit(&mut self, id: ElementId, committed_size: Size<i32, Logical>) {
-        if let Some(WindowAnimation {
+    ///
+    /// Returns the generation of a request whose *start hold* this commit
+    /// released — the one moment old and new content both exist, so the caller
+    /// can pair the stashed old picture with this leg and crossfade it.
+    pub fn on_window_commit(
+        &mut self,
+        id: ElementId,
+        committed_size: Size<i32, Logical>,
+    ) -> Option<u64> {
+        let Some(WindowAnimation {
             kind:
                 AnimationKind::Geometry {
                     requested_size,
                     last_committed_size,
                     buffer_stale,
                     start_hold,
+                    generation,
                     ..
                 },
         }) = self.animations.get_mut(&id)
-        {
-            let Some(request) = *requested_size else {
-                // No request outstanding — but a commit that changes size is still
-                // the resolution arriving (late, after a deadline release dropped
-                // the request), so it clears staleness. A same-size redraw does
-                // not: the buffer still doesn't match the rect.
-                if committed_size != *last_committed_size {
-                    *buffer_stale = false;
-                }
-                *last_committed_size = committed_size;
-                return;
-            };
-            if committed_size == request || committed_size != *last_committed_size {
-                *requested_size = None;
-                // Only an actual commit clears staleness.
+        else {
+            return None;
+        };
+        let Some(request) = *requested_size else {
+            // No request outstanding — but a commit that changes size is still
+            // the resolution arriving (late, after a deadline release dropped
+            // the request), so it clears staleness. A same-size redraw does
+            // not: the buffer still doesn't match the rect.
+            if committed_size != *last_committed_size {
                 *buffer_stale = false;
-                // The redraw the freeze was waiting for: release it so the leg
-                // can play with real content on both sides.
-                *start_hold = StartHold::Off;
             }
             *last_committed_size = committed_size;
+            return None;
+        };
+        let mut released = None;
+        if committed_size == request || committed_size != *last_committed_size {
+            *requested_size = None;
+            // Only an actual commit clears staleness.
+            *buffer_stale = false;
+            // The redraw the freeze was waiting for: release it so the leg
+            // can play with real content on both sides.
+            released = start_hold.is_held().then_some(*generation);
+            *start_hold = StartHold::Off;
         }
+        *last_committed_size = committed_size;
+        released
     }
 
     /// Advance one entry by `frame_factor`. The chase target is `target_loc`

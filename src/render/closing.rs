@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -17,9 +18,11 @@ use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Scale, Size, Transform};
 use smithay::wayland::compositor::{TraversalAction, with_surface_tree_downward};
 
+use driftwm::stage::ElementId;
+
 use crate::state::SuspendedWindow;
 
-use super::{OutputRenderElements, WindowTransformElement, shaders};
+use super::{OutputRenderElements, WindowRenderAnimation, WindowTransformElement, shaders};
 
 /// A progress-based effect ends when within this of 1.0 (a 1% alpha residue is
 /// invisible; a tighter epsilon leaves a long, dead tail past the motion).
@@ -151,6 +154,139 @@ pub(crate) fn capture_close_pixels(
         bounds,
         geometry,
         captured_at: now,
+    })
+}
+
+/// The content a window is about to replace, cloned while a compositor resize
+/// holds it frozen. Kept until the client's redraw lands, where it becomes the
+/// fading half of the crossfade.
+pub(crate) struct ResizeCapture {
+    pub pixels: ClosePixels,
+    /// Which request this content belongs to (see `WindowAnimations`' generation
+    /// counter).
+    generation: u64,
+}
+
+/// Per-window resize captures. Deliberately not the `close_pixels` map, whose
+/// semantics are the opposite ones: first-capture-wins, cleared on every new
+/// buffer, and only usable for a second.
+#[derive(Default)]
+pub(crate) struct ResizeCaptures(HashMap<ElementId, ResizeCapture>);
+
+impl ResizeCaptures {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Replace `id`'s capture with the content of the buffer being retired, so
+    /// the crossfade always starts from the last picture that was on screen.
+    pub fn stash(&mut self, id: ElementId, pixels: ClosePixels, generation: u64) {
+        self.0.insert(id, ResizeCapture { pixels, generation });
+    }
+
+    pub fn drop_for(&mut self, id: ElementId) {
+        self.0.remove(&id);
+    }
+
+    pub fn retain_ids(&mut self, mut resolves: impl FnMut(ElementId) -> bool) {
+        self.0.retain(|id, _| resolves(*id));
+    }
+
+    /// Take `id`'s capture for a leg that resolved at `generation`. The entry
+    /// goes either way: content captured for a superseded request can never
+    /// become valid again, and must not be crossfaded into the newer leg (a
+    /// commit submitted before a retarget can resolve the request that replaced
+    /// it — pre-commit hooks run at submit, the commit itself can be deferred by
+    /// a dmabuf fence).
+    pub fn take_for(&mut self, id: ElementId, generation: u64) -> Option<ResizeCapture> {
+        self.0.remove(&id).filter(|c| c.generation == generation)
+    }
+}
+
+/// A resized window's old content, fading out over its live new content while
+/// the geometry leg plays. Both are drawn into the same interpolated rect, so
+/// the exchange reads as one morph rather than a stale stretch and a pop.
+pub(crate) struct ResizeCrossfade {
+    buffer: TextureBuffer<GlesTexture>,
+    /// Texel extent of `buffer`, which is wrapped at scale 1 — see [`texel_src`].
+    texels: Size<i32, Physical>,
+    /// The overlay's OWN progress. Advanced by the same per-frame factor as the
+    /// leg but never seeded from it: a position-only retarget re-seeds the leg
+    /// from 0, and reading that would re-opaque a half-faded overlay.
+    progress: f64,
+}
+
+impl ResizeCrossfade {
+    pub fn tick(&mut self, frame_factor: f64) {
+        self.progress += (1.0 - self.progress) * frame_factor;
+    }
+
+    pub fn is_done(&self) -> bool {
+        1.0 - self.progress <= DONE_EPSILON
+    }
+
+    /// The overlay element for a window whose live geometry rect starts at
+    /// `loc` (fully zoomed physical) and spans `size` (zoomed logical), wrapped
+    /// in that window's own animation transform so the old content lands on the
+    /// interpolated visual rect exactly as the live content does. `opacity` is
+    /// the window's own (rule) opacity — the fade starts from the density the
+    /// old picture actually had, not from full.
+    pub fn render_element(
+        &self,
+        loc: Point<f64, Physical>,
+        size: Size<i32, Logical>,
+        animation: Option<WindowRenderAnimation>,
+        opacity: f64,
+    ) -> OutputRenderElements {
+        let texture = TextureRenderElement::from_texture_buffer(
+            loc,
+            &self.buffer,
+            Some(fade_out_alpha(self.progress) * opacity as f32),
+            Some(super::texel_src(self.texels)),
+            Some(size),
+            Kind::Unspecified,
+        );
+        let (origin, offset, scale) = match animation {
+            Some(a) => (a.origin, a.offset, a.scale),
+            None => (Point::default(), Point::default(), Scale::from(1.0)),
+        };
+        OutputRenderElements::ClosingWindow(WindowTransformElement::new(
+            texture, origin, offset, scale,
+        ))
+    }
+}
+
+/// Flatten captured content into a crossfade overlay. The chrome is built here
+/// rather than passed in: it must stay clip-only, both because the live border,
+/// shadow, and bar keep drawing themselves (only the content is being exchanged)
+/// and because anything outside the geometry rect would grow the bake past it,
+/// while the render side maps it onto the interpolated visual rect as if it were
+/// exactly that rect. Passing no chrome at all is not the same thing — that
+/// skips the clip too.
+pub(crate) fn resize_crossfade(
+    renderer: &mut GlesRenderer,
+    pixels: &ClosePixels,
+    flatten_scale: f64,
+    corner_clip: Option<&GlesTexProgram>,
+    corner_radius: [f32; 4],
+) -> Option<ResizeCrossfade> {
+    let chrome = CloseChrome {
+        geometry: pixels.geometry.to_f64(),
+        corner_radius,
+        corner_clip,
+        border_shader: None,
+        border_width: 0,
+        border_color: [0; 4],
+        focused: false,
+        shadow_shader: None,
+        bar: None,
+    };
+    let (buffer, _bounds, texels) =
+        flatten(renderer, pixels, flatten_scale.max(1.0), Some(&chrome))?;
+    Some(ResizeCrossfade {
+        buffer,
+        texels,
+        progress: 0.0,
     })
 }
 
@@ -647,6 +783,60 @@ mod close_pixel_age_tests {
         ));
         // The bound itself still counts as fresh.
         assert!(close_pixels_fresh(captured, captured + MAX_CLOSE_PIXEL_AGE));
+    }
+}
+
+#[cfg(test)]
+mod resize_capture_tests {
+    use super::*;
+
+    /// A capture with no surfaces — the pairing rules are about the stamp, not
+    /// the pixels (which need a live renderer to exist at all).
+    fn capture() -> ClosePixels {
+        ClosePixels {
+            surfaces: Vec::new(),
+            bounds: Rectangle::from_size(Size::from((400.0, 300.0))),
+            geometry: Rectangle::from_size(Size::from((400, 300))),
+            captured_at: Instant::now(),
+        }
+    }
+
+    /// The leg that made the request gets its content, once.
+    #[test]
+    fn a_matching_capture_is_consumed_exactly_once() {
+        let mut captures = ResizeCaptures::default();
+        let id = ElementId(1);
+        captures.stash(id, capture(), 7);
+        assert!(captures.take_for(id, 7).is_some(), "the leg's own content");
+        assert!(captures.take_for(id, 7).is_none(), "and it is consumed");
+    }
+
+    /// Content stashed for a superseded request must never be crossfaded into
+    /// the request that replaced it — a commit submitted before a retarget can
+    /// resolve the newer one (pre-commit hooks run at submit; the commit itself
+    /// can be deferred by a dmabuf fence). It can never become valid again, so
+    /// the mismatch drops it rather than leaving it to be picked up later.
+    #[test]
+    fn a_stale_generation_capture_is_dropped_not_consumed() {
+        let mut captures = ResizeCaptures::default();
+        let id = ElementId(1);
+        captures.stash(id, capture(), 7);
+        assert!(
+            captures.take_for(id, 8).is_none(),
+            "a newer leg must not wear the superseded request's content"
+        );
+        assert_eq!(captures.len(), 0, "and the stale capture is gone");
+    }
+
+    /// Every commit the freeze spans refreshes the capture, so the fade starts
+    /// from the last picture that was on screen rather than the first.
+    #[test]
+    fn a_refresh_replaces_the_previous_capture() {
+        let mut captures = ResizeCaptures::default();
+        let id = ElementId(1);
+        captures.stash(id, capture(), 7);
+        captures.stash(id, capture(), 7);
+        assert_eq!(captures.len(), 1);
     }
 }
 

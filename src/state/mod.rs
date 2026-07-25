@@ -516,6 +516,13 @@ pub struct DriftWm {
         smithay::reexports::wayland_server::backend::ObjectId,
         crate::render::ClosePixels,
     >,
+    /// Content captured while a compositor resize is frozen, consumed when the
+    /// client's redraw releases the freeze.
+    pub(crate) resize_captures: crate::render::ResizeCaptures,
+    /// The old content of a resized window, fading out over the new content for
+    /// the length of its geometry leg.
+    pub(crate) resize_crossfades:
+        HashMap<driftwm::stage::ElementId, crate::render::ResizeCrossfade>,
 
     pub dmabuf_state: DmabufState,
     pub dmabuf_global: Option<DmabufGlobal>,
@@ -1129,6 +1136,7 @@ impl DriftWm {
         // stale animation entry.
         if let Some(id) = self.stage.id_of(window) {
             self.window_animations.remove(id);
+            self.drop_resize_crossfade(id);
         }
         self.stage.remove(window);
         membership::send_output_leaves(window);
@@ -1828,6 +1836,15 @@ impl DriftWm {
                 return true;
             }
         }
+        // A crossfade outlives its leg only by a tick or two, but it rides the
+        // window's live rect for scoping either way.
+        for id in self.resize_crossfades.keys() {
+            if let Some(rect) = self.animation_open_canvas_rect(*id)
+                && visible.overlaps(rect)
+            {
+                return true;
+            }
+        }
         for (id, geo) in self.window_animations.scoping_entries() {
             match geo {
                 Some((window_animation::AnimSpace::Screen(o), _)) => {
@@ -1852,7 +1869,8 @@ impl DriftWm {
         false
     }
 
-    /// Live canvas rect of an open-animation window (used for scoping only).
+    /// Live canvas rect of a window whose effect has no rect of its own — an
+    /// open entry, a resize crossfade (used for scoping only).
     fn animation_open_canvas_rect(
         &self,
         id: driftwm::stage::ElementId,
@@ -1928,6 +1946,7 @@ impl DriftWm {
             || self.window_animations.is_active()
             || !self.closing_snapshots.is_empty()
             || !self.standin_fades.is_empty()
+            || !self.resize_crossfades.is_empty()
     }
 
     pub fn flush_middle_click(&mut self, press_time: u32, release_time: Option<u32>) {
@@ -2630,6 +2649,13 @@ impl DriftWm {
         let stage = &self.stage;
         self.window_animations
             .retain_ids(|id| stage.window_by_id(id).is_some());
+        // Same sweep for the crossfade halves. It covers teardown only: the id
+        // survives `Stage::replace`, so conversion and adoption drop theirs at
+        // the replace itself.
+        self.resize_captures
+            .retain_ids(|id| stage.window_by_id(id).is_some());
+        self.resize_crossfades
+            .retain(|id, _| stage.window_by_id(*id).is_some());
         self.refresh_window_outputs();
         self.popups.cleanup();
         self.display_handle.flush_clients().ok();
@@ -2664,6 +2690,8 @@ impl DriftWm {
             ("closing_snapshots", self.closing_snapshots.len()),
             ("standin_fades", self.standin_fades.len()),
             ("close_pixels", self.close_pixels.len()),
+            ("resize_captures", self.resize_captures.len()),
+            ("resize_crossfades", self.resize_crossfades.len()),
             ("unmap_snapshots", self.unmap_snapshots.len()),
             ("pending_relaunches", self.pending_relaunches.len()),
             ("pending_adoptions", self.pending_adoptions.len()),

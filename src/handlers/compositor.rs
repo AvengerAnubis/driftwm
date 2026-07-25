@@ -95,6 +95,10 @@ impl CompositorHandler for DriftWm {
             // Clone the still-imported textures on buffer removal so the close
             // animation can flatten them after teardown (renderer-gated).
             state.capture_close_pixels_on_unmap(surface);
+            // The mirror case: on a *new* buffer for a window frozen by a
+            // compositor resize, clone the content it is replacing so the leg can
+            // crossfade out of it.
+            state.stash_resize_content(surface);
         });
 
         // DMA-BUF readiness blocker. Must inspect the *pending* buffer here

@@ -296,6 +296,8 @@ impl DriftWm {
             closing_snapshots: Vec::new(),
             standin_fades: Vec::new(),
             close_pixels: std::collections::HashMap::new(),
+            resize_captures: Default::default(),
+            resize_crossfades: HashMap::new(),
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
             render_device: None,

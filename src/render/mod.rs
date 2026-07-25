@@ -21,8 +21,8 @@ pub(crate) use blur::compile_blur_shaders;
 pub use blur::{BlurCache, SharedBlur};
 pub use capture::{render_capture_frames, render_screencopy, render_toplevel_captures};
 pub(crate) use closing::{
-    CloseChrome, ClosePixels, ClosingSnapshot, StandInFade, capture_close_pixels,
-    close_pixels_fresh, snapshot_canvas, snapshot_screen,
+    CloseChrome, ClosePixels, ClosingSnapshot, ResizeCaptures, ResizeCrossfade, StandInFade,
+    capture_close_pixels, close_pixels_fresh, resize_crossfade, snapshot_canvas, snapshot_screen,
 };
 pub use cursor::build_cursor_elements;
 pub use elements::{
@@ -965,6 +965,26 @@ pub fn compose_frame(
         let wants_blur = blur_enabled && (applied.as_ref().is_some_and(|r| r.blur) || client_blur);
         let opacity = applied.as_ref().and_then(|r| r.opacity).unwrap_or(1.0) * visual_alpha as f64;
 
+        // A resize crossfade rides the window's own transform, so the old content
+        // lands on the interpolated visual rect for Canvas and Screen entries
+        // alike. Positioned at the *live* geometry rect, which that transform
+        // then maps exactly as it maps the live content.
+        let resize_overlay = state
+            .stage
+            .id_of(window)
+            .and_then(|id| state.resize_crossfades.get(&id))
+            .map(|crossfade| {
+                let geometry_phys: Point<f64, Physical> = Point::from((
+                    (render_loc.x + geom_loc.x as f64) * zoom * output_scale,
+                    (render_loc.y + geom_loc.y as f64) * zoom * output_scale,
+                ));
+                let geometry_size: Size<i32, Logical> = Size::from((
+                    (geom_size.w as f64 * zoom).round() as i32,
+                    (geom_size.h as f64 * zoom).round() as i32,
+                ));
+                crossfade.render_element(geometry_phys, geometry_size, window_animation, opacity)
+            });
+
         // Split elements: toplevel + subsurfaces get corner-clipped, popups
         // don't (they can legitimately extend outside the parent's geometry —
         // GTK menus, tooltips, autocomplete, etc). smithay's
@@ -1022,6 +1042,10 @@ pub fn compose_frame(
         // Popups push first (earlier in vec = on-top in smithay z-order) so
         // they sit above the title bar and clipped window content.
         push_plain_elements(target, popup_elems, zoom, window_animation);
+        // Where a resize crossfade goes: above the live content, below the SSD
+        // bar and popups. Spliced in at the end so the branches below stay one
+        // content push each.
+        let mut overlay_at = target.len();
 
         if has_ssd {
             let bar_height = state.config.decorations.title_bar_height;
@@ -1090,6 +1114,7 @@ pub fn compose_frame(
                     }
                 }
             }
+            overlay_at = target.len();
 
             // Only bottom corners round (title bar covers the top edge).
             if let Some(ref shader) = state.render.corner_clip_shader {
@@ -1262,6 +1287,12 @@ pub fn compose_frame(
             }
         } else {
             push_plain_elements(target, elems, zoom, window_animation);
+        }
+
+        // In-bucket, ahead of the trailing shadow, so the blur element counts
+        // below stay valid.
+        if let Some(overlay) = resize_overlay {
+            target.insert(overlay_at, overlay);
         }
 
         if wants_blur && (target.len() - elem_start - shadow_count) > 0 {

@@ -422,9 +422,11 @@ impl DriftWm {
         }
         if let Some(id) = self.stage.id_of(&client) {
             self.window_animations.remove(id);
+            self.drop_resize_crossfade(id);
         }
         if let Some(id) = self.stage.id_of(&suspended) {
             self.window_animations.remove(id);
+            self.drop_resize_crossfade(id);
         }
 
         // Compound replace: the fresh entry must leave before the suspended
@@ -1063,9 +1065,11 @@ impl DriftWm {
             .is_some_and(|t| focus_belongs_to_toplevel(&t.0, surface));
 
         // Drop any window animation entry: `stage.replace` preserves the id, so
-        // the stand-in would otherwise inherit a stale client chase.
+        // the stand-in would otherwise inherit a stale client chase — or wear the
+        // dead client's crossfade.
         if let Some(id) = self.stage.id_of(window) {
             self.window_animations.remove(id);
+            self.drop_resize_crossfade(id);
         }
 
         let sid = SuspendedId(self.next_suspended_id);

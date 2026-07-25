@@ -710,6 +710,7 @@ impl DriftWm {
         // the pin decided where it lives.
         if let Some(id) = self.stage.id_of(&window) {
             self.window_animations.remove(id);
+            self.drop_resize_crossfade(id);
         }
         if let Some(surface) = window.wl_surface() {
             self.pending_recenter.remove(&surface.id());
