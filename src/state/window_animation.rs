@@ -592,6 +592,19 @@ impl WindowAnimations {
         }
     }
 
+    /// The space a geometry entry's visual rect is expressed in. Anyone reading
+    /// that rect needs this too: the entry's space and the window's live pin
+    /// membership can disagree, and reading canvas coords as screen px is a
+    /// wildly wrong answer rather than a slightly stale one.
+    pub fn geometry_space(&self, id: ElementId) -> Option<AnimSpace> {
+        match self.animations.get(&id) {
+            Some(WindowAnimation {
+                kind: AnimationKind::Geometry { space, .. },
+            }) => Some(space.clone()),
+            _ => None,
+        }
+    }
+
     /// The current visual rect of a geometry entry in its own space, if any.
     pub fn geometry_visual_rect(&self, id: ElementId) -> Option<Rectangle<f64, Logical>> {
         match self.animations.get(&id) {

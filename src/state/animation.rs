@@ -242,6 +242,49 @@ impl DriftWm {
         );
     }
 
+    /// The rect `window` is drawn at on `output` right now, in that output's
+    /// screen px. Prefers an in-flight geometry entry's visual, so an
+    /// interrupted transition stays continuous, and reads it in *the entry's*
+    /// own space rather than the one live pin membership implies — the two can
+    /// disagree, and taking canvas coords for screen px is not a near miss.
+    pub(crate) fn window_screen_rect_on(
+        &self,
+        window: &Window,
+        output: &Output,
+    ) -> Option<Rectangle<f64, Logical>> {
+        let (camera, zoom) = {
+            let os = output_state(output);
+            (os.camera, os.zoom)
+        };
+        let canvas_to_screen = |rect: Rectangle<f64, Logical>| {
+            Rectangle::new(
+                Point::from((
+                    (rect.loc.x - camera.x) * zoom,
+                    (rect.loc.y - camera.y) * zoom,
+                )),
+                Size::from((rect.size.w * zoom, rect.size.h * zoom)),
+            )
+        };
+        let id = self.stage.id_of(window);
+        if let Some(id) = id
+            && let Some(visual) = self.window_animations.geometry_visual_rect(id)
+        {
+            return match self.window_animations.geometry_space(id)? {
+                // A pinned entry already chases in screen px at zoom 1.
+                AnimSpace::Screen(_) => Some(visual),
+                AnimSpace::Canvas => Some(canvas_to_screen(visual)),
+            };
+        }
+        let size = window.geometry().size.to_f64();
+        match self.stage.pin_of(window) {
+            Some(site) => Some(Rectangle::new(site.screen_pos.to_f64(), size)),
+            None => {
+                let loc = self.stage.position_of(window)?;
+                Some(canvas_to_screen(Rectangle::new(loc.to_f64(), size)))
+            }
+        }
+    }
+
     /// Seed rect for a fresh geometry entry: the window's current animated
     /// visual, so an interruption or an open→geometry hand-off is continuous.
     fn geometry_seed(

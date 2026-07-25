@@ -3061,10 +3061,11 @@ fn send_to_output_moves_a_canvas_window_instantly() {
 }
 
 /// Pin/unpin flips the window between canvas and screen space — at zoom != 1 its
-/// on-screen size changes outright. That stays instant in both directions, and
-/// takes any stashed content with it rather than stranding a crossfade half.
+/// on-screen size changes outright, so both directions animate the flip instead
+/// of jumping. The window's own content never crossfades: there is no resize to
+/// wait on, so any stashed content goes down with the superseded entry.
 #[test]
-fn pin_toggle_stays_instant_in_both_directions() {
+fn pin_toggle_animates_the_space_flip_in_both_directions() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
     let id = f.add_client();
@@ -3083,22 +3084,23 @@ fn pin_toggle_stays_instant_in_both_directions() {
     assert!(f.state().is_pinned(&window), "the window pinned");
     assert_eq!(
         f.state().window_animations.len(),
-        0,
-        "pinning armed no entry across the space flip"
+        1,
+        "pinning armed an entry to play the space flip over"
     );
     assert_eq!(
         f.state().debug_counters()["resize_captures"],
         0,
-        "and dropped the content stashed for a leg that never runs"
+        "and dropped the content stashed for a resize that isn't happening"
     );
+    tick_until_settled(&mut f);
 
     seed_resize_capture(&mut f, eid);
     f.state().execute_action(&Action::TogglePinToScreen);
     assert!(!f.state().is_pinned(&window), "the window unpinned");
     assert_eq!(
         f.state().window_animations.len(),
-        0,
-        "and unpinning armed no entry either"
+        1,
+        "and unpinning armed one too"
     );
     assert_eq!(
         f.state().debug_counters()["resize_captures"],
@@ -3385,11 +3387,10 @@ fn cancelling_a_frozen_fit_drops_its_parked_pan() {
 
     f.state().execute_action(&Action::TogglePinToScreen);
     assert!(f.state().is_pinned(&window), "the toggle pinned the window");
-    assert_eq!(
-        f.state().window_animations.len(),
-        0,
+    assert!(
+        f.state().camera_target().is_none(),
         "cancelling took the geometry entry — and the pan parked on it — down \
-         with it"
+         with it, so nothing was handed back"
     );
 
     // The client still eventually redraws at the size the (now-cancelled) fit

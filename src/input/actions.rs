@@ -1,10 +1,11 @@
 use smithay::{
     input::keyboard::Layout,
     reexports::wayland_server::Resource,
-    utils::{Logical, Point, Size},
+    utils::{Logical, Point, Rectangle, Size},
     wayland::seat::WaylandFocus,
 };
 
+use crate::state::window_animation::{AnimSpace, ContentPolicy, GeometryRole};
 use crate::state::{DriftWm, HomeReturn, StageWindow};
 use driftwm::canvas::{self};
 use driftwm::config::{Action, LayoutSwitch, Modifiers};
@@ -718,10 +719,21 @@ impl DriftWm {
         else {
             return;
         };
+        // The on-screen rect the window is drawn at right now, read before the
+        // mutation flips which space "on screen" is derived from. At zoom != 1
+        // the flip is a `1/z` scale jump anchored at the content-box top-left,
+        // and this is the picture the new entry grows out of. Resolved against
+        // the same output each branch below uses.
+        let output = match self.stage.pin_of(&window) {
+            Some(site) => self.output_by_name(&site.output),
+            None => self.output_for_window(&window),
+        };
+        let pre_toggle = output.and_then(|output| self.window_screen_rect_on(&window, &output));
         // Pin/unpin flips the chase space (canvas ↔ screen); an in-flight entry
-        // would keep a stale-space visual, so drop it. A recenter owed from a
-        // preceding fullscreen exit goes too — it would re-place the window after
-        // the pin decided where it lives.
+        // would keep a stale-space visual, so drop it — along with any parked
+        // pan and stashed capture belonging to the transition it supersedes. A
+        // recenter owed from a preceding fullscreen exit goes too — it would
+        // re-place the window after the pin decided where it lives.
         self.cancel_window_animation(&window);
         if let Some(surface) = window.wl_surface() {
             self.pending_recenter.remove(&surface.id());
@@ -742,6 +754,28 @@ impl DriftWm {
                 .0
                 .to_i32_round();
                 self.map_window(window.clone(), canvas, true);
+                // Converting the pre-toggle screen rect back through the same
+                // camera reproduces it exactly on the first frame; the chase then
+                // runs it out to the canvas rect the camera magnifies by `1/z`.
+                // Inside the output guard on purpose: without an output there is
+                // no camera to convert with, and the window was never re-mapped.
+                if let Some(screen) = pre_toggle {
+                    let seed = Rectangle::new(
+                        Point::from((
+                            camera.x + screen.loc.x / zoom,
+                            camera.y + screen.loc.y / zoom,
+                        )),
+                        Size::from((screen.size.w / zoom, screen.size.h / zoom)),
+                    );
+                    self.begin_geometry_animation_seeded(
+                        &window,
+                        seed,
+                        AnimSpace::Canvas,
+                        None,
+                        GeometryRole::Normal,
+                        ContentPolicy::Cap,
+                    );
+                }
             }
         } else {
             // Pin at the window's current on-screen position on its output.
@@ -771,6 +805,18 @@ impl DriftWm {
                     screen_pos,
                 },
             );
+            // The entry chases `screen_pos` at the window's real size under zoom
+            // 1, so a capture taken at zoom 0.5 grows into it from half size.
+            if let Some(seed) = pre_toggle {
+                self.begin_geometry_animation_seeded(
+                    &window,
+                    seed,
+                    AnimSpace::Screen(output.name()),
+                    None,
+                    GeometryRole::Normal,
+                    ContentPolicy::Cap,
+                );
+            }
         }
         // The hit-test path changed (pinned vs canvas); recompute pointer focus.
         self.refresh_pointer_focus();
