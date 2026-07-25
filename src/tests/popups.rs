@@ -664,3 +664,73 @@ fn popup_on_layer_parent_constrains_against_the_layer_output() {
     f.client(id).popup(&popup_surface).destroy();
     f.double_roundtrip(id);
 }
+
+/// A popup parented to a canvas-layer widget constrains against the output
+/// whose viewport shows that widget — the widget lives at a canvas position, so
+/// its output comes from the camera, not from any layer map. Output 2 shows it
+/// while output 1 is active; constraining against output 1, whose viewport
+/// straddles the canvas origin thousands of pixels away, would drag the popup
+/// to (-4738, -4783) instead.
+#[test]
+fn popup_on_canvas_layer_widget_constrains_against_its_output() {
+    let mut f = Fixture::with_config(config(
+        r#"
+[[window_rules]]
+app_id = "widget"
+position = [5600, -5300]
+"#,
+    ));
+    let out1 = f.add_output(1, (1920, 1080));
+    let out2 = f.add_output(2, (1280, 720));
+    output_state(&out2).camera = Point::from((5000.0, 5000.0));
+    f.state().focused_output = Some(out1.clone());
+
+    let id = f.add_client();
+    let layer = f
+        .client(id)
+        .create_layer(None, zwlr_layer_shell_v1::Layer::Top, "widget");
+    let layer_surface = layer.surface.clone();
+    layer.set_configure_props(super::client::LayerConfigureProps {
+        size: Some((200, 150)),
+        ..Default::default()
+    });
+    layer.commit();
+    f.roundtrip(id);
+
+    let layer = f.client(id).layer(&layer_surface);
+    layer.set_size(200, 150);
+    layer.attach_new_buffer();
+    layer.ack_last_and_commit();
+    f.double_roundtrip(id);
+
+    // The rule centers the 200×150 widget at (5600, 5300), well inside output
+    // 2's (5000, 5000, 1282, 722) viewport and far outside output 1's.
+    assert_eq!(
+        f.state().canvas_layers[0].position,
+        Some(Point::from((5500, 5225))),
+        "precondition: the widget sits only inside output 2's viewport"
+    );
+
+    let popup_surface = map_layer_popup_with(
+        &mut f,
+        id,
+        &layer_surface,
+        PopupProps {
+            offset: (800, 0),
+            constraint_adjustment: ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY,
+            ..Default::default()
+        },
+    );
+
+    // Widget-relative, output 2's viewport is (-500, -225, 1282, 722). The
+    // popup starts at (700, -50) and its right edge overshoots x = 782 by 118,
+    // sliding to x = 582; vertically it already fits.
+    assert_eq!(
+        f.client(id).popup(&popup_surface).pending_configure.pos,
+        (582, -50),
+        "popup must constrain against the output showing its canvas-layer parent"
+    );
+
+    f.client(id).popup(&popup_surface).destroy();
+    f.double_roundtrip(id);
+}
