@@ -65,7 +65,7 @@ Suspend instead of close when a window is closed by the client (titlebar X, in-a
 
 Default: `false`
 
-Restore still-open windows after a restart: on quit or logout, windows that resolve to a .desktop entry are saved and come back as suspended windows on the next launch (nothing auto-launches). See docs/session.md.
+Restore still-open windows after a restart: on quit or logout, windows that resolve to a .desktop entry are saved and come back as suspended windows on the next launch (nothing auto-launches). Per-window overridable via a `restore_windows` window rule. See docs/session.md.
 
 ### `restore_camera`
 
@@ -1130,6 +1130,7 @@ Supported fields:
 - `widget` — true: pinned (immovable), below normal windows, excluded from navigation and alt-tab (default: false)
 - `pinned_to_screen` — true: lock the window to the output's screen space — ignores pan/zoom, floats above normal windows (PiP, toolbars). `position` becomes output-relative; movable unless widget = true. Toggle live with `toggle-pin-to-screen` (Mod+T). (default: false)
 - `suspend_on_close` — override [session].suspend_on_close for matched windows (true / false). Escape hatch for terminals and scratchpads that should always really close (or always suspend). (default: inherit)
+- `restore_windows` — override [session].restore_windows for matched windows (true / false). false keeps an app out of the graceful-shutdown save, so it doesn't come back as a suspended window on the next launch. true saves and restores one app while the section key stays off. Independent of suspend_on_close, which only governs closes: set both to false for an app that should never leave a stand-in behind. A window you suspended explicitly still comes back. Match on app_id: saved records carry no title, so a rule that also matches on title only governs what gets saved. (default: inherit)
 - `preserve_aspect_ratio` — true: keep the window's aspect ratio during interactive resizes; the ratio is taken at the start of each resize. (default: false)
 - `decoration` — overrides [decorations] default_mode for matched windows. Omit to inherit default_mode. Values:
   - "client":  CSD — client's own titlebar

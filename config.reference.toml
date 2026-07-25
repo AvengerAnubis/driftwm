@@ -56,7 +56,8 @@
 
 # # Restore still-open windows after a restart: on quit or logout, windows
 # # that resolve to a .desktop entry are saved and come back as suspended
-# # windows on the next launch (nothing auto-launches). See docs/session.md.
+# # windows on the next launch (nothing auto-launches). Per-window overridable
+# # via a `restore_windows` window rule. See docs/session.md.
 # restore_windows = false
 
 # # Restore each output's camera position and zoom from the saved session on
@@ -729,6 +730,16 @@
 # #   suspend_on_close — override [session].suspend_on_close for matched windows
 # #                (true / false). Escape hatch for terminals and scratchpads that
 # #                should always really close (or always suspend). (default: inherit)
+# #   restore_windows — override [session].restore_windows for matched windows
+# #                (true / false). false keeps an app out of the graceful-shutdown
+# #                save, so it doesn't come back as a suspended window on the next
+# #                launch. true saves and restores one app while the section key
+# #                stays off. Independent of suspend_on_close, which only governs
+# #                closes: set both to false for an app that should never leave a
+# #                stand-in behind. A window you suspended explicitly still comes
+# #                back. Match on app_id: saved records carry no title, so a rule
+# #                that also matches on title only governs what gets saved.
+# #                (default: inherit)
 # #   preserve_aspect_ratio — true: keep the window's aspect ratio during
 # #                interactive resizes; the ratio is taken at the start of each
 # #                resize. (default: false)

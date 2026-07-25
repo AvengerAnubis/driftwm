@@ -13,6 +13,7 @@ fn bare_rule(app_id: Option<&str>, title: Option<&str>) -> WindowRule {
         widget: false,
         pinned_to_screen: false,
         suspend_on_close: None,
+        restore_windows: None,
         preserve_aspect_ratio: false,
         decoration: None,
         blur: false,
@@ -613,6 +614,53 @@ fn focus_on_open_last_wins_in_merge_from() {
     assert_eq!(applied.focus_on_open, Some(false));
     applied.merge_from(&rule_true);
     assert_eq!(applied.focus_on_open, Some(true));
+}
+
+// ── restore_windows ───────────────────────────────────────────────────────────
+
+#[test]
+fn restore_windows_parses_and_merges_last_wins() {
+    let toml = r#"
+        [[window_rules]]
+        app_id = "*"
+        restore_windows = false
+
+        [[window_rules]]
+        app_id = "myapp"
+        restore_windows = true
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    assert_eq!(
+        config
+            .resolve_window_rules("myapp", "")
+            .unwrap()
+            .restore_windows,
+        Some(true)
+    );
+    assert_eq!(
+        config
+            .resolve_window_rules("otherapp", "")
+            .unwrap()
+            .restore_windows,
+        Some(false)
+    );
+}
+
+#[test]
+fn restore_windows_defaults_to_none() {
+    let toml = r#"
+        [[window_rules]]
+        app_id = "myapp"
+        blur = true
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    assert_eq!(
+        config
+            .resolve_window_rules("myapp", "")
+            .unwrap()
+            .restore_windows,
+        None
+    );
 }
 
 #[test]

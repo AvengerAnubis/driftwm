@@ -28,6 +28,14 @@ fn config_restore(on: bool) -> Config {
     .unwrap()
 }
 
+/// `config_restore` plus an extra `[[window_rules]]` block appended verbatim.
+fn config_restore_with_rule(on: bool, rules_toml: &str) -> Config {
+    Config::from_toml(&format!(
+        "[session]\nrestore_windows = {on}\n[decorations]\ndefault_mode = \"server\"\n{rules_toml}"
+    ))
+    .unwrap()
+}
+
 /// Seat a desktop-entry cache resolving each `stem` to a launchable identity.
 fn inject_cache(f: &mut Fixture, tmp: &TempDir, stems: &[&str]) {
     for stem in stems {
@@ -46,6 +54,34 @@ fn map_at(
     pos: (i32, i32),
 ) {
     map_window(f, id, app_id, size);
+    let window = window_by_app_id(f, app_id).unwrap();
+    f.state()
+        .map_window(StageWindow::Client(window), Point::from(pos), true);
+}
+
+/// Like `map_at`, but also sets a client-side title — for rules that match on
+/// `title` as well as `app_id`.
+fn map_titled_at(
+    f: &mut Fixture,
+    id: super::client::ClientId,
+    app_id: &str,
+    title: &str,
+    size: (u16, u16),
+    pos: (i32, i32),
+) {
+    let window = f.client(id).create_window();
+    let surface = window.surface.clone();
+    window.set_app_id(app_id);
+    window.set_title(title);
+    window.commit();
+    f.roundtrip(id);
+
+    let window = f.client(id).window(&surface);
+    window.set_size(size.0, size.1);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(id);
+
     let window = window_by_app_id(f, app_id).unwrap();
     f.state()
         .map_window(StageWindow::Client(window), Point::from(pos), true);
@@ -1023,4 +1059,388 @@ fn no_path_disables_persistence() {
     // Nothing to assert beyond "no panic, no file" — the fixture's teardown
     // baseline confirms no state leaked (e.g. a stray debounce timer).
     assert!(f.state().session_store.path.is_none());
+}
+
+/// A `restore_windows = false` rule keeps its app's live window out of the
+/// shutdown save even with the global flag on, while an unruled app's live
+/// window still saves — proving the exclusion is the rule, not a missing
+/// desktop entry or some other blanket ineligibility.
+#[test]
+fn restore_windows_false_rule_excludes_matching_app_from_shutdown_save() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let config = config_restore_with_rule(
+        true,
+        "[[window_rules]]\napp_id = \"excluded\"\nrestore_windows = false\n",
+    );
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &cache, &["excluded", "included"]);
+    f.state().session_store.path = Some(path.clone());
+
+    let a = f.add_client();
+    map_at(&mut f, a, "excluded", (400, 300), (300, 300));
+    let b = f.add_client();
+    map_at(&mut f, b, "included", (400, 300), (800, 300));
+
+    f.state().serialize_session_on_shutdown();
+
+    let saved = session::read(&path);
+    assert!(
+        saved.entries.iter().all(|e| e.app_id != "excluded"),
+        "the ruled-out app's live window is not saved despite the global flag being on"
+    );
+    assert!(
+        saved.entries.iter().any(|e| e.app_id == "included"),
+        "the unruled app's live window still saves"
+    );
+}
+
+/// A `restore_windows = false` rule keeps a pre-existing `Quit` record from
+/// materializing at load, but the record is carried forward inert (re-emitted,
+/// not destroyed) since a carried entry is never itself materialized. The two
+/// non-matching apps flanking it in the file still materialize, in order.
+#[test]
+fn restore_windows_false_rule_quit_record_carries_forward_inert() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![
+            entry(1, "alpha", Origin::Quit),
+            entry(2, "excluded", Origin::Quit),
+            entry(3, "beta", Origin::Quit),
+        ],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    let config = config_restore_with_rule(
+        true,
+        "[[window_rules]]\napp_id = \"excluded\"\nrestore_windows = false\n",
+    );
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(
+        restored.len(),
+        2,
+        "the ruled-out quit record never materializes"
+    );
+    assert_eq!(
+        restored
+            .iter()
+            .map(|(s, _)| s.identity.app_id.clone())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta"],
+        "the surviving records keep their original relative order"
+    );
+
+    f.state().session_store_write_now();
+    let after = session::read(&path);
+    assert!(
+        after.entries.iter().any(|e| e.app_id == "excluded"),
+        "the ruled-out quit record is carried forward, not destroyed"
+    );
+
+    for (s, _) in restored {
+        f.state().dismiss_suspended(s.id);
+    }
+}
+
+/// Dropping the rule that excluded a carried `Quit` record lets it materialize
+/// again on the next load: nothing about the earlier exclusion destroyed the
+/// record, it just sat inert in the file.
+#[test]
+fn restore_windows_false_rule_removed_rematerializes_carried_quit() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![entry(1, "excluded", Origin::Quit)],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    // Boot 1: the rule excludes it — carried forward inert, rewritten as-is.
+    {
+        let config = config_restore_with_rule(
+            true,
+            "[[window_rules]]\napp_id = \"excluded\"\nrestore_windows = false\n",
+        );
+        let mut f = Fixture::with_config(config);
+        f.add_output(1, (1920, 1080));
+        f.state().session_store.path = Some(path.clone());
+        f.state().load_session();
+        assert_eq!(
+            suspended_in_order(&mut f).len(),
+            0,
+            "excluded while the rule is present"
+        );
+        f.state().session_store_write_now();
+    }
+
+    // Boot 2: the rule is gone — the very same record, untouched in the file,
+    // comes back.
+    let mut f = Fixture::with_config(config_restore(true));
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(
+        restored.len(),
+        1,
+        "dropping the rule restores the previously-excluded record"
+    );
+    assert_eq!(restored[0].0.identity.app_id, "excluded");
+
+    f.state().dismiss_suspended(restored[0].0.id);
+}
+
+/// A rule keyed on both `app_id` and `title` excludes the live window from the
+/// shutdown save (title is known there), but not a pre-existing `Quit` record
+/// at load: saved records carry no title, so the title criterion never
+/// matches and the rule falls back to the global default.
+#[test]
+fn restore_windows_false_rule_with_title_excludes_save_but_not_load() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![entry(1, "excluded", Origin::Quit)],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    let config = config_restore_with_rule(
+        true,
+        "[[window_rules]]\napp_id = \"excluded\"\ntitle = \"Some Window\"\nrestore_windows = false\n",
+    );
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &cache, &["excluded"]);
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(
+        restored.len(),
+        1,
+        "the title-scoped rule can't govern what materializes at load"
+    );
+    f.state().dismiss_suspended(restored[0].0.id);
+
+    // The live window's real title is known at save time, so the same rule
+    // keeps it out of the shutdown save.
+    let id = f.add_client();
+    map_titled_at(
+        &mut f,
+        id,
+        "excluded",
+        "Some Window",
+        (400, 300),
+        (300, 300),
+    );
+
+    f.state().serialize_session_on_shutdown();
+    let after = session::read(&path);
+    assert!(
+        after.entries.iter().all(|e| e.app_id != "excluded"),
+        "the title-matched rule excludes the live window from the save"
+    );
+}
+
+/// A `restore_windows = false` rule does not touch `Explicit`-origin records:
+/// a deliberately suspended stand-in for that same app still materializes.
+#[test]
+fn restore_windows_false_rule_still_materializes_explicit_entry() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![entry(1, "excluded", Origin::Explicit)],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    let config = config_restore_with_rule(
+        true,
+        "[[window_rules]]\napp_id = \"excluded\"\nrestore_windows = false\n",
+    );
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(
+        restored.len(),
+        1,
+        "an explicit entry materializes regardless of the restore_windows rule"
+    );
+    assert_eq!(restored[0].0.identity.app_id, "excluded");
+
+    f.state().dismiss_suspended(restored[0].0.id);
+}
+
+/// A `restore_windows = true` rule saves and materializes its app even with
+/// the global flag off, while an unruled app's live window still doesn't
+/// save, and an unrelated pre-existing carried `Quit` record is untouched.
+#[test]
+fn restore_windows_true_rule_saves_and_materializes_with_global_off() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    // A prior session left a quit entry for an app this test never touches.
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![entry(1, "untouched", Origin::Quit)],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    let rules_toml = "[[window_rules]]\napp_id = \"included\"\nrestore_windows = true\n";
+    let mut f = Fixture::with_config(config_restore_with_rule(false, rules_toml));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &cache, &["included", "excluded", "untouched"]);
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+
+    // The global flag is off and "untouched" has no rule, so its quit entry
+    // carries forward unmaterialized.
+    assert_eq!(
+        suspended_in_order(&mut f).len(),
+        0,
+        "nothing materializes at load"
+    );
+
+    let a = f.add_client();
+    map_at(&mut f, a, "included", (400, 300), (300, 300));
+    let b = f.add_client();
+    map_at(&mut f, b, "excluded", (400, 300), (800, 300));
+
+    f.state().serialize_session_on_shutdown();
+
+    let after = session::read(&path);
+    assert!(
+        after
+            .entries
+            .iter()
+            .any(|e| e.app_id == "included" && e.origin == Origin::Quit),
+        "the ruled-in app's live window is saved despite the global flag being off"
+    );
+    assert!(
+        after.entries.iter().all(|e| e.app_id != "excluded"),
+        "the unruled app's live window is not saved while the global flag is off"
+    );
+    assert!(
+        after
+            .entries
+            .iter()
+            .any(|e| e.app_id == "untouched" && e.origin == Origin::Quit),
+        "the unrelated carried quit record is preserved"
+    );
+
+    // A fresh load materializes the rule-included app from the same file.
+    let mut f2 = Fixture::with_config(config_restore_with_rule(false, rules_toml));
+    f2.add_output(1, (1920, 1080));
+    f2.state().session_store.path = Some(path.clone());
+    f2.state().load_session();
+    let restored = suspended_in_order(&mut f2);
+    assert!(
+        restored
+            .iter()
+            .any(|(s, _)| s.identity.app_id == "included"),
+        "the ruled-in app materializes on the next load despite the global flag being off"
+    );
+
+    for (s, _) in restored {
+        f2.state().dismiss_suspended(s.id);
+    }
+}
+
+/// A `restore_windows = false` rule's carried record doesn't accumulate across
+/// repeated login/logout cycles: the file always shows exactly the one record
+/// for the ruled app, never growing by one per logout, while an unruled app's
+/// live window keeps saving fresh every cycle.
+#[test]
+fn restore_windows_false_rule_carried_record_does_not_grow_across_cycles() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![entry(1, "excluded", Origin::Quit)],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    let rules_toml = "[[window_rules]]\napp_id = \"excluded\"\nrestore_windows = false\n";
+
+    for cycle in 0..3 {
+        let included_app = format!("included-{cycle}");
+        let mut f = Fixture::with_config(config_restore_with_rule(true, rules_toml));
+        f.add_output(1, (1920, 1080));
+        inject_cache(&mut f, &cache, &["excluded", included_app.as_str()]);
+        f.state().session_store.path = Some(path.clone());
+        f.state().load_session();
+        // A previous cycle's unruled entry materializes as a dormant stand-in
+        // now that it's a Quit record with the global flag on; dismiss it at
+        // the end of this cycle so the fixture's leak check stays clean.
+        let leftover = suspended_in_order(&mut f);
+
+        let a = f.add_client();
+        map_at(&mut f, a, "excluded", (400, 300), (300, 300));
+        let b = f.add_client();
+        map_at(&mut f, b, &included_app, (400, 300), (800, 300));
+
+        f.state().serialize_session_on_shutdown();
+
+        let after = session::read(&path);
+        let excluded_count = after
+            .entries
+            .iter()
+            .filter(|e| e.app_id == "excluded")
+            .count();
+        assert_eq!(
+            excluded_count, 1,
+            "cycle {cycle}: the ruled-out app's carried record count stays fixed, not growing"
+        );
+        assert!(
+            after
+                .entries
+                .iter()
+                .any(|e| e.app_id == included_app && e.origin == Origin::Quit),
+            "cycle {cycle}: the unruled app's live window is saved"
+        );
+
+        for (s, _) in leftover {
+            f.state().dismiss_suspended(s.id);
+        }
+    }
 }

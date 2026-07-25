@@ -157,14 +157,16 @@ pub fn write(path: &Path, envelope: &SessionEnvelope, fsync: bool) -> std::io::R
 
 /// Split entries into those to materialize now and those to carry forward
 /// unchanged (re-emitted on the next write), so a flag-off session never
-/// destroys the saved session.
+/// destroys the saved session. `restore` answers per entry, since a window rule
+/// can override the global flag for one app; `Explicit` entries always
+/// materialize, bypassing it.
 pub fn partition_for_restore(
     entries: Vec<SessionEntry>,
-    restore_windows: bool,
+    restore: impl Fn(&SessionEntry) -> bool,
 ) -> (Vec<SessionEntry>, Vec<SessionEntry>) {
     entries
         .into_iter()
-        .partition(|e| restore_windows || e.origin == Origin::Explicit)
+        .partition(|e| e.origin == Origin::Explicit || restore(e))
 }
 
 /// Rename a bad file aside (`.<label>.<unix-ts>`) so startup can continue from
@@ -388,7 +390,7 @@ mod tests {
             entry(2, Origin::Quit),
             entry(3, Origin::Explicit),
         ];
-        let (materialize, carried) = partition_for_restore(entries, false);
+        let (materialize, carried) = partition_for_restore(entries, |_| false);
         assert_eq!(
             materialize.iter().map(|e| e.id).collect::<Vec<_>>(),
             vec![1, 3],
@@ -404,7 +406,7 @@ mod tests {
     #[test]
     fn origin_filtering_with_restore_on_materializes_everything() {
         let entries = vec![entry(1, Origin::Explicit), entry(2, Origin::Quit)];
-        let (materialize, carried) = partition_for_restore(entries, true);
+        let (materialize, carried) = partition_for_restore(entries, |_| true);
         assert_eq!(materialize.len(), 2);
         assert!(carried.is_empty());
     }
@@ -426,7 +428,7 @@ mod tests {
 
         // Restore is off: the quit entry is carried, not materialized.
         let loaded = read(&path);
-        let (_materialize, carried) = partition_for_restore(loaded.entries, false);
+        let (_materialize, carried) = partition_for_restore(loaded.entries, |_| false);
 
         // The next rewrite re-emits the carried entry, so it isn't destroyed.
         let rewritten = SessionEnvelope {

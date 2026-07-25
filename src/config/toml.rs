@@ -289,6 +289,11 @@ pub(super) struct WindowRuleFile {
     /// for terminals / scratchpads that should always really close (or always
     /// suspend). `None` inherits the global setting.
     pub suspend_on_close: Option<bool>,
+    /// Override the global `restore_windows` for matched windows, so an app can
+    /// be kept out of (or opted into) the graceful-shutdown save. Independent of
+    /// `suspend_on_close`, which only governs closes. `None` inherits the global
+    /// setting.
+    pub restore_windows: Option<bool>,
     /// Keep the window's aspect ratio during interactive resizes; the ratio is
     /// taken at the start of each resize.
     #[serde(default)]

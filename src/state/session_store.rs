@@ -4,8 +4,9 @@
 //!
 //! Cadence: a create or dismiss writes immediately; a move or resize arms a
 //! short debounce timer; graceful shutdown fsync's a final write. Suspended
-//! windows are saved regardless of `restore_windows`; live windows are saved
-//! as `Quit` records only when it's on. `path == None` disables everything (a
+//! windows are saved regardless of `restore_windows`; a live window is saved as
+//! a `Quit` record when that flag resolves on for it (global default or a
+//! per-app rule). `path == None` disables everything (a
 //! winit dev session without `--session-file`, or a fixture without an
 //! injected path).
 
@@ -94,8 +95,12 @@ impl DriftWm {
             .into_iter()
             .filter(valid_entry_geometry)
             .collect();
-        let (materialize, carried) =
-            session::partition_for_restore(entries, self.config.session.restore_windows);
+        // Records carry no title, so the per-app decision keys on `app_id`
+        // alone: a rule that also matches on `title` can only govern what gets
+        // *saved*, where the live title is known.
+        let (materialize, carried) = session::partition_for_restore(entries, |e| {
+            self.resolve_restore_windows(&e.app_id, "")
+        });
         self.session_store.carried_forward = carried;
         for entry in materialize {
             let held_focus = entry.focused;
@@ -231,13 +236,15 @@ impl DriftWm {
     }
 
     /// Flush the durable session at graceful shutdown (keybind quit or
-    /// SIGTERM/SIGHUP), fsync'd. Suspended windows are always saved; live
-    /// windows are added as `Quit` records only when `restore_windows` is on.
+    /// SIGTERM/SIGHUP), fsync'd. Suspended windows are always saved; a live
+    /// window is added as a `Quit` record when `restore_windows` resolves on for
+    /// it — per-window, not a global gate, so a rule can opt an app in while the
+    /// section key is off, or out while it's on.
     pub fn serialize_session_on_shutdown(&mut self) {
         if self.session_store.path.is_none() {
             return;
         }
-        self.write_session(self.config.session.restore_windows, true);
+        self.write_session(true, true);
     }
 
     /// Steady-state write: suspended windows + carried-forward + cameras, no
@@ -258,7 +265,8 @@ impl DriftWm {
     }
 
     /// Serialize the current durable state. Suspended windows carry their own
-    /// origin; live windows are appended as `Quit` records when `include_live`.
+    /// origin; live windows are appended as `Quit` records when `include_live`
+    /// and their resolved `restore_windows` allows it.
     /// Carried-forward entries lead so freshly-active windows restore on top.
     fn build_session_envelope(&mut self, include_live: bool) -> SessionEnvelope {
         // The record id is informational (materialization assigns fresh
@@ -337,10 +345,20 @@ impl DriftWm {
         }
     }
 
+    /// The effective `restore_windows` for `(app_id, title)`: a matching window
+    /// rule's override wins, else the global default. Resolved live (not the
+    /// stamped applied rule) so a hot-reload takes effect on the next shutdown.
+    fn resolve_restore_windows(&self, app_id: &str, title: &str) -> bool {
+        self.config
+            .resolve_window_rules(app_id, title)
+            .and_then(|r| r.restore_windows)
+            .unwrap_or(self.config.session.restore_windows)
+    }
+
     /// A `Quit` record for one live client window, or `None` when it can't come
     /// back: a widget, a dialog (has a parent — dead or alive — or is modal,
-    /// matching suspend eligibility), or an app that resolves to no `.desktop`
-    /// entry.
+    /// matching suspend eligibility), an app a `restore_windows = false` rule
+    /// keeps out of the save, or an app that resolves to no `.desktop` entry.
     fn live_window_entry(
         &mut self,
         window: &StageWindow,
@@ -351,6 +369,10 @@ impl DriftWm {
             return None;
         }
         let app_id = window.app_id_or_class().unwrap_or_default();
+        let title = window.window_title().unwrap_or_default();
+        if !self.resolve_restore_windows(&app_id, &title) {
+            return None;
+        }
         let identity = self.resolve_identity(&app_id)?;
         // A CSD window restores to a stand-in whose body is shrunk under the
         // bar, so persist that shrunken body — the same rect a live suspend

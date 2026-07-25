@@ -121,6 +121,32 @@ quit with it in view) — focus you can't see is focus you'd act on by accident,
 the canvas starts unfocused instead and the record waits for a launch that can
 use it.
 
+A window rule can override the flag per app, in either direction: `false` keeps
+one app off the canvas after a restart while the rest of your session comes back,
+and `true` brings one app back while the flag stays off for everything else.
+
+```toml
+[[window_rules]]
+app_id          = "footclient"
+restore_windows = false
+```
+
+Three things worth knowing about it:
+
+- It's **independent of `suspend_on_close`**. That one governs closes; this one
+  governs the logout save. `suspend_on_close = false` with restore on is a
+  perfectly good combination — the `×` really closes, but a window still open at
+  logout comes back. Set *both* to `false` for an app that should never leave a
+  stand-in behind.
+- A window you suspended **explicitly** still comes back, since that's a
+  deliberate artifact you placed on the canvas. The rule only governs the
+  automatic logout save.
+- **Match on `app_id`.** Saved records carry no title, so a rule that also
+  matches on `title` can only decide what gets *saved*, where the live title is
+  known — not what comes back on the next launch. Records saved before you added
+  the rule stay in the file but sit inert: they stop coming back, and return if
+  you drop the rule again.
+
 ## `restore_camera`
 
 ```toml

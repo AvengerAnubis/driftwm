@@ -6,11 +6,12 @@ Rules are declared as `[[window_rules]]` sections in your config file.
 Most rule effects — position, size, opacity, decoration, borders, widget,
 pinned, output, … — are resolved **once, when a window maps**: reloading your
 config only affects windows opened afterwards, and a window that changes its
-title after mapping is **not** re-checked against `title` rules. Two things
+title after mapping is **not** re-checked against `title` rules. A few things
 re-resolve live against the current config instead: `pass_keys` is evaluated per
 keypress (so a config reload — and a title change — takes effect immediately),
-and layer-surface chrome is evaluated per frame (so a config reload takes effect
-immediately).
+layer-surface chrome is evaluated per frame (so a config reload takes effect
+immediately), `suspend_on_close` is evaluated when a window closes, and
+`restore_windows` when the session is saved or loaded.
 
 ## How matching works
 
@@ -19,8 +20,8 @@ in config order and merged together:
 
 - **Scalar fields** (`decoration`, `opacity`, `position`, `size`,
   `fullscreen`, `border_width`, `border_color`, `border_color_focused`,
-  `corner_radius`, `shadow`, `output`, `layer_order`, `suspend_on_close`):
-  last-wins — a later rule overrides an earlier one.
+  `corner_radius`, `shadow`, `output`, `layer_order`, `suspend_on_close`,
+  `restore_windows`): last-wins — a later rule overrides an earlier one.
 - **Boolean flags** (`widget`, `pinned_to_screen`, `blur`): sticky-on — once
   set by any matching rule, the flag stays set regardless of later rules.
 - **`pass_keys`**: `All` is sticky-on; `Only` lists are unioned across
