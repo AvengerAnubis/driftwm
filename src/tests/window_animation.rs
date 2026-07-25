@@ -2425,6 +2425,53 @@ fn a_fullscreen_handover_draws_both_the_frozen_exit_and_the_growing_entry() {
     f.state().exit_fullscreen_on(&output);
 }
 
+/// The handover from a *zoomed-out* canvas. Entering fullscreen parks the live
+/// viewport a whole transition ahead of what is on screen, so a claim judged
+/// against the live one is judged in the wrong frame: the outgoing picture has
+/// not moved, and dropping its claim lets the panels and the background back in
+/// over a motionless fullscreen frame for the whole of the incoming window's
+/// growth.
+#[test]
+fn a_fullscreen_handover_keeps_its_cover_across_the_viewport_park() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let leaving = map_window(&mut f, id, "a", (800, 600));
+    let arriving = map_window(&mut f, id, "b", (800, 600));
+    let first = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state().with_output_state(|os| {
+        os.camera = Point::from((37.5, 21.25));
+        os.zoom = 0.8;
+    });
+    f.state().update_output_from_camera();
+    tick_until_settled(&mut f);
+
+    f.client(id).window(&leaving).set_fullscreen(None);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &leaving);
+    tick_until_settled(&mut f);
+
+    f.client(id).window(&arriving).set_fullscreen(None);
+    f.double_roundtrip(id);
+    let leaving_id = element_id(&mut f, &first);
+    assert_ne!(
+        f.state().with_output_state(|os| (os.camera, os.zoom)),
+        Some((Point::from((37.5, 21.25)), 0.8)),
+        "precondition: the incoming entry parked the live viewport away from the \
+         view the outgoing picture was frozen under"
+    );
+    assert_eq!(
+        f.state().frozen_fullscreen_cover(&output),
+        Some(leaving_id),
+        "but that picture is drawn through the parked-away view, and is still \
+         hiding the output"
+    );
+    assert!(f.state().is_output_visually_fullscreen(&output));
+
+    f.state().exit_fullscreen_on(&output);
+}
+
 /// The z-order half of the same handover. The outgoing window re-pins on its way
 /// out, so its frozen picture claims the screen-pinned bucket that draws above
 /// every normal window — including the one growing into the fullscreen it is

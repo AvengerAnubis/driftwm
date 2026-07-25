@@ -486,11 +486,16 @@ impl DriftWm {
 
     /// The frozen fullscreen picture still covering `output` — one held under the
     /// view the output is showing right now.
+    ///
+    /// Judged against [`Self::world_view`], not the live viewport: the picture is
+    /// drawn through that view, and a fullscreen entry parks the live one a whole
+    /// transition ahead of what is on screen. Reading live would drop the claim
+    /// of a picture that has not moved (a handover from a zoomed-out canvas, where
+    /// the park is the only difference between the two) and keep the claim of one
+    /// that has (a zoom during the freeze, later swallowed by a park that happens
+    /// to round back). The two agree whenever nothing is entering fullscreen.
     pub(crate) fn frozen_fullscreen_cover(&self, output: &Output) -> Option<ElementId> {
-        let (camera, zoom) = {
-            let os = output_state(output);
-            (os.camera, os.zoom)
-        };
+        let (camera, zoom) = self.world_view(output);
         self.window_animations
             .frozen_fullscreen_on(&output.name(), camera, zoom)
     }
