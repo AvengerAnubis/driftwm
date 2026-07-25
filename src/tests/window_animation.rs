@@ -1537,7 +1537,6 @@ fn dismissing_a_focused_stand_in_navigates_to_a_related_off_screen_window() {
     // and both are far from the camera so the follow target is off-screen.
     let (sid, _window) =
         standin_and_window(&mut f, Point::from((6000, 600)), Point::from((6412, 600)));
-    let before = f.state().camera();
 
     f.state().dismiss_suspended(sid);
 
@@ -1545,7 +1544,6 @@ fn dismissing_a_focused_stand_in_navigates_to_a_related_off_screen_window() {
         f.state().camera_target().is_some(),
         "a related off-screen follow target pans, like a close does"
     );
-    let _ = before;
 }
 
 /// (b) No spatial relation and the only MRU window is off-screen: the dismiss

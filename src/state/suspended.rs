@@ -585,12 +585,11 @@ impl DriftWm {
             .remove(&DecorationKey::Suspended(id));
 
         if was_focused {
-            // The same tiers a real close uses, minus the parent tier: a stand-in
-            // is an app-level slot, so no xdg parent relation can exist. A
-            // spatially related history entry is followed (panning only when it
-            // isn't already fully visible); otherwise focus stays put — a visible
-            // MRU window on the stand-in's home output, else the nearest visible
-            // one to where it sat, else nothing. That arm never pans.
+            // Mirrors a real close's follow tiers, minus the parent tier (a
+            // stand-in is an app-level slot, so no xdg parent link exists): a
+            // spatially related history entry first, else a visible MRU window
+            // on the stand-in's home output, else the nearest visible one to
+            // where it sat, else nothing. That fallback arm never pans.
             let serial = SERIAL_COUNTER.next_serial();
             match follow {
                 Some(target) if self.window_fully_in_viewport(&target) => {
