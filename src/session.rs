@@ -46,6 +46,13 @@ pub struct SessionEntry {
     /// (SSD-origin).
     #[serde(default)]
     pub csd: bool,
+    /// Whether this entry held the focus at write time, so restore can hand the
+    /// focus back and a new window's auto placement anchors where the user left
+    /// off. At most one entry per file carries it: the write side clears it on
+    /// carried-forward entries, whose focus belongs to a boot that's over.
+    /// Additive: a file without this field defaults to unfocused.
+    #[serde(default)]
+    pub focused: bool,
 }
 
 /// A per-output camera/zoom, mirroring the runtime state file's shape.
@@ -212,6 +219,7 @@ mod tests {
             size: [400, 300],
             origin,
             csd: false,
+            focused: false,
         }
     }
 
@@ -276,6 +284,25 @@ mod tests {
         assert!(
             !legacy.entries[0].csd,
             "a pre-field file defaults to an SSD-origin stand-in"
+        );
+    }
+
+    #[test]
+    fn focused_defaults_false_for_a_file_predating_the_field() {
+        let tmp = TempDir::new();
+        let path = tmp.path.join("session.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"saved_at":0,"outputs":{},"entries":[
+                {"id":1,"app_id":"a","desktop_id":"a","display_name":"A",
+                 "position":[0,0],"size":[400,300],"origin":"explicit","csd":false}]}"#,
+        )
+        .unwrap();
+
+        let legacy = read(&path);
+        assert!(
+            !legacy.entries[0].focused,
+            "a pre-field file restores unfocused"
         );
     }
 

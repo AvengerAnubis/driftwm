@@ -17,7 +17,7 @@ use std::time::Duration;
 use smithay::desktop::Window;
 use smithay::reexports::calloop::RegistrationToken;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
-use smithay::utils::{Logical, Point, Rectangle, Size};
+use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Size};
 use smithay::wayland::seat::WaylandFocus;
 
 use driftwm::canvas::{ScreenPos, internal_to_rule, rule_to_internal, screen_to_canvas};
@@ -25,7 +25,9 @@ use driftwm::desktop_entry::AppIdentity;
 use driftwm::session::{self, Origin, SessionEntry, SessionEnvelope, SessionOutput};
 use driftwm::window_ext::WindowExt;
 
-use super::{DriftWm, StageWindow, SuspendedId, SuspendedWindow, output_state};
+use super::{
+    AUTO_PLACE_CLUSTER_THRESHOLD, DriftWm, StageWindow, SuspendedId, SuspendedWindow, output_state,
+};
 
 /// How long a move/resize coalesces before the durable write lands.
 const WRITE_DEBOUNCE: Duration = Duration::from_secs(1);
@@ -45,6 +47,9 @@ pub struct SessionStore {
     /// The bookmark registry read from the file at startup, stashed
     /// unconditionally (mirrors `durable_cameras`).
     pub(crate) durable_bookmarks: BTreeMap<String, [f64; 2]>,
+    /// The stand-in that materialized from the focused entry, waiting for
+    /// `apply_restored_focus` to hand it the focus once the boot outputs exist.
+    pub(crate) restore_focus: Option<SuspendedId>,
     /// A change is waiting for the debounce timer to write it.
     dirty: bool,
     /// The armed one-shot debounce timer, if any.
@@ -90,7 +95,14 @@ impl DriftWm {
             session::partition_for_restore(entries, self.config.session.restore_windows);
         self.session_store.carried_forward = carried;
         for entry in materialize {
-            self.materialize_entry(entry);
+            let held_focus = entry.focused;
+            let sid = self.materialize_entry(entry);
+            // Last flag wins: a hand-edited file with several entries flagged
+            // resolves to the last one, not the first. This build's own writes
+            // never produce more than one.
+            if held_focus {
+                self.session_store.restore_focus = Some(sid);
+            }
         }
         // Stash the file's registry unconditionally: with the flag off the write
         // side carries it forward verbatim (so flipping the flag on later loses
@@ -109,7 +121,7 @@ impl DriftWm {
     /// rect. A fresh per-process id is assigned — the durable record key is not
     /// reused across restarts, and nothing in this pass depends on it.
     /// `map_window` raises, so materializing bottom→top reproduces the z-order.
-    fn materialize_entry(&mut self, entry: SessionEntry) {
+    fn materialize_entry(&mut self, entry: SessionEntry) -> SuspendedId {
         let size = Size::from((entry.size[0], entry.size[1]));
         let loc = rule_to_internal(entry.position[0], entry.position[1], size);
         let sid = SuspendedId(self.next_suspended_id);
@@ -127,6 +139,32 @@ impl DriftWm {
             entry.csd,
         ));
         self.map_window(StageWindow::Suspended(s), loc, false);
+        sid
+    }
+
+    /// Hand the focus back to the stand-in the session recorded as focused, so a
+    /// new window's auto placement anchors to the cluster the user left off on.
+    /// Runs once the boot outputs and their seeded cameras exist, and only when
+    /// the stand-in is visible on some output at the fraction auto placement
+    /// itself demands of an anchor — otherwise relaunch and dismiss would point
+    /// at a window nobody can see.
+    pub fn apply_restored_focus(&mut self) {
+        let Some(id) = self.session_store.restore_focus.take() else {
+            return;
+        };
+        let Some(standin) = self.find_suspended(id) else {
+            return;
+        };
+        let app_id = standin.identity.app_id.clone();
+        let element = StageWindow::Suspended(standin);
+        let visible = self.space.outputs().any(|output| {
+            self.window_visible_at_least_on(&element, output, AUTO_PLACE_CLUSTER_THRESHOLD)
+        });
+        if visible {
+            self.set_suspended_focus(id, SERIAL_COUNTER.next_serial());
+        } else {
+            tracing::debug!("restored focus for {app_id} dropped: its stand-in is off screen");
+        }
     }
 
     /// Per-output cameras to restore on connect: the durable fresh-boot seed
@@ -217,18 +255,25 @@ impl DriftWm {
         // keeps them distinct within this write.
         let mut next_live_id = self.next_suspended_id;
         let windows: Vec<StageWindow> = self.stage.windows().cloned().collect();
+        // Focus *intent*, the same anchor auto placement reads, so a launcher's
+        // transient keyboard focus at shutdown doesn't erase the real one.
+        let focused = self.focused_anchor_element();
         // Z-ordered tail: suspended stand-ins + (with restore on) live windows.
         // Tally live windows per app so carried quit records can be deduped
         // against the apps that actually came back.
         let mut tail: Vec<SessionEntry> = Vec::new();
         let mut live_counts: HashMap<String, usize> = HashMap::new();
         for window in &windows {
+            let has_focus = focused.as_ref() == Some(window);
             if let Some(s) = window.suspended() {
                 let loc = self.stage.position_of(window).unwrap_or_default();
-                tail.push(suspended_entry(s, loc));
+                let mut entry = suspended_entry(s, loc);
+                entry.focused = has_focus;
+                tail.push(entry);
             } else if include_live
-                && let Some(entry) = self.live_window_entry(window, &mut next_live_id)
+                && let Some(mut entry) = self.live_window_entry(window, &mut next_live_id)
             {
+                entry.focused = has_focus;
                 *live_counts.entry(entry.app_id.clone()).or_default() += 1;
                 tail.push(entry);
             }
@@ -247,7 +292,11 @@ impl DriftWm {
                 *remaining -= 1;
                 continue;
             }
-            entries.push(carried.clone());
+            let mut entry = carried.clone();
+            // The focus of a boot that's over: clearing it keeps exactly one
+            // flagged entry in the file, the one focused at this write.
+            entry.focused = false;
+            entries.push(entry);
         }
         entries.extend(tail);
 
@@ -300,6 +349,7 @@ impl DriftWm {
             size: [body.size.w, body.size.h],
             origin: Origin::Quit,
             csd,
+            focused: false,
         })
     }
 
@@ -368,6 +418,7 @@ fn suspended_entry(s: &SuspendedWindow, loc: Point<i32, Logical>) -> SessionEntr
         size: [size.w, size.h],
         origin: s.origin,
         csd: s.csd,
+        focused: false,
     }
 }
 
@@ -437,6 +488,7 @@ mod tests {
             size,
             origin: Origin::Explicit,
             csd: false,
+            focused: false,
         }
     }
 

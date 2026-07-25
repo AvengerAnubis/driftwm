@@ -110,6 +110,15 @@ this flag — they're already an explicit, user-visible artifact on your canvas.
 `restore_windows` only decides whether still-_open_ windows get saved too on
 the way out.
 
+The window you had focused is restored too — like the stand-ins themselves,
+whether or not this flag is on — as focus on its stand-in, so it
+wears a focus ring, `Enter` relaunches it, and `placement = "auto"` puts your
+first new window beside it instead of dropping it in the middle of the
+viewport. This only happens when that stand-in comes back on screen (which in
+practice means `restore_camera` is on, or it was near your camera anyway):
+focus you can't see is focus you'd act on by accident, so the canvas just
+starts unfocused instead.
+
 ## `restore_camera`
 
 ```toml

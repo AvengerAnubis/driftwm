@@ -11,14 +11,14 @@ use std::rc::Rc;
 use driftwm::config::Config;
 use driftwm::desktop_entry::DesktopEntryCache;
 use driftwm::session::{self, Origin, SessionEntry, SessionEnvelope, SessionOutput};
-use smithay::utils::{Point, Rectangle, Size};
+use smithay::utils::{Point, Rectangle, SERIAL_COUNTER, Size};
 
 use crate::decorations::DecorationHit;
 use crate::input::DecoTarget;
-use crate::state::{StageWindow, SuspendedWindow};
+use crate::state::{FocusTarget, StageWindow, SuspendedWindow};
 
 use super::real::TempDir;
-use super::{Fixture, map_window, window_by_app_id};
+use super::{Fixture, map_window, server_surface, window_by_app_id};
 
 /// SSD-on config with `[session].restore_windows` set as asked.
 fn config_restore(on: bool) -> Config {
@@ -77,6 +77,7 @@ fn entry(id: u64, app: &str, origin: Origin) -> SessionEntry {
         size: [400, 300],
         origin,
         csd: false,
+        focused: false,
     }
 }
 
@@ -198,6 +199,202 @@ fn restored_stand_in_has_clickable_label() {
     );
 
     f.state().dismiss_suspended(sid);
+}
+
+/// The window focused at quit comes back as focus on its stand-in, so the first
+/// window opened after a restart has an auto-placement anchor instead of landing
+/// in the middle of the viewport.
+#[test]
+fn focus_round_trips_onto_the_restored_stand_in() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    {
+        let cache = TempDir::new();
+        let mut f = Fixture::with_config(config_restore(true));
+        f.add_output(1, (1920, 1080));
+        inject_cache(&mut f, &cache, &["alpha", "beta"]);
+        f.state().session_store.path = Some(path.clone());
+
+        let a = f.add_client();
+        map_at(&mut f, a, "alpha", (400, 300), (-500, -200));
+        let b = f.add_client();
+        map_at(&mut f, b, "beta", (200, 200), (100, -200));
+
+        // Focus alpha, the window *under* the last-mapped one, so the flag can't
+        // be z-order in disguise.
+        let alpha = window_by_app_id(&mut f, "alpha").unwrap();
+        let serial = SERIAL_COUNTER.next_serial();
+        f.state()
+            .set_window_focus(Some(FocusTarget(server_surface(&alpha))), serial);
+
+        f.state().serialize_session_on_shutdown();
+    }
+
+    let saved = session::read(&path);
+    let flagged: Vec<&str> = saved
+        .entries
+        .iter()
+        .filter(|e| e.focused)
+        .map(|e| e.app_id.as_str())
+        .collect();
+    assert_eq!(flagged, vec!["alpha"], "only the focused window is flagged");
+
+    let mut f = Fixture::with_config(config_restore(true));
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+    f.state().apply_restored_focus();
+
+    let restored = suspended_in_order(&mut f);
+    let alpha = restored
+        .iter()
+        .find(|(s, _)| s.identity.app_id == "alpha")
+        .expect("alpha came back")
+        .0
+        .clone();
+    assert_eq!(
+        f.state().gated_suspended_focus(),
+        Some(alpha.id),
+        "the focused window's stand-in holds the focus"
+    );
+    assert!(
+        matches!(
+            f.state().focused_anchor_element(),
+            Some(StageWindow::Suspended(s)) if s.id == alpha.id
+        ),
+        "the restored focus is the auto-placement anchor"
+    );
+
+    for (s, _) in restored {
+        f.state().dismiss_suspended(s.id);
+    }
+}
+
+/// A canvas left unfocused (the deliberate escape hatch for placing a window
+/// wherever you like) comes back unfocused.
+#[test]
+fn an_unfocused_session_restores_unfocused() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    {
+        let cache = TempDir::new();
+        let mut f = Fixture::with_config(config_restore(true));
+        f.add_output(1, (1920, 1080));
+        inject_cache(&mut f, &cache, &["alpha"]);
+        f.state().session_store.path = Some(path.clone());
+
+        let a = f.add_client();
+        map_at(&mut f, a, "alpha", (400, 300), (-500, -200));
+        let serial = SERIAL_COUNTER.next_serial();
+        f.state().set_window_focus(None, serial);
+
+        f.state().serialize_session_on_shutdown();
+    }
+
+    let saved = session::read(&path);
+    assert!(
+        saved.entries.iter().all(|e| !e.focused),
+        "nothing is flagged when nothing was focused"
+    );
+
+    let mut f = Fixture::with_config(config_restore(true));
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+    f.state().apply_restored_focus();
+
+    assert_eq!(f.state().gated_suspended_focus(), None);
+    for (s, _) in suspended_in_order(&mut f) {
+        f.state().dismiss_suspended(s.id);
+    }
+}
+
+/// A restored focus lands only on a stand-in you can actually see. Off-screen —
+/// the camera didn't come back with it, or you quit panned away — the canvas
+/// starts unfocused rather than pointing relaunch and dismiss at a window
+/// nothing on screen shows.
+#[test]
+fn an_off_screen_restored_focus_is_dropped() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let mut far = entry(1, "faraway", Origin::Explicit);
+    far.position = [40_000, 40_000];
+    far.focused = true;
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![far],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    let mut f = Fixture::with_config(config_restore(true));
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+    f.state().apply_restored_focus();
+
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(restored.len(), 1, "the stand-in itself still comes back");
+    assert_eq!(
+        f.state().gated_suspended_focus(),
+        None,
+        "focus is not handed to a stand-in outside the viewport"
+    );
+
+    for (s, _) in restored {
+        f.state().dismiss_suspended(s.id);
+    }
+}
+
+/// A carried-forward entry's focus flag belongs to a boot that's over: it's
+/// cleared on the rewrite, so flipping `restore_windows` on later can't restore
+/// focus onto a window from two sessions ago.
+#[test]
+fn a_carried_entry_loses_its_stale_focus_flag() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let mut stale = entry(2, "onlyquit", Origin::Quit);
+    stale.focused = true;
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![entry(1, "keepme", Origin::Explicit), stale],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    // Restore off: the quit entry is carried, not materialized.
+    let mut f = Fixture::with_config(config_restore(false));
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+    f.state().apply_restored_focus();
+    assert_eq!(
+        f.state().gated_suspended_focus(),
+        None,
+        "a carried entry's flag restores no focus — it never materialized"
+    );
+
+    // Dismissing the explicit stand-in rewrites the file.
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].0.identity.app_id, "keepme");
+    f.state().dismiss_suspended(restored[0].0.id);
+
+    let after = session::read(&path);
+    assert_eq!(after.entries.len(), 1);
+    assert_eq!(after.entries[0].app_id, "onlyquit");
+    assert!(
+        !after.entries[0].focused,
+        "the carried entry is re-emitted unflagged"
+    );
 }
 
 /// With `restore_windows` off, an explicit entry materializes but a quit entry
@@ -651,6 +848,10 @@ fn create_and_dismiss_write_immediately() {
     );
     assert_eq!(after_create.entries[0].app_id, "myapp");
     assert_eq!(after_create.entries[0].origin, Origin::Explicit);
+    assert!(
+        after_create.entries[0].focused,
+        "the stand-in inherited the closed window's focus, and the write kept it"
+    );
 
     let sid = after_create.entries[0].id;
     f.state().dismiss_suspended(crate::state::SuspendedId(sid));

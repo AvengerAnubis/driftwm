@@ -162,6 +162,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => backend::winit::init_winit(&mut event_loop, &mut data)?,
     }
 
+    // Deferred until here: the restored focus is only handed over when its
+    // stand-in is on screen, which needs the boot outputs and their seeded
+    // cameras to exist.
+    data.apply_restored_focus();
+
     // Register Wayland Display as a calloop source for auto client dispatch.
     let display_source = smithay::reexports::calloop::generic::Generic::new(
         display,
