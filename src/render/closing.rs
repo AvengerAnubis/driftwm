@@ -157,6 +157,21 @@ pub(crate) fn capture_close_pixels(
     })
 }
 
+#[cfg(test)]
+impl ClosePixels {
+    /// A capture with no textures. Pixels need a live renderer, but the stash's
+    /// pairing and drop rules are about the stamp and the map — so a headless
+    /// test can still seed one and hold the drop sites to account.
+    pub(crate) fn empty(geometry: Rectangle<i32, Logical>) -> Self {
+        ClosePixels {
+            surfaces: Vec::new(),
+            bounds: Rectangle::from_size(geometry.size.to_f64()),
+            geometry,
+            captured_at: Instant::now(),
+        }
+    }
+}
+
 /// The content a window is about to replace, cloned while a compositor resize
 /// holds it frozen. Kept until the client's redraw lands, where it becomes the
 /// fading half of the crossfade.
@@ -790,15 +805,8 @@ mod close_pixel_age_tests {
 mod resize_capture_tests {
     use super::*;
 
-    /// A capture with no surfaces — the pairing rules are about the stamp, not
-    /// the pixels (which need a live renderer to exist at all).
     fn capture() -> ClosePixels {
-        ClosePixels {
-            surfaces: Vec::new(),
-            bounds: Rectangle::from_size(Size::from((400.0, 300.0))),
-            geometry: Rectangle::from_size(Size::from((400, 300))),
-            captured_at: Instant::now(),
-        }
+        ClosePixels::empty(Rectangle::from_size(Size::from((400, 300))))
     }
 
     /// The leg that made the request gets its content, once.

@@ -5,9 +5,13 @@
 //! visually-fullscreen gating, per-output scoping, and the crash/conversion
 //! cleanup that drains the map.
 //!
-//! Backend is `None`, so render transients (close snapshots, crossfades) never
-//! materialize — their counters stay 0. Only the open/geometry bookkeeping
-//! is exercised here. Everything is driven through compositor-level entry points
+//! Backend is `None`, so anything that needs a renderer to exist (close
+//! snapshots, crossfade overlays) never materializes — their counters stay 0,
+//! and an assertion on them pins nothing. The capture half of a resize
+//! crossfade is a plain map, though, so the lifecycle scenarios seed one
+//! ([`seed_resize_capture`]) and the drop sites have to earn their zero; the
+//! overlay half needs a texture and stays out of headless reach.
+//! Everything else is driven through compositor-level entry points
 //! (actions, fill/fit/fullscreen, commits, ticks) so the tests survive a refactor
 //! of the private `WindowAnimations` internals. `tick_window_animations_at` takes
 //! an injected `now` so endpoint deadlines are deterministic.
@@ -65,6 +69,43 @@ fn element_id(f: &mut Fixture, window: &Window) -> ElementId {
         .stage
         .id_of(window)
         .expect("window is stage-mapped")
+}
+
+/// Stage id of the stand-in for `sid` — the id an adoption hands on to the
+/// window that takes over its slot.
+fn standin_element_id(f: &mut Fixture, sid: SuspendedId) -> ElementId {
+    let element = f
+        .state()
+        .stage
+        .windows()
+        .find(|w| w.suspended().is_some_and(|s| s.id == sid))
+        .cloned()
+        .expect("the stand-in is on the stage");
+    f.state().stage.id_of(&element).expect("and carries an id")
+}
+
+/// Put content in the stash a resize crossfade consumes, standing in for the
+/// capture a headless fixture has no renderer to make. Every `resize_captures`
+/// drop assertion needs this: with the map empty from the start it cannot tell a
+/// working drop site from one that never ran. Stamped with the id's current
+/// capture generation, or 0 when the id has no geometry entry — only the resolve
+/// pairs on the stamp, the drop sites never look at it.
+fn seed_resize_capture(f: &mut Fixture, id: ElementId) {
+    let generation = f
+        .state()
+        .window_animations
+        .generation_of(id)
+        .unwrap_or_default();
+    f.state().resize_captures.stash(
+        id,
+        crate::render::ClosePixels::empty(Rectangle::from_size(Size::from((400, 300)))),
+        generation,
+    );
+    assert_eq!(
+        f.state().debug_counters()["resize_captures"],
+        1,
+        "the seeded capture is in the map, so the drop below has something to do"
+    );
 }
 
 /// Drive real-time ticks until every window animation prunes, panicking on
@@ -517,6 +558,7 @@ fn a_commit_resolves_the_outstanding_request() {
     reset_view(&mut f);
     f.state()
         .map_window(window.clone(), Point::from((400, 300)), false);
+    let eid = element_id(&mut f, &window);
     tick_until_settled(&mut f); // drain open
 
     // An outstanding size request the client has not yet committed.
@@ -531,6 +573,8 @@ fn a_commit_resolves_the_outstanding_request() {
         f.state().window_animations.is_active(),
         "the entry is frozen, waiting for the client to redraw"
     );
+    // The old picture the freeze has been holding on screen.
+    seed_resize_capture(&mut f, eid);
 
     // The client commits a buffer at the requested size — a clean ack resolves it.
     let w = f.client(id).window(&surface);
@@ -540,12 +584,14 @@ fn a_commit_resolves_the_outstanding_request() {
     f.double_roundtrip(id);
     let counters = f.state().debug_counters();
     assert_eq!(
-        counters["resize_crossfades"], 0,
-        "the crossfade the resolve arms is backend-gated — none headless"
+        counters["resize_captures"], 0,
+        "the resolve consumed the stashed old picture — the one moment old and \
+         new content both exist"
     );
     assert_eq!(
-        counters["resize_captures"], 0,
-        "and the capture it would have consumed never existed"
+        counters["resize_crossfades"], 0,
+        "the overlay it would have become needs a renderer, so only the consume \
+         side is pinned headless"
     );
     tick_until_settled(&mut f);
     assert_eq!(
@@ -568,6 +614,7 @@ fn a_client_chosen_size_also_resolves_the_request() {
     reset_view(&mut f);
     f.state()
         .map_window(window.clone(), Point::from((400, 300)), false);
+    let eid = element_id(&mut f, &window);
     tick_until_settled(&mut f);
 
     let committed = window.geometry().size;
@@ -581,6 +628,7 @@ fn a_client_chosen_size_also_resolves_the_request() {
         f.state().window_animations.is_active(),
         "the request is outstanding, so the entry is still frozen"
     );
+    seed_resize_capture(&mut f, eid);
 
     // The client commits a third size — neither the request nor the prior size.
     let chosen: Size<i32, Logical> = Size::from((committed.w + 50, committed.h + 50));
@@ -590,8 +638,11 @@ fn a_client_chosen_size_also_resolves_the_request() {
     w.commit();
     f.double_roundtrip(id);
     let counters = f.state().debug_counters();
-    assert_eq!(counters["resize_crossfades"], 0, "backend-gated");
-    assert_eq!(counters["resize_captures"], 0);
+    assert_eq!(
+        counters["resize_captures"], 0,
+        "a client-chosen size resolves the freeze too, consuming the old picture"
+    );
+    assert_eq!(counters["resize_crossfades"], 0, "overlay is backend-gated");
     tick_until_settled(&mut f);
     assert_eq!(
         f.state().window_animations.len(),
@@ -790,7 +841,15 @@ fn exit_from_mid_entry_continues_from_the_current_visual() {
     f.client(id).window(&surface).set_fullscreen(None);
     f.double_roundtrip(id);
     let locked_camera = f.state().with_output_state(|os| os.camera).unwrap();
-    // Advance the entry partway (mid-entry).
+    // The enter freezes until the client redraws at the fullscreen size. Ack it,
+    // then advance the leg partway, so the exit interrupts a rect in motion
+    // rather than one still sitting on its seed.
+    let seed = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .unwrap();
+    super::adopt_last_configure(&mut f, id, &surface);
     f.state().tick_window_animations(TICK);
     f.state().tick_window_animations(TICK);
     let mid = f
@@ -798,6 +857,10 @@ fn exit_from_mid_entry_continues_from_the_current_visual() {
         .window_animations
         .geometry_visual_rect(eid)
         .unwrap();
+    assert!(
+        mid.size.w > seed.size.w + 1.0 && mid.size.w < 1919.0,
+        "the entry is genuinely mid-flight ({seed:?} -> {mid:?})"
+    );
     assert!(f.state().window_animations.fullscreen_entry_active(eid));
     // The mid visual's on-screen position in the locked (zoom-1) viewport.
     let mid_screen = mid.loc - locked_camera;
@@ -842,11 +905,13 @@ fn conversion_drops_the_window_animation_entry() {
     let window = window_by_app_id(&mut f, "myapp").unwrap();
     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
     f.state().raise_and_focus(&window, serial);
+    let eid = element_id(&mut f, &window);
     assert_eq!(
         f.state().window_animations.len(),
         1,
         "the mapped window has an open entry pre-conversion"
     );
+    seed_resize_capture(&mut f, eid);
 
     // Suspend then close: the destroy converts the window into a stand-in.
     f.state().execute_action(&Action::SuspendWindow);
@@ -863,8 +928,12 @@ fn conversion_drops_the_window_animation_entry() {
     assert_eq!(counters["closing_snapshots"], 0);
     assert_eq!(counters["standin_fades"], 0);
     assert_eq!(counters["close_pixels"], 0);
-    assert_eq!(counters["resize_captures"], 0);
-    assert_eq!(counters["resize_crossfades"], 0);
+    assert_eq!(
+        counters["resize_captures"], 0,
+        "the id died with the client here, so the teardown sweep collects its \
+         seeded capture (the in-place conversion is pinned below)"
+    );
+    assert_eq!(counters["resize_crossfades"], 0, "overlay is backend-gated");
 
     // Tear the stand-in down for the baseline.
     let sid = f
@@ -878,15 +947,25 @@ fn conversion_drops_the_window_animation_entry() {
 }
 
 /// Adoption drops both stale window-animation entries and replaces them with a
-/// single hold on the adopted window's slot; no render transient materializes
-/// headless, so the crossfade counter stays 0.
+/// single hold on the adopted window's slot, and content stashed against the
+/// stand-in's id goes with them — the adopted window inherits that id, so no
+/// sweep would ever collect it.
 #[test]
 fn adoption_drops_entries_and_creates_no_render_transient() {
     let tmp = TempDir::new();
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
 
-    let (_cid, _surface) = adopt_relaunched(&mut f, &tmp);
+    let (sid, cid, surface) = arrange_pending_relaunch(&mut f, &tmp);
+    let standin_id = standin_element_id(&mut f, sid);
+    seed_resize_capture(&mut f, standin_id);
+
+    // The first sized commit adopts the stand-in's slot.
+    let w = f.client(cid).window(&surface);
+    w.set_size(300, 200);
+    w.attach_new_buffer();
+    w.ack_last_and_commit();
+    f.double_roundtrip(cid);
     assert!(
         window_by_app_id(&mut f, "myapp").is_some(),
         "the window adopted the slot"
@@ -917,8 +996,11 @@ fn adoption_drops_entries_and_creates_no_render_transient() {
     assert_eq!(counters["close_pixels"], 0);
     // Adoption replaces the stand-in in place, keeping its id: same hazard as
     // conversion, so both involved ids' crossfade halves go at the replace.
-    assert_eq!(counters["resize_captures"], 0);
-    assert_eq!(counters["resize_crossfades"], 0);
+    assert_eq!(
+        counters["resize_captures"], 0,
+        "the seeded capture went at the replace, not on a sweep that cannot fire"
+    );
+    assert_eq!(counters["resize_crossfades"], 0, "overlay is backend-gated");
 }
 
 /// The stand-in's "launching…" label state is live while the relaunch is pending
@@ -1315,6 +1397,11 @@ fn a_growing_resize_freezes_rather_than_magnifying() {
     );
 }
 
+/// The far end of a fit the client never acks: the endpoint hold's deadline
+/// fires, drops the request, and the rect walks back down to the size the client
+/// still has. Staleness belongs to the buffer, not to the request that release
+/// just dropped, so that last leg stays capped — nothing magnifies on the way
+/// back. Reaching it costs both budgets, hence the two clock steps.
 #[test]
 fn the_hold_deadline_release_stays_capped() {
     let mut f = Fixture::new();
@@ -1328,21 +1415,39 @@ fn the_hold_deadline_release_stays_capped() {
     let eid = element_id(&mut f, &window);
     tick_until_settled(&mut f);
 
-    // A fit the client never acks: reach the endpoint, then blow past the cap.
     f.state().fit_window(&window);
     let base = Instant::now();
-    for _ in 0..30 {
-        f.state().tick_window_animations_at(TICK, base);
-    }
-    let past = base + crate::state::window_animation::MAX_ENDPOINT_HOLD + TICK;
+    f.state().tick_window_animations_at(TICK, base);
 
+    // Past the start budget the leg degrades and runs to the requested endpoint,
+    // where the endpoint hold anchors its own deadline.
+    let after_start = base + PAST_HOLD;
+    for _ in 0..MAX_TICKS {
+        f.state().tick_window_animations_at(TICK, after_start);
+        if !f.state().window_animations.start_held(eid) {
+            break;
+        }
+    }
+    for _ in 0..60 {
+        f.state().tick_window_animations_at(TICK, after_start);
+    }
+    let endpoint = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .expect("the endpoint hold keeps it alive");
+
+    // Past the endpoint budget too: the request is dropped and the rect shrinks
+    // back toward the live size.
+    let after_endpoint = after_start + PAST_HOLD;
     let committed = window.geometry().size.to_f64();
     let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let mut released = false;
     for _ in 0..MAX_TICKS {
         if !f.state().window_animations.is_active() {
             break;
         }
-        f.state().tick_window_animations_at(TICK, past);
+        f.state().tick_window_animations_at(TICK, after_endpoint);
         let v = f.state().animated_visual(eid, loc, committed);
         let (sx, sy) =
             crate::state::window_animation::content_scale(v.size, committed, v.cap_content);
@@ -1350,7 +1455,18 @@ fn the_hold_deadline_release_stays_capped() {
             sx <= 1.0 && sy <= 1.0,
             "the release leg must stay capped — no commit ever landed (got {sx:.2}x)"
         );
+        released |= v.size.w < endpoint.size.w - 1.0;
     }
+    assert!(
+        released,
+        "the deadline dropped the request and the rect actually walked back down \
+         from {endpoint:?}"
+    );
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "and the release leg settled at the live size"
+    );
 }
 
 /// A position-only retarget (a nudge, a cluster shift) landing on a frozen resize
@@ -1456,9 +1572,11 @@ fn a_position_only_retarget_keeps_an_adopted_slot_stretching() {
     }
 }
 
-/// A commit arriving after the hold deadline already dropped the request is still
-/// the resolution: it clears staleness, so the flag never outlives the buffer it
-/// describes.
+/// A commit arriving after both budgets have run out — the request already gone,
+/// dropped by the endpoint release rather than by any commit — is still the
+/// resolution: it clears staleness, so the flag never outlives the buffer it
+/// describes. The arm under test only exists once nothing is outstanding, which
+/// is why the request has to be genuinely dropped first.
 #[test]
 fn a_late_commit_after_the_deadline_clears_staleness() {
     let mut f = Fixture::new();
@@ -1474,33 +1592,63 @@ fn a_late_commit_after_the_deadline_clears_staleness() {
 
     f.state().fit_window(&window);
     let base = Instant::now();
-    for _ in 0..30 {
-        f.state().tick_window_animations_at(TICK, base);
+    f.state().tick_window_animations_at(TICK, base);
+
+    // Past the start budget the leg degrades and parks at the requested endpoint.
+    let after_start = base + PAST_HOLD;
+    for _ in 0..MAX_TICKS {
+        f.state().tick_window_animations_at(TICK, after_start);
+        if !f.state().window_animations.start_held(eid) {
+            break;
+        }
     }
-    // Release the hold without any commit having landed.
-    let past = base + crate::state::window_animation::MAX_ENDPOINT_HOLD + TICK;
-    f.state().tick_window_animations_at(TICK, past);
+    for _ in 0..60 {
+        f.state().tick_window_animations_at(TICK, after_start);
+    }
+    let endpoint = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .expect("the endpoint hold keeps it alive");
+
+    // Past the endpoint budget the request is dropped — still with no commit —
+    // and the rect starts back toward the size the client actually has.
+    let after_endpoint = after_start + PAST_HOLD;
+    f.state().tick_window_animations_at(TICK, after_endpoint);
+    f.state().tick_window_animations_at(TICK, after_endpoint);
     let committed = window.geometry().size.to_f64();
     let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let released = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .unwrap();
+    assert!(
+        released.size.w < endpoint.size.w - 1.0,
+        "the deadline dropped the request, so nothing is left for the commit \
+         below to resolve ({endpoint:?} -> {released:?})"
+    );
     assert!(
         f.state().animated_visual(eid, loc, committed).cap_content,
         "still stale right after the release — no commit yet"
     );
 
-    // The client finally redraws at a new size.
+    // The client finally redraws, at a size of its own.
     let w = f.client(id).window(&surface);
     w.set_size(900, 700);
     w.attach_new_buffer();
     w.ack_last_and_commit();
     f.double_roundtrip(id);
 
-    if f.state().window_animations.is_active() {
-        let committed = window.geometry().size.to_f64();
-        assert!(
-            !f.state().animated_visual(eid, loc, committed).cap_content,
-            "the late commit resolved it, so staleness is cleared"
-        );
-    }
+    assert!(
+        f.state().window_animations.is_active(),
+        "the release leg is still running for the late commit to land on"
+    );
+    let committed = window.geometry().size.to_f64();
+    assert!(
+        !f.state().animated_visual(eid, loc, committed).cap_content,
+        "the late commit is the resolution arriving, so staleness is cleared"
+    );
 }
 
 // Dismissing a focused stand-in follows the same tiers a real close does: the
@@ -1708,6 +1856,7 @@ fn a_request_carrying_retarget_refreezes_and_bumps_the_generation() {
     for _ in 0..4 {
         f.state().tick_window_animations_at(TICK, base);
     }
+    seed_resize_capture(&mut f, eid);
 
     // A second, genuinely different resize while the first is still frozen.
     // (Unfitting back to the size the client still has would be a same-size
@@ -1730,7 +1879,8 @@ fn a_request_carrying_retarget_refreezes_and_bumps_the_generation() {
     );
     assert_eq!(
         counters["resize_crossfades"], 0,
-        "as did any overlay for the leg that no longer exists"
+        "as would any overlay for the leg that no longer exists — that half needs \
+         a renderer, so only the capture is pinned here"
     );
 }
 
@@ -1757,6 +1907,7 @@ fn an_off_screen_freeze_drops_its_entry_and_its_capture() {
         f.state().window_animations.start_held(eid),
         "the fit froze the window"
     );
+    seed_resize_capture(&mut f, eid);
 
     // Pan away: the frozen rect now intersects no viewport.
     f.state().set_camera(Point::from((100_000.0, 100_000.0)));
@@ -1773,7 +1924,7 @@ fn an_off_screen_freeze_drops_its_entry_and_its_capture() {
         counters["resize_captures"], 0,
         "nothing stays stashed for a leg that will never run"
     );
-    assert_eq!(counters["resize_crossfades"], 0);
+    assert_eq!(counters["resize_crossfades"], 0, "overlay is backend-gated");
 
     // The redraw the freeze was waiting for lands late: a no-op, not a revival.
     let w = f.client(id).window(&surface);
@@ -1824,6 +1975,7 @@ fn conversion_mid_freeze_drops_the_crossfade_with_the_entry() {
         f.state().window_animations.start_held(eid),
         "the fit froze the window"
     );
+    seed_resize_capture(&mut f, eid);
 
     f.state().execute_action(&Action::SuspendWindow);
     f.client(id).window(&surface).destroy();
@@ -1847,7 +1999,7 @@ fn conversion_mid_freeze_drops_the_crossfade_with_the_entry() {
         counters["resize_captures"], 0,
         "and the content captured for its crossfade"
     );
-    assert_eq!(counters["resize_crossfades"], 0);
+    assert_eq!(counters["resize_crossfades"], 0, "overlay is backend-gated");
 
     // Tear the stand-in down for the baseline.
     let sid = f
