@@ -193,18 +193,21 @@ impl DriftWm {
                 .max((size.h - committed.h).abs())
                 > MIN_ANIMATED_RESIZE
         });
-        // A chase armed in the same commit that mapped the window takes over the
-        // open fade rather than destroying it, seeded at the rect it is going to
-        // reach — a zero-length chase, so the window fades in already fullscreen
-        // (or already fitted) instead of popping in at the placement rect and
-        // then sliding. The size comes from the surviving request so the seed is
-        // exactly what the tick converges to.
-        let (seed, open_fade) = match final_loc {
-            Some(loc) if self.window_animations.open_unshown(id) => (
-                Rectangle::new(loc.to_f64(), requested_size.unwrap_or(committed).to_f64()),
-                Some(0.0),
-            ),
-            _ => (seed, None),
+        // A chase that replaces an open entry inherits its fade rather than
+        // destroying it, so a window still arriving keeps arriving instead of
+        // popping to full opacity partway in. Only the *seed* is overridden, and
+        // only while that fade has never been drawn: a window already shown at
+        // its placement rect has to travel from there, but one that has not is
+        // put straight at the rect it is going to reach — a zero-length chase,
+        // so it fades in already fullscreen (or already fitted). The seed's size
+        // comes from the surviving request, so it is exactly what the tick
+        // converges to.
+        let open_fade = self.window_animations.open_progress(id);
+        let seed = match final_loc {
+            Some(loc) if self.window_animations.open_unshown(id) => {
+                Rectangle::new(loc.to_f64(), requested_size.unwrap_or(committed).to_f64())
+            }
+            _ => seed,
         };
         let eligible = match &space {
             AnimSpace::Screen(name) => self.output_name_drawable(name),
@@ -221,14 +224,21 @@ impl DriftWm {
         }
         // What the picture this leg starts from looked like — see
         // [`GeometryRole`] and [`FrozenPicture`].
-        let covered_output = match &role {
-            GeometryRole::FullscreenEntry { .. } => None,
-            GeometryRole::FullscreenExit { output } => self.output_by_name(output),
-            // A stand-in has no surface and is never fullscreen, so this is
-            // `None` for one — which is the right answer, not a shortcut.
-            GeometryRole::Normal => element
-                .wl_surface()
-                .and_then(|s| self.find_fullscreen_output_for_surface(&s)),
+        let covered_output = if open_fade.is_some() {
+            // A picture drawn translucent cannot claim to cover its output: the
+            // cull behind a fullscreen cover would hide the scene while the
+            // window said to be hiding it is still see-through.
+            None
+        } else {
+            match &role {
+                GeometryRole::FullscreenEntry { .. } => None,
+                GeometryRole::FullscreenExit { output } => self.output_by_name(output),
+                // A stand-in has no surface and is never fullscreen, so this is
+                // `None` for one — which is the right answer, not a shortcut.
+                GeometryRole::Normal => element
+                    .wl_surface()
+                    .and_then(|s| self.find_fullscreen_output_for_surface(&s)),
+            }
         };
         let picture = FrozenPicture {
             fullscreen_on: covered_output.map(|o| {
@@ -323,16 +333,21 @@ impl DriftWm {
         }
     }
 
-    /// Seed rect for a fresh geometry entry: the window's current animated
-    /// visual, so an interruption or an open→geometry hand-off is continuous.
+    /// Seed rect for a fresh geometry entry: an in-flight chase's own visual,
+    /// so an interruption stays continuous, else the rect at `loc`/`size`.
+    ///
+    /// Deliberately not the *drawn* rect: an open fade's shrink is carried onto
+    /// the new chase and re-applied at draw time, so baking it into the seed
+    /// would scale the arrival twice.
     fn geometry_seed(
         &self,
         id: ElementId,
         loc: Point<i32, Logical>,
         size: Size<i32, Logical>,
     ) -> Rectangle<f64, Logical> {
-        let v = self.animated_visual(id, loc.to_f64(), size.to_f64());
-        Rectangle::new(v.loc, v.size)
+        self.window_animations
+            .geometry_visual_rect(id)
+            .unwrap_or_else(|| Rectangle::new(loc.to_f64(), size.to_f64()))
     }
 
     /// Canvas geometry animation toward a size configure (fill/fit). Must be
@@ -419,13 +434,7 @@ impl DriftWm {
         };
         let size = element.geometry().size;
         // Keep an in-flight entry's visual; otherwise seed at the old position.
-        let seed = self
-            .window_animations
-            .geometry_visual_rect(id)
-            .unwrap_or_else(|| {
-                let v = self.animated_visual(id, from_loc.to_f64(), size.to_f64());
-                Rectangle::new(v.loc, v.size)
-            });
+        let seed = self.geometry_seed(id, from_loc, size);
         self.start_geometry_entry(
             element,
             seed,

@@ -484,6 +484,20 @@ impl WindowAnimations {
         }
     }
 
+    /// Progress of the open fade `id` is playing, if any — an open entry's own
+    /// fade, or one a geometry chase took over from it.
+    pub fn open_progress(&self, id: ElementId) -> Option<f64> {
+        match self.animations.get(&id) {
+            Some(WindowAnimation {
+                kind: AnimationKind::Open { progress },
+            }) => Some(*progress),
+            Some(WindowAnimation {
+                kind: AnimationKind::Geometry { open_fade, .. },
+            }) => *open_fade,
+            None => None,
+        }
+    }
+
     /// Whether `id`'s geometry entry is playing an open fade.
     pub fn has_open_fade(&self, id: ElementId) -> bool {
         matches!(
@@ -941,6 +955,16 @@ impl WindowAnimations {
                     *start_hold = StartHold::Until(now + MAX_START_HOLD);
                 }
                 let frozen = start_hold.holds_at(now);
+                // Only this entry's own freeze pins its arrival at zero: there
+                // is no picture to fade in over yet. Waiting on someone else's
+                // freeze must not, or a just-launched window is held completely
+                // invisible for the length of it. Cleared on landing so the
+                // chrome hand-over and the resize crossfade — both suppressed
+                // for a fade — come back for whatever leg follows on this entry.
+                if !frozen && let Some(fade) = *open_fade {
+                    let fade = fade + (1.0 - fade) * frame_factor;
+                    *open_fade = (1.0 - fade > PROGRESS_DONE_EPSILON).then_some(fade);
+                }
                 // Parked on the seed while the entry pushing this one is frozen,
                 // so the two start on the same tick and travel in lockstep.
                 if waiting {
@@ -954,12 +978,6 @@ impl WindowAnimations {
                 }
                 // Past the deadline (or never held): the leg runs from here.
                 *start_hold = StartHold::Off;
-                // Pinned at zero for the whole freeze by the returns above, so a
-                // frozen window draws nothing at all rather than fading in over
-                // the stale picture it was configured out of.
-                if let Some(fade) = open_fade {
-                    *fade += (1.0 - *fade) * frame_factor;
-                }
                 let target = Rectangle::new(
                     target_loc,
                     requested_size.map(|s| s.to_f64()).unwrap_or(live_size),

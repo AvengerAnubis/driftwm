@@ -3704,6 +3704,74 @@ fn a_frozen_follower_runs_both_budgets_concurrently() {
     );
 }
 
+/// A window still fading in that gets parked behind someone else's freeze keeps
+/// fading. The wait decides where the follower is drawn, not whether it is drawn
+/// at all — pinning its arrival too would leave a just-launched window entirely
+/// invisible for the length of a freeze that has nothing to do with it.
+#[test]
+fn a_parked_follower_keeps_fading_in() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+
+    let pid = f.add_client();
+    map_window(&mut f, pid, "primary", (400, 300));
+    let primary = window_by_app_id(&mut f, "primary").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(primary.clone(), Point::from((400, 300)), false);
+    let peid = element_id(&mut f, &primary);
+    tick_until_settled(&mut f);
+
+    let committed = primary.geometry().size;
+    f.state().animate_window_geometry(
+        &primary,
+        Size::from((committed.w + 300, committed.h + 300)),
+        None,
+    );
+    assert!(
+        f.state().window_animations.start_held(peid),
+        "precondition: the primary's resize froze it"
+    );
+
+    // The follower is brand new — its open fade has not been drawn yet — and is
+    // pushed by the primary's resize in the same breath.
+    let fid = f.add_client();
+    map_window(&mut f, fid, "follower", (400, 300));
+    let follower = window_by_app_id(&mut f, "follower").unwrap();
+    f.state()
+        .map_window(follower.clone(), Point::from((900, 300)), false);
+    let feid = element_id(&mut f, &follower);
+    let seed = f.state().stage.position_of(&follower).unwrap();
+    f.state()
+        .map_window(follower.clone(), Point::from((1200, 300)), false);
+    f.state()
+        .animate_window_move_from(&follower, seed, Some(peid));
+
+    let base = Instant::now();
+    for _ in 0..4 {
+        f.state().tick_window_animations_at(TICK, base);
+    }
+    assert!(
+        f.state().window_animations.start_held(peid),
+        "the primary is still frozen"
+    );
+    let visual = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(feid)
+        .unwrap();
+    assert_eq!(
+        visual.loc,
+        seed.to_f64(),
+        "the follower is still parked where it was pushed from"
+    );
+    let size = follower.geometry().size.to_f64();
+    assert!(
+        f.state().animated_visual(feid, visual.loc, size).alpha > 0.0,
+        "but it kept arriving while parked, rather than being held invisible"
+    );
+}
+
 /// A follower named against an entry that never freezes (a same-size request,
 /// which carries nothing worth waiting for) advances on the very first tick.
 #[test]
@@ -4691,9 +4759,11 @@ fn an_open_into_fullscreen_fade_degrades_at_the_start_hold_deadline_if_never_ack
 }
 
 /// A window fullscreened after its open fade has already started (progress >
-/// 0) is no longer "mapped this commit, never ticked" — it keeps the ordinary
-/// grow leg instead of taking the open-into-fullscreen shortcut. The regression
-/// guard for `open_unshown`.
+/// 0) has been seen at its placement rect, so it keeps the ordinary grow leg
+/// from there rather than being put straight at the fullscreen rect. The fade
+/// itself rides along — an arrival interrupted partway is still an arrival, and
+/// dropping it would pop the window to full opacity. The regression guard for
+/// `open_unshown` gating the seed and nothing else.
 #[test]
 fn a_window_fullscreened_mid_open_keeps_its_grow_leg() {
     let mut f = Fixture::new();
@@ -4718,14 +4788,162 @@ fn a_window_fullscreened_mid_open_keeps_its_grow_leg() {
     f.client(id).window(&surface).set_fullscreen(None);
     f.double_roundtrip(id);
     assert!(
-        !f.state().window_animations.has_open_fade(eid),
-        "a fade already in flight does not take the open-into-fullscreen shortcut"
+        f.state().window_animations.has_open_fade(eid),
+        "the fade in flight carried over onto the fullscreen chase"
+    );
+    let seed = f
+        .state()
+        .window_animations
+        .geometry_visual_rect(eid)
+        .expect("the fullscreen enter armed a chase");
+    assert!(
+        seed.size.w < 1920.0 && seed.size.h < 1080.0,
+        "the leg still grows from the windowed rect, not the fullscreen one ({seed:?})"
     );
 
     super::adopt_last_configure(&mut f, id, &surface);
     tick_until_settled(&mut f);
     assert!(f.state().is_output_visually_fullscreen(&output));
     f.state().exit_fullscreen_on(&output);
+}
+
+/// An open fade is one arrival, not a permanent property of the entry carrying
+/// it: it clears the moment it lands. Both the chrome hand-over and the resize
+/// crossfade are suppressed while it runs, so an entry that kept it forever
+/// would deny them to every later leg on the same window.
+#[test]
+fn an_inherited_open_fade_clears_when_it_lands() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+    let from = f.state().stage.position_of(&window).unwrap();
+
+    // Part-way through the open fade, before it has landed.
+    for _ in 0..3 {
+        f.state().tick_window_animations(TICK);
+    }
+
+    // A plain move replaces the open entry with a geometry chase. The chase
+    // starts its leg from zero while the fade keeps the progress it had, so the
+    // two land on different ticks — which is what leaves the entry alive to be
+    // asked about after the fade is done.
+    f.state()
+        .map_window(window.clone(), from + Point::from((300, 0)), false);
+    f.state().animate_window_move_from(&window, from, None);
+    assert!(
+        f.state().window_animations.has_open_fade(eid),
+        "the chase took the open fade over instead of destroying it"
+    );
+    let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let size = window.geometry().size.to_f64();
+    assert!(
+        f.state().animated_visual(eid, loc, size).alpha < 1.0,
+        "the window is still arriving, not popped to full opacity by the move"
+    );
+
+    tick_until_fade_lands(&mut f, eid);
+    assert!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(eid)
+            .is_some(),
+        "precondition: the chase is still running, so there is a later leg to \
+         hand anything back to"
+    );
+    assert!(
+        !f.state().window_animations.has_open_fade(eid),
+        "the fade cleared once it landed"
+    );
+    assert_eq!(
+        f.state().animated_visual(eid, loc, size).alpha,
+        1.0,
+        "and clearing it changed nothing on screen — it was already opaque"
+    );
+}
+
+/// Tick until `id`'s open fade clears, stopping early if the entry prunes first
+/// (so a fade that never clears fails on the assertion, not on a 600-tick spin).
+fn tick_until_fade_lands(f: &mut Fixture, id: ElementId) {
+    for _ in 0..MAX_TICKS {
+        let anims = &f.state().window_animations;
+        if !anims.has_open_fade(id) || anims.geometry_visual_rect(id).is_none() {
+            return;
+        }
+        f.state().tick_window_animations(TICK);
+    }
+}
+
+/// Once the fade has landed, a leg starting on the same entry gets the chrome
+/// hand-over back: a fullscreen exit ramps the border, shadow and bar in from
+/// the bare fullscreen picture instead of popping them on at full opacity over
+/// a still-fullscreen-sized window.
+#[test]
+fn a_landed_open_fade_hands_the_chrome_ramp_back_to_the_next_leg() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+
+    // Fullscreen part-way through the open fade, so the fade rides onto the
+    // fullscreen chase and lands well before that chase does.
+    for _ in 0..3 {
+        f.state().tick_window_animations(TICK);
+    }
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    tick_until_fade_lands(&mut f, eid);
+    assert!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(eid)
+            .is_some()
+            && !f.state().window_animations.has_open_fade(eid),
+        "precondition: the fade landed while its chase is still running"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+    assert_eq!(
+        f.state().chrome_alpha_of(Some(eid), &window),
+        0.0,
+        "the exit leg starts on the bare fullscreen picture and ramps from there"
+    );
+}
+
+/// A picture drawn translucent cannot claim to cover its output. Exiting
+/// fullscreen while the open fade is still running restates the entry's frozen
+/// picture; stamping a fullscreen cover there would cull the whole scene behind
+/// a window the user can see through.
+#[test]
+fn a_fullscreen_exit_mid_open_fade_stamps_no_cover() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_straight_into_fullscreen(&mut f, id, "fs", (400, 300));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    let eid = element_id(&mut f, &window);
+
+    super::adopt_last_configure(&mut f, id, &surface);
+    f.state().tick_window_animations(TICK);
+    let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    let size = window.geometry().size.to_f64();
+    assert!(
+        f.state().animated_visual(eid, loc, size).alpha < 1.0,
+        "precondition: mid-fade, so the window is still see-through"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+    assert!(
+        !f.state().is_output_visually_fullscreen(&output),
+        "the scene behind stays visible under a translucent picture"
+    );
 }
 
 /// The `89f8f02` guard applies to the open-into-fit shortcut too: the camera
