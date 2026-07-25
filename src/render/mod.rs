@@ -709,7 +709,9 @@ pub fn compose_frame(
     // The fullscreen window fully occludes its output: only it, the overlay
     // layer, and the cursor render; everything beneath is culled below. Pinned
     // windows count as top-tier toplevels and get covered like the top layer.
-    let fullscreen_window = state.fullscreen_window_on(output);
+    // Resolved visually, so an exit still frozen on the fullscreen picture keeps
+    // showing that picture instead of being culled along with everything else.
+    let fullscreen_window = state.visually_fullscreen_window_on(output);
     let mut did_init_bg = false;
     if output_fullscreen {
         // Fullscreen fully occludes the canvas: free its chunk caches and skip
@@ -842,8 +844,8 @@ pub fn compose_frame(
         // below want the id.
         let element_id = state.stage.id_of(window);
         // Not stage membership: a resize freeze holds the pre-action picture on
-        // screen for up to half a second after the stage has flipped, and that
-        // picture keeps the chrome it was drawn with (see `chrome_fullscreen`).
+        // screen after the stage has flipped, and that picture keeps the chrome it
+        // was drawn with (see `FrozenPicture`).
         let is_fullscreen = state.chrome_fullscreen_of(element_id, window);
         let has_ssd = !is_fullscreen
             && state
@@ -852,7 +854,15 @@ pub fn compose_frame(
 
         let applied = driftwm::config::applied_rule(&wl_surface);
         let is_widget = applied.as_ref().is_some_and(|r| r.widget);
+        // Live pin membership — `window_render_transform` below decides the
+        // canvas/screen frame from the same source, and the animation reference
+        // frame has to agree with it.
         let is_pinned = state.is_pinned(window);
+        // Where the picture *sits*: z-bucket, blur layer, title-bar marker.
+        // Entering fullscreen unpins at the action, and the freeze then holds the
+        // pinned picture on screen for the rest of its budget — nothing may
+        // restack over a frame that isn't moving.
+        let shows_pinned = state.pinned_picture_of(element_id, window);
         let is_focused = focused_surface.as_ref().is_some_and(|f| *f == *wl_surface);
         let effective_mode = driftwm::config::effective_decoration_mode(
             applied.as_ref().and_then(|r| r.decoration.as_ref()),
@@ -903,7 +913,7 @@ pub fn compose_frame(
             bbox.size.w += 2 * effective_bw;
             bbox.size.h += 2 * effective_bw;
         }
-        if !visible_rect.overlaps(bbox) {
+        if !visible_rect.overlaps(state.window_cull_rect(element_id, bbox)) {
             continue;
         }
 
@@ -1029,9 +1039,9 @@ pub fn compose_frame(
             (elems, Vec::new())
         };
 
-        // Test `is_pinned` BEFORE `is_widget`: a pinned *widget* must land in the
+        // Test pinned BEFORE `is_widget`: a pinned *widget* must land in the
         // pinned bucket (above normal), not `zoomed_widgets` (below normal).
-        let target = if is_pinned {
+        let target = if shows_pinned {
             &mut zoomed_pinned
         } else if is_widget {
             &mut zoomed_widgets
@@ -1070,7 +1080,7 @@ pub fn compose_frame(
                 deco.update(
                     geom_size.w,
                     is_focused,
-                    is_pinned,
+                    shows_pinned,
                     state.decoration_scale,
                     &deco_title,
                     &state.config.decorations,
@@ -1389,7 +1399,9 @@ pub fn compose_frame(
                     screen_rect,
                     elem_start,
                     elem_count,
-                    layer: if is_pinned {
+                    // Must follow the bucket the elements went into, since the
+                    // blur splices by that bucket's prefix offset.
+                    layer: if shows_pinned {
                         BlurLayer::Pinned
                     } else if is_widget {
                         BlurLayer::Widget

@@ -107,13 +107,38 @@ pub(crate) enum AnimSpace {
 
 /// Which fullscreen transition a geometry leg is, if any. Besides gating the
 /// "visually fullscreen" report, this is how a leg knows what the picture it
-/// starts from wore: stage fullscreen membership flips when the action runs, so
-/// by the time the leg is armed it already describes the destination.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// starts from looked like: stage fullscreen and pin membership both flip when
+/// the action runs, so by the time the leg is armed they already describe the
+/// destination and the role is the only witness of the side it came from.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum GeometryRole {
     Normal,
-    FullscreenEntry,
-    FullscreenExit,
+    /// Growing into fullscreen. Entering unpins, so the leg carries whether the
+    /// picture it starts from was a pinned one.
+    FullscreenEntry {
+        was_pinned: bool,
+    },
+    /// Shrinking out of fullscreen on this output. The stage entry is gone by
+    /// now, so this name is all that ties the picture still covering that output
+    /// to the output it covers.
+    FullscreenExit {
+        output: String,
+    },
+}
+
+/// What the picture a freeze holds on screen was drawn as. Stamped when a freeze
+/// is armed from an unfrozen state and held for as long as that picture is: the
+/// stage flips membership at the action, a third of a second before the client
+/// redraws into it, so reading any of this live would redress — or restack, or
+/// uncover — a motionless pre-action frame.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FrozenPicture {
+    /// The output a *fullscreen* picture covers; `None` for a windowed one.
+    /// Fullscreen pictures wear no compositor chrome, and while one is frozen its
+    /// output has to keep hiding everything underneath.
+    pub fullscreen_on: Option<String>,
+    /// Drawn in the screen-pinned z-bucket, marked pinned on its title bar.
+    pub pinned: bool,
 }
 
 /// One entry's output-scoping data: its id, and `Some((space, visual rect))`
@@ -121,6 +146,11 @@ pub(crate) enum GeometryRole {
 /// stage rect).
 pub(crate) type ScopingEntry = (ElementId, Option<(AnimSpace, Rectangle<f64, Logical>)>);
 
+// A geometry entry carries three rects, two deadlines and two output names, so it
+// dwarfs the open variant. Boxing it would put an allocation on every resize to
+// save a couple of hundred bytes across the handful of entries that are ever live
+// at once — the map is per-animating-window, not per-window.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum AnimationKind {
     Open {
@@ -157,13 +187,9 @@ enum AnimationKind {
         /// target comes from it) while `p` advances, so a predicate would
         /// contradict the degrade.
         start_hold: StartHold,
-        /// Whether the picture the freeze holds on screen is a fullscreen one,
-        /// i.e. wears no compositor chrome. Stamped when a freeze is armed from an
-        /// unfrozen state and held for as long as that picture is: the stage flips
-        /// membership at the action, half a second before the client redraws into
-        /// it, so reading it live would strip (or add) chrome around a motionless
-        /// pre-action frame.
-        chrome_fullscreen: bool,
+        /// How the picture the freeze holds on screen was drawn — see
+        /// [`FrozenPicture`].
+        picture: FrozenPicture,
         /// Bumped by every request-carrying (re)start. Stamps the captured old
         /// content so a stale capture can never be paired with a newer leg.
         generation: u64,
@@ -231,7 +257,7 @@ impl WindowAnimations {
         role: GeometryRole,
         replace_visual: bool,
         content_policy: ContentPolicy,
-        chrome_fullscreen: bool,
+        picture: FrozenPicture,
     ) {
         if let Some(WindowAnimation {
             kind:
@@ -248,7 +274,7 @@ impl WindowAnimations {
                     buffer_stale,
                     content_policy: entry_policy,
                     start_hold,
-                    chrome_fullscreen: entry_chrome,
+                    picture: entry_picture,
                     generation: entry_generation,
                 },
         }) = self.animations.get_mut(&id)
@@ -285,7 +311,7 @@ impl WindowAnimations {
                 // side it is not showing (a fit during a fullscreen exit's freeze
                 // would pop chrome onto a still-fullscreen picture).
                 if !start_hold.is_held() {
-                    *entry_chrome = chrome_fullscreen;
+                    *entry_picture = picture;
                 }
                 // A brand new resize: freeze again from wherever the visual is,
                 // and invalidate any content captured for the previous request.
@@ -323,7 +349,7 @@ impl WindowAnimations {
                     } else {
                         StartHold::Off
                     },
-                    chrome_fullscreen,
+                    picture,
                     generation,
                     role,
                 },
@@ -342,20 +368,52 @@ impl WindowAnimations {
         )
     }
 
-    /// Whether the picture `id`'s freeze is holding on screen is a fullscreen
-    /// one — `None` when nothing is frozen and the live stage answer applies.
-    pub fn frozen_chrome_fullscreen(&self, id: ElementId) -> Option<bool> {
+    /// Whether the picture `id`'s freeze is holding on screen is a pinned one —
+    /// `None` when nothing is frozen and the live stage answer applies.
+    pub fn frozen_pinned(&self, id: ElementId) -> Option<bool> {
         match self.animations.get(&id) {
             Some(WindowAnimation {
                 kind:
                     AnimationKind::Geometry {
                         start_hold,
-                        chrome_fullscreen,
+                        picture,
                         ..
                     },
-            }) if start_hold.is_held() => Some(*chrome_fullscreen),
+            }) if start_hold.is_held() => Some(picture.pinned),
             _ => None,
         }
+    }
+
+    /// Whether the picture `id`'s freeze is holding on screen is a fullscreen
+    /// one — `None` when nothing is frozen and the live stage answer applies.
+    pub fn frozen_fullscreen(&self, id: ElementId) -> Option<bool> {
+        match self.animations.get(&id) {
+            Some(WindowAnimation {
+                kind:
+                    AnimationKind::Geometry {
+                        start_hold,
+                        picture,
+                        ..
+                    },
+            }) if start_hold.is_held() => Some(picture.fullscreen_on.is_some()),
+            _ => None,
+        }
+    }
+
+    /// The entry frozen on a fullscreen picture covering `output`. Nothing has
+    /// moved yet, so that picture is still what the output shows — whatever the
+    /// stage now says, and whatever the leg has since been retargeted to.
+    pub fn frozen_fullscreen_on(&self, output: &str) -> Option<ElementId> {
+        self.animations.iter().find_map(|(id, a)| match &a.kind {
+            AnimationKind::Geometry {
+                start_hold,
+                picture,
+                ..
+            } if start_hold.is_held() && picture.fullscreen_on.as_deref() == Some(output) => {
+                Some(*id)
+            }
+            _ => None,
+        })
     }
 
     /// Whether `id` is frozen and will still be frozen after a tick at `now` —
@@ -402,6 +460,23 @@ impl WindowAnimations {
         }
     }
 
+    /// The canvas rect a geometry entry is currently drawn at, for render
+    /// culling. `None` for a `Screen` entry — its rect lives in screen space,
+    /// and the pin that put it there already scopes it to one output.
+    pub fn canvas_visual_rect(&self, id: ElementId) -> Option<Rectangle<f64, Logical>> {
+        match self.animations.get(&id) {
+            Some(WindowAnimation {
+                kind:
+                    AnimationKind::Geometry {
+                        visual,
+                        space: AnimSpace::Canvas,
+                        ..
+                    },
+            }) => Some(*visual),
+            _ => None,
+        }
+    }
+
     /// A geometry entry with the fullscreen-entry role is still playing. Once it
     /// prunes the output counts as visually fullscreen.
     pub fn fullscreen_entry_active(&self, id: ElementId) -> bool {
@@ -409,7 +484,7 @@ impl WindowAnimations {
             self.animations.get(&id),
             Some(WindowAnimation {
                 kind: AnimationKind::Geometry {
-                    role: GeometryRole::FullscreenEntry,
+                    role: GeometryRole::FullscreenEntry { .. },
                     ..
                 }
             })

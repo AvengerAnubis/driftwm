@@ -248,7 +248,9 @@ impl DriftWm {
             Rectangle::new(from_loc.to_f64(), from_size.to_f64()),
             AnimSpace::Canvas,
             Some(viewport_size),
-            GeometryRole::FullscreenEntry,
+            GeometryRole::FullscreenEntry {
+                was_pinned: pre_pin_site.is_some(),
+            },
             ContentPolicy::Cap,
         );
 
@@ -437,7 +439,9 @@ impl DriftWm {
                     seed,
                     space,
                     Some(entry.saved_size),
-                    GeometryRole::FullscreenExit,
+                    GeometryRole::FullscreenExit {
+                        output: output.name(),
+                    },
                     ContentPolicy::Cap,
                 );
             }

@@ -1918,7 +1918,7 @@ fn a_frozen_resize_renders_uncapped_at_its_seed_ratio() {
         seed,
         crate::state::window_animation::AnimSpace::Canvas,
         Some(Size::from((1896, 1056))),
-        crate::state::window_animation::GeometryRole::FullscreenEntry,
+        crate::state::window_animation::GeometryRole::FullscreenEntry { was_pinned: false },
         crate::state::window_animation::ContentPolicy::Cap,
     );
     let base = Instant::now();
@@ -1937,9 +1937,9 @@ fn a_frozen_resize_renders_uncapped_at_its_seed_ratio() {
 }
 
 /// A fullscreen enter flips stage membership at the action, but the freeze holds
-/// the *windowed* picture on screen for up to half a second after that. Chrome
-/// follows the picture, not the membership — stripping the bar, border and shadow
-/// (and uncropping a CSD client's own shadow) at the action would leave a
+/// the *windowed* picture on screen for the length of its budget after that.
+/// Chrome follows the picture, not the membership — stripping the bar, border and
+/// shadow (and uncropping a CSD client's own shadow) at the action would leave a
 /// motionless frame wearing the wrong dress for the whole freeze.
 #[test]
 fn a_frozen_fullscreen_enter_keeps_its_windowed_chrome() {
@@ -2075,6 +2075,137 @@ fn a_fit_during_a_fullscreen_exit_freeze_keeps_the_frozen_chrome() {
         "only the client's redraw changes it"
     );
     tick_until_settled(&mut f);
+}
+
+/// A fullscreen exit lets go of stage membership at the action, but for the
+/// length of its freeze the picture covering the output has not moved. The output
+/// has to keep reporting itself covered until the client's redraw lands —
+/// otherwise the panels, the canvas background and every other window pop back in
+/// over a motionless fullscreen frame.
+#[test]
+fn a_frozen_fullscreen_exit_still_covers_its_output() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (800, 600));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    tick_until_settled(&mut f);
+    assert!(f.state().is_output_visually_fullscreen(&output));
+
+    f.state().exit_fullscreen_on(&output);
+    f.double_roundtrip(id);
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the exit waits for the client to redraw at its windowed size"
+    );
+    assert!(
+        !f.state().is_output_fullscreen(&output),
+        "the stage let go the instant the action ran"
+    );
+    assert!(
+        f.state().is_output_visually_fullscreen(&output),
+        "but the picture covering the output has not moved yet"
+    );
+    assert_eq!(
+        f.state().visually_fullscreen_window_on(&output).as_ref(),
+        Some(&window),
+        "and the window drawing it is the one on its way out"
+    );
+
+    super::adopt_last_configure(&mut f, id, &surface);
+    assert!(
+        !f.state().is_output_visually_fullscreen(&output),
+        "the redraw is windowed, so the output is uncovered from that frame on"
+    );
+    tick_until_settled(&mut f);
+}
+
+/// Entering fullscreen unpins at the action, but the freeze then holds the
+/// *pinned* picture on screen. Reading pin membership live restacks a frame that
+/// is not moving: it drops out of the bucket that draws above every normal
+/// window, and its title bar loses the pin marker mid-freeze.
+#[test]
+fn a_frozen_fullscreen_enter_keeps_its_pinned_bucket() {
+    let mut f = Fixture::with_config(
+        Config::from_toml("[[window_rules]]\napp_id = \"p\"\npinned_to_screen = true\n").unwrap(),
+    );
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "p", (400, 300));
+    let window = window_by_app_id(&mut f, "p").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+    assert!(f.state().is_pinned(&window), "the window pinned via rule");
+    tick_until_settled(&mut f);
+
+    f.state().enter_fullscreen(&window, Some(output.clone()));
+    f.double_roundtrip(id);
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the enter waits for the client to redraw fullscreen"
+    );
+    assert!(
+        !f.state().is_pinned(&window),
+        "the stage unpinned the instant the action ran"
+    );
+    assert!(
+        f.state().pinned_picture_of(Some(eid), &window),
+        "but the picture on screen is still the pinned one"
+    );
+
+    super::adopt_last_configure(&mut f, id, &surface);
+    assert!(
+        !f.state().pinned_picture_of(Some(eid), &window),
+        "the fullscreen redraw is not, and takes the bucket with it"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+}
+
+/// A compositor resize can move the window as well as resize it, and the freeze
+/// holds the old picture in the old place for its whole budget. Culling on the
+/// window's live rect alone then composes it out of the very frames its own
+/// animation asked for — it vanishes outright, mid-flight, and reappears at the
+/// destination.
+#[test]
+fn a_frozen_resize_that_moves_off_screen_is_still_drawn() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((200, 200)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    // Resize and relocate in one action: the entry freezes on the rect the window
+    // occupies now, while the stage already holds the far-away destination.
+    f.state()
+        .animate_window_geometry(&window, Size::from((900, 700)));
+    f.state()
+        .map_window(window.clone(), Point::from((6000, 6000)), false);
+    assert!(f.state().window_animations.start_held(eid), "frozen");
+
+    let bbox = f
+        .state()
+        .window_bbox_with_popups(&window)
+        .expect("the window is stage-mapped");
+    assert!(
+        !f.state().canvas_rect_drawable(bbox),
+        "the live rect has left every viewport"
+    );
+    let culled = f.state().window_cull_rect(Some(eid), bbox);
+    assert!(
+        f.state().canvas_rect_drawable(culled),
+        "but the picture on screen has not, so the frame must still draw it"
+    );
 }
 
 /// A resize the client may not even be able to honour is not worth a freeze, a
@@ -2495,7 +2626,9 @@ fn a_resize_bake_carries_one_texel_per_drawn_pixel() {
                 seed,
                 crate::state::window_animation::AnimSpace::Canvas,
                 Some(Size::from((800, 600))),
-                crate::state::window_animation::GeometryRole::FullscreenExit,
+                crate::state::window_animation::GeometryRole::FullscreenExit {
+                    output: output.name(),
+                },
                 crate::state::window_animation::ContentPolicy::Cap,
             );
 

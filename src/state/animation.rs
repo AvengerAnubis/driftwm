@@ -14,7 +14,9 @@ use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 
 use smithay::output::Output;
 
-use super::window_animation::{AnimSpace, AnimatedVisual, ContentPolicy, GeometryRole};
+use super::window_animation::{
+    AnimSpace, AnimatedVisual, ContentPolicy, FrozenPicture, GeometryRole,
+};
 use super::{DriftWm, FocusTarget, output_state};
 
 /// A compositor resize smaller than this (per axis) carries no request at all.
@@ -63,8 +65,16 @@ impl DriftWm {
     /// [`Self::chrome_fullscreen`] for a caller that has already resolved the id
     /// (the render loop resolves it once per window per output).
     pub(crate) fn chrome_fullscreen_of(&self, id: Option<ElementId>, window: &Window) -> bool {
-        id.and_then(|id| self.window_animations.frozen_chrome_fullscreen(id))
+        id.and_then(|id| self.window_animations.frozen_fullscreen(id))
             .unwrap_or_else(|| self.stage.is_fullscreen(window))
+    }
+
+    /// Whether the picture on screen for `window` is a screen-pinned one.
+    /// Entering fullscreen unpins at the action, so the live answer would restack
+    /// a frozen pre-action frame out of the pinned bucket while it sits still.
+    pub(crate) fn pinned_picture_of(&self, id: Option<ElementId>, window: &Window) -> bool {
+        id.and_then(|id| self.window_animations.frozen_pinned(id))
+            .unwrap_or_else(|| self.is_pinned(window))
     }
 
     fn window_geometry_grab_active(&self, window: &Window) -> bool {
@@ -162,13 +172,24 @@ impl DriftWm {
         if requested_size.is_some() {
             self.drop_resize_crossfade(id);
         }
-        // What the picture this leg starts from wore. A fullscreen leg is armed
-        // after the stage has already flipped, so its role is the only witness of
-        // the side it came from.
-        let chrome_fullscreen = match role {
-            GeometryRole::FullscreenEntry => false,
-            GeometryRole::FullscreenExit => true,
-            GeometryRole::Normal => self.stage.is_fullscreen(window),
+        // What the picture this leg starts from looked like. A fullscreen leg is
+        // armed after the stage has already flipped both memberships, so its role
+        // is the only witness of the side it came from.
+        let picture = FrozenPicture {
+            fullscreen_on: match &role {
+                GeometryRole::FullscreenEntry { .. } => None,
+                GeometryRole::FullscreenExit { output } => Some(output.clone()),
+                GeometryRole::Normal => window
+                    .wl_surface()
+                    .and_then(|s| self.find_fullscreen_output_for_surface(&s))
+                    .map(|o| o.name()),
+            },
+            pinned: match &role {
+                GeometryRole::FullscreenEntry { was_pinned } => *was_pinned,
+                // Every other leg — the exit's re-pin included — is armed after
+                // whatever pin change it rides, so live describes the picture.
+                _ => self.is_pinned(window),
+            },
         };
         self.window_animations.start_geometry(
             id,
@@ -179,7 +200,7 @@ impl DriftWm {
             role,
             replace_visual,
             content_policy,
-            chrome_fullscreen,
+            picture,
         );
     }
 
@@ -267,11 +288,20 @@ impl DriftWm {
         );
     }
 
-    /// Whether `output` is occluded by a *settled* fullscreen window. A
-    /// fullscreen-entry transition keeps the previous scene visible until the
-    /// window reaches the output bounds, so the canvas stays eligible until the
-    /// entry animation finishes.
+    /// Whether one window's picture currently covers `output` edge to edge as a
+    /// fullscreen one. True in neither direction *while the transition plays*:
+    /// an entry keeps the previous scene visible until the window reaches the
+    /// output bounds, and an exit's freeze holds the fullscreen picture on screen
+    /// after the stage has already let it go — a waybar popping in over a
+    /// motionless fullscreen frame is the same leak from the other side.
     pub(crate) fn is_output_visually_fullscreen(&self, output: &Output) -> bool {
+        if self
+            .window_animations
+            .frozen_fullscreen_on(&output.name())
+            .is_some()
+        {
+            return true;
+        }
         if !self.is_output_fullscreen(output) {
             return false;
         }
@@ -280,6 +310,36 @@ impl DriftWm {
                 .id_of(&window)
                 .is_none_or(|id| !self.window_animations.fullscreen_entry_active(id))
         })
+    }
+
+    /// The canvas rect the frame composer culls a window on: the bounding box it
+    /// occupies live, merged with the rect an animation is currently drawing it
+    /// at. The two can be far apart — a resize that also moves puts the live rect
+    /// off the viewport while the frozen picture is still on it — and redraws are
+    /// already scoped by the animated rect, so culling on the live one alone
+    /// composes the window out of the very frames its animation asked for.
+    pub(crate) fn window_cull_rect(
+        &self,
+        id: Option<ElementId>,
+        bbox: Rectangle<i32, Logical>,
+    ) -> Rectangle<i32, Logical> {
+        match id.and_then(|id| self.window_animations.canvas_visual_rect(id)) {
+            Some(visual) => bbox.merge(visual.to_i32_round()),
+            None => bbox,
+        }
+    }
+
+    /// The one window a visually fullscreen `output` shows. Normally the stage's
+    /// fullscreen window; through an exit freeze it is the window on its way out,
+    /// which the stage no longer lists there — without it the cull that hides
+    /// everything under a fullscreen picture would hide that picture too.
+    pub(crate) fn visually_fullscreen_window_on(&self, output: &Output) -> Option<Window> {
+        self.window_animations
+            .frozen_fullscreen_on(&output.name())
+            .and_then(|id| self.stage.window_by_id(id))
+            .and_then(|element| element.client())
+            .cloned()
+            .or_else(|| self.fullscreen_window_on(output))
     }
 
     pub(crate) fn tick_window_animations(&mut self, dt: Duration) {
