@@ -463,7 +463,7 @@ impl DriftWm {
             return;
         };
         let corner_clip = self.render.corner_clip_shader.clone();
-        let flatten_scale = match self.stage.pin_of(window) {
+        let on_screen = match self.stage.pin_of(window) {
             Some(site) => self
                 .output_by_name(&site.output)
                 .map_or(1.0, |o| o.current_scale().fractional_scale()),
@@ -475,6 +475,20 @@ impl DriftWm {
                 ))
             }
         };
+        // The overlay's first frame paints this bake over the frozen visual rect,
+        // which can be several times the rect the content was captured at (a
+        // fullscreen exit restores into a zoomed-out camera, where the rect is
+        // `screen / zoom`). Rasterize for the size it will be drawn at, or the
+        // fade lands visibly softer than the frozen frame it takes over from.
+        let captured = capture.pixels.geometry.size;
+        let stretch = self
+            .window_animations
+            .geometry_visual_rect(id)
+            .map_or(1.0, |visual| {
+                (visual.size.w / captured.w.max(1) as f64)
+                    .max(visual.size.h / captured.h.max(1) as f64)
+            });
+        let flatten_scale = on_screen * stretch;
         let Some(mut backend) = self.backend.take() else {
             return;
         };
