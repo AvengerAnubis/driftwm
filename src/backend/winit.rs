@@ -204,11 +204,17 @@ pub fn init_winit(
             };
 
             // --- Build cursor + compose frame ---
+            // The cursor tracks the live camera, not `world_view` — see its doc
+            // for why the two can differ during a fullscreen entry.
+            let (cursor_camera, cursor_zoom) = {
+                let os = crate::state::output_state(&output);
+                (os.camera, os.zoom)
+            };
             let cursor_elements = build_cursor_elements(
                 data,
                 backend.renderer(),
-                cur_camera,
-                cur_zoom,
+                cursor_camera,
+                cursor_zoom,
                 output.current_scale().fractional_scale(),
                 1.0,
             );

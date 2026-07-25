@@ -1576,7 +1576,6 @@ pub fn compose_frame(
         vec![]
     };
 
-    let is_fullscreen = state.is_output_visually_fullscreen(output);
     #[cfg(feature = "profile-with-tracy")]
     let _layers_span = tracy_client::span!("compose::layers");
     let (overlay_elements, overlay_blur) = build_layer_elements(
@@ -1586,17 +1585,17 @@ pub fn compose_frame(
         WlrLayer::Overlay,
         Some(BlurLayer::Overlay),
     );
-    let (top_elements, top_blur) = if !is_fullscreen {
+    let (top_elements, top_blur) = if !output_fullscreen {
         build_layer_elements(state, output, renderer, WlrLayer::Top, Some(BlurLayer::Top))
     } else {
         (vec![], vec![])
     };
-    let (bottom_elements, _) = if !is_fullscreen {
+    let (bottom_elements, _) = if !output_fullscreen {
         build_layer_elements(state, output, renderer, WlrLayer::Bottom, None)
     } else {
         (vec![], vec![])
     };
-    let (background_layer_elements, _) = if !is_fullscreen {
+    let (background_layer_elements, _) = if !output_fullscreen {
         build_layer_elements(state, output, renderer, WlrLayer::Background, None)
     } else {
         (vec![], vec![])

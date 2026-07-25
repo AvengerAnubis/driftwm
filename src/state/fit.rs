@@ -5,7 +5,9 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use super::{DriftWm, PendingRecenter, StageWindow, ZoomAnimationAnchor};
+use super::{
+    DriftWm, PendingRecenter, PendingView, StageWindow, ZoomAnimationAnchor, output_state,
+};
 use driftwm::config;
 use driftwm::window_ext::WindowExt;
 
@@ -101,6 +103,15 @@ impl DriftWm {
         // pre-exit center (`enter_fullscreen` drops it for the same reason).
         self.pending_recenter.remove(&wl_surface.id());
 
+        // A freeze this fit arms of its own accord is the only one allowed to
+        // hold its pan back, and a request-carrying (re)start is what bumps the
+        // generation. A freeze already running belongs to some other action,
+        // which never promised to release this camera.
+        let generation_before = self
+            .stage
+            .id_of(window)
+            .and_then(|id| self.window_animations.generation_of(id));
+
         self.animate_window_geometry(window, target_size);
         window.enter_fit_configure(target_size);
         self.map_window(window.clone(), new_loc, false);
@@ -119,16 +130,49 @@ impl DriftWm {
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         self.raise_and_focus(window, serial);
         self.set_overview_return(None);
-        let viewport_center = self.usable_center_screen();
-        self.with_output_state(|os| {
+        let anchor = ZoomAnimationAnchor {
+            canvas: center,
+            screen: self.usable_center_screen(),
+        };
+        let frozen = self.stage.id_of(window).filter(|id| {
+            self.window_animations.generation_of(*id) != generation_before
+                && self.window_animations.start_held(*id)
+        });
+        let Some(output) = self.active_output() else {
+            return;
+        };
+        let Some(id) = frozen else {
+            let mut os = output_state(&output);
             os.momentum.stop();
-            os.zoom_animation_anchor = Some(ZoomAnimationAnchor {
-                canvas: center,
-                screen: viewport_center,
-            });
+            os.zoom_animation_anchor = Some(anchor);
             os.camera_target = Some(target_camera);
             os.zoom_target = Some(1.0);
-        });
+            return;
+        };
+        // Whatever navigation was in flight does not wait for the freeze too:
+        // left running it would fly for the whole freeze and then be jumped out
+        // of by the fit's own pan, and clearing it also makes the stamp below
+        // exact — nothing legitimately moves this camera between here and the
+        // release.
+        let (staged_camera, staged_zoom) = {
+            let mut os = output_state(&output);
+            os.momentum.stop();
+            os.camera_target = None;
+            os.zoom_target = None;
+            os.zoom_animation_anchor = None;
+            (os.camera, os.zoom)
+        };
+        self.window_animations.stage_pending_view(
+            id,
+            PendingView {
+                output: output.name(),
+                camera: target_camera,
+                zoom: 1.0,
+                anchor,
+                staged_camera,
+                staged_zoom,
+            },
+        );
     }
 
     pub fn unfit_window(&mut self, window: &Window) {

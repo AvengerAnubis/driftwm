@@ -17,7 +17,7 @@ use smithay::output::Output;
 use super::window_animation::{
     AnimSpace, AnimatedVisual, ContentPolicy, FrozenPicture, FullscreenCover, GeometryRole,
 };
-use super::{DriftWm, FocusTarget, output_state};
+use super::{DriftWm, FocusTarget, PendingView, output_state};
 
 /// A compositor resize smaller than this (per axis) carries no request at all.
 /// It is not worth freezing the window, stashing its content, flattening that on
@@ -100,10 +100,10 @@ impl DriftWm {
             if self.dpms_off_outputs.contains(o) {
                 return false;
             }
-            let (camera, zoom) = {
-                let os = output_state(o);
-                (os.camera, os.zoom)
-            };
+            // Judging against the live camera instead of `world_view` would
+            // instant-complete an animation in the band still shown behind a
+            // growing fullscreen entry.
+            let (camera, zoom) = self.world_view(o);
             let viewport = super::output_logical_size(o);
             driftwm::canvas::visible_canvas_rect(camera.to_i32_round(), viewport, zoom)
                 .overlaps(rect)
@@ -208,16 +208,20 @@ impl DriftWm {
         };
         let picture = FrozenPicture {
             fullscreen_on: covered_output.map(|o| {
-                // The exit restores the camera before arming this, so the live
-                // view is the one the seed was converted into.
-                let (camera, zoom) = {
+                // A re-pinned exit draws in screen space and covers the output
+                // wherever the canvas goes (see `FullscreenCover::view`) —
+                // stamping a view on it would uncover the scene under a picture
+                // that is still hiding it, and pop the layer bar back over a
+                // motionless fullscreen frame.
+                let view = matches!(space, AnimSpace::Canvas).then(|| {
                     let os = output_state(&o);
+                    // The exit restores the camera before arming this, so the live
+                    // view is the one the seed was converted into.
                     (os.camera, os.zoom)
-                };
+                });
                 FullscreenCover {
                     output: o.name(),
-                    camera,
-                    zoom,
+                    view,
                 }
             }),
             pinned: match &role {
@@ -353,6 +357,13 @@ impl DriftWm {
     /// the entering window keeps the pre-fullscreen view (see `compose_frame`).
     /// The background caches gate their redraws on this, so they have to agree
     /// with the composer about which view a frame was drawn at.
+    ///
+    /// Only what is *drawn* moves to this view. The pointer's canvas position is
+    /// warped into the parked frame when fullscreen is entered, so the cursor and
+    /// every hit test stay on the live one — for the length of the entry a click
+    /// on the scene behind lands where the parked view puts it, not under what is
+    /// drawn. Accepted: the entry is a few frames, and it ends with that scene
+    /// culled entirely.
     pub(crate) fn world_view(&self, output: &Output) -> (Point<f64, Logical>, f64) {
         let (camera, zoom, parked) = {
             let os = output_state(output);
@@ -480,6 +491,16 @@ impl DriftWm {
                 now,
                 eligible,
             );
+            // The leg is moving now, so a view move parked on it goes with it —
+            // the budget expiring fires it too, since that leg starts moving as
+            // well. Taken before the removal below, which would otherwise drop it
+            // silently: an entry that instant-completes (it covers no drawable
+            // output) still owes the move, it just has nothing left to wait for.
+            let released_view = if !keep || !self.window_animations.start_held(id) {
+                self.window_animations.take_pending_view(id)
+            } else {
+                None
+            };
             if !keep {
                 self.window_animations.remove(id);
             }
@@ -491,6 +512,9 @@ impl DriftWm {
                 // other exit from the freeze (the budget expiring) leaves stale
                 // pixels for a leg that already runs with them stretched.
                 self.resize_captures.drop_for(id);
+            }
+            if let Some(pending) = released_view {
+                self.apply_pending_view(pending);
             }
         }
 
@@ -527,6 +551,36 @@ impl DriftWm {
         for output in affected {
             self.redraws_needed.insert(output);
         }
+    }
+
+    /// Land a view move that was waiting on a window's freeze, into the output
+    /// it was staged for — never through `with_output_state`, which resolves
+    /// the live active output instead.
+    fn apply_pending_view(&mut self, pending: PendingView) {
+        let Some(output) = self.output_by_name(&pending.output) else {
+            return;
+        };
+        // A fullscreen output's camera is locked and the per-tick clear wipes
+        // these targets anyway, so writing them is pure churn.
+        if self.is_output_fullscreen(&output) {
+            return;
+        }
+        let mut os = output_state(&output);
+        // Compared exactly, like the fullscreen cover's stamp — a camera that
+        // drifted from `staged_camera` by even a hair took ownership of the view.
+        if os.camera != pending.staged_camera || os.zoom != pending.staged_zoom {
+            return;
+        }
+        // Staging cleared both targets, so a target that exists now was armed by
+        // a later action — one whose own move has not started travelling yet, and
+        // so leaves no trace in the camera itself for the check above to catch.
+        if os.camera_target.is_some() || os.zoom_target.is_some() {
+            return;
+        }
+        os.momentum.stop();
+        os.zoom_animation_anchor = Some(pending.anchor);
+        os.camera_target = Some(pending.camera);
+        os.zoom_target = Some(pending.zoom);
     }
 
     /// Resolve the outstanding request on a commit of an animated window. A

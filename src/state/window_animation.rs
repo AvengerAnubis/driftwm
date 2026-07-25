@@ -5,6 +5,8 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use driftwm::stage::ElementId;
 
+use super::PendingView;
+
 /// Every effect advances on normalized progress and ends when within this of
 /// 1.0. Deliberately larger than the camera's convergence epsilon: a tighter one
 /// leaves a long, invisible tail well past the visible motion. Because geometry
@@ -140,14 +142,13 @@ pub(crate) enum GeometryRole {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FullscreenCover {
     pub output: String,
-    /// The camera and zoom the picture was frozen under. A canvas-space picture
-    /// only covers its output for as long as the output still shows this view:
-    /// an action that starts a camera move mid-freeze — a fit dispatched out of
-    /// fullscreen retargets the exit's entry, which keeps this stamp — slides the
-    /// picture off the very output it claims to be hiding, and the cull would
-    /// leave that pan crossing black.
-    pub camera: Point<f64, Logical>,
-    pub zoom: f64,
+    /// The camera and zoom the picture was frozen under, for a canvas-space
+    /// picture: it covers its output only while the output still shows this
+    /// view, and a camera move mid-freeze — a pan gesture, its momentum, a
+    /// navigation action — slides it off the very output it claims to be hiding,
+    /// leaving the cull to draw black. `None` for a screen-space (re-pinned)
+    /// picture, which keeps covering the output whatever the camera does.
+    pub view: Option<(Point<f64, Logical>, f64)>,
 }
 
 /// What the picture a freeze holds on screen was drawn as. Stamped when a freeze
@@ -216,6 +217,10 @@ enum AnimationKind {
         /// content so a stale capture can never be paired with a newer leg.
         generation: u64,
         role: GeometryRole,
+        /// A view move parked on this entry until its freeze releases, so the
+        /// camera and the window start together. Only stored, cleared and handed
+        /// back here — what it means is the caller's business.
+        pending_view: Option<PendingView>,
     },
 }
 
@@ -298,6 +303,7 @@ impl WindowAnimations {
                     start_hold,
                     picture: entry_picture,
                     generation: entry_generation,
+                    pending_view,
                 },
         }) = self.animations.get_mut(&id)
         {
@@ -326,6 +332,10 @@ impl WindowAnimations {
                 *buffer_stale = true;
                 *entry_policy = content_policy;
                 *hold_deadline = None;
+                // A new request means a new action owns this window's transition,
+                // and it brings its own view policy — the parked move belongs to
+                // the one it just superseded.
+                *pending_view = None;
                 // While the picture is frozen nothing can change it but the client's
                 // redraw, and that releases the freeze — so the stamp taken when it
                 // froze still describes what is on screen. Restating it from the
@@ -374,9 +384,32 @@ impl WindowAnimations {
                     picture,
                     generation,
                     role,
+                    pending_view: None,
                 },
             },
         );
+    }
+
+    /// Park a view move on `id`'s geometry entry, to be handed back when its
+    /// freeze releases. No-op when `id` has no geometry entry — there is then no
+    /// freeze to wait on, and the caller applies the move itself.
+    pub fn stage_pending_view(&mut self, id: ElementId, view: PendingView) {
+        if let Some(WindowAnimation {
+            kind: AnimationKind::Geometry { pending_view, .. },
+        }) = self.animations.get_mut(&id)
+        {
+            *pending_view = Some(view);
+        }
+    }
+
+    /// Take the view move parked on `id`, if any.
+    pub fn take_pending_view(&mut self, id: ElementId) -> Option<PendingView> {
+        match self.animations.get_mut(&id) {
+            Some(WindowAnimation {
+                kind: AnimationKind::Geometry { pending_view, .. },
+            }) => pending_view.take(),
+            _ => None,
+        }
     }
 
     /// Whether `id` is frozen before its resize leg. The pre-commit hook
@@ -461,7 +494,8 @@ impl WindowAnimations {
                 ..
             } if start_hold.is_held()
                 && picture.fullscreen_on.as_ref().is_some_and(|cover| {
-                    cover.output == output && cover.camera == camera && cover.zoom == zoom
+                    cover.output == output
+                        && cover.view.is_none_or(|(c, z)| c == camera && z == zoom)
                 }) =>
             {
                 Some(*id)

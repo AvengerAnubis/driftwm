@@ -285,10 +285,31 @@ pub(crate) struct EdgePanDelay {
     pub(crate) entered_at: Instant,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ZoomAnimationAnchor {
     pub canvas: Point<f64, Logical>,
     pub screen: Point<f64, Logical>,
+}
+
+/// A view move that belongs to a window transition and must not start before the
+/// window does. Fit pans the camera to centre the window it is resizing; starting
+/// that while the window is still frozen on its pre-fit picture reads as two
+/// motions instead of one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingView {
+    /// The output whose viewport this moves — resolved when the move was staged,
+    /// not when it lands, since the pointer (and so the active output) can move
+    /// while the window is frozen.
+    pub output: String,
+    pub camera: Point<f64, Logical>,
+    pub zoom: f64,
+    pub anchor: ZoomAnimationAnchor,
+    /// The viewport as the staging action left it. Anything that moves the camera
+    /// in the meantime — a pan gesture, momentum, a navigation action — takes
+    /// ownership of the view, and this move is dropped rather than yanking the
+    /// canvas back a third of a second later.
+    pub staged_camera: Point<f64, Logical>,
+    pub staged_zoom: f64,
 }
 
 #[derive(Clone)]

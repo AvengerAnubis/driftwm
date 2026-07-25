@@ -1326,11 +1326,17 @@ fn render_frame(
     };
     #[cfg(feature = "profile-with-tracy")]
     let _cursor_span = tracy_client::span!("udev::build_cursor_elements");
+    // The cursor tracks the live camera, not `world_view` — see its doc for why
+    // the two can differ during a fullscreen entry.
+    let (cursor_camera, cursor_zoom) = {
+        let os = crate::state::output_state(output);
+        (os.camera, os.zoom)
+    };
     let cursor_elements = crate::render::build_cursor_elements(
         data,
         renderer,
-        cur_camera,
-        cur_zoom,
+        cursor_camera,
+        cursor_zoom,
         output.current_scale().fractional_scale(),
         cursor_alpha,
     );
