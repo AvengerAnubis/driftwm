@@ -110,14 +110,16 @@ this flag — they're already an explicit, user-visible artifact on your canvas.
 `restore_windows` only decides whether still-_open_ windows get saved too on
 the way out.
 
-The window you had focused is restored too — like the stand-ins themselves,
-whether or not this flag is on — as focus on its stand-in, so it
-wears a focus ring, `Enter` relaunches it, and `placement = "auto"` puts your
-first new window beside it instead of dropping it in the middle of the
-viewport. This only happens when that stand-in comes back on screen (which in
-practice means `restore_camera` is on, or it was near your camera anyway):
-focus you can't see is focus you'd act on by accident, so the canvas just
-starts unfocused instead.
+The window you had focused comes back focused too, as focus on its stand-in — so
+it wears a focus ring, `Enter` relaunches it, and `placement = "auto"` puts your
+first new window beside it instead of dropping it in the middle of the viewport.
+A focused _suspended_ window carries its focus across a restart whether or not
+this flag is on; a focused _live_ window is only saved at all when it's on, so
+with it off the canvas comes back unfocused. Either way the focus is only handed
+over once that stand-in is on screen (in practice: `restore_camera` is on, or you
+quit with it in view) — focus you can't see is focus you'd act on by accident, so
+the canvas starts unfocused instead and the record waits for a launch that can
+use it.
 
 ## `restore_camera`
 
