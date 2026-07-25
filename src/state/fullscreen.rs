@@ -358,11 +358,10 @@ impl DriftWm {
             .unwrap_or_else(|| parked_camera.to_i32_round());
         let cur_screen: Option<(Point<f64, Logical>, Size<f64, Logical>)> =
             self.stage.id_of(&entry.window).map(|id| {
-                let v = self.animated_visual(
-                    id,
-                    parked_loc.to_f64(),
-                    entry.window.geometry().size.to_f64(),
-                );
+                // The chase rect, never the drawn one: an open fade's shrink is
+                // carried onto the exit's chase and re-applied when it is drawn,
+                // so seeding from the drawn rect would scale the picture twice.
+                let v = self.geometry_seed(id, parked_loc, entry.window.geometry().size);
                 (
                     Point::from((
                         (v.loc.x - parked_camera.x) * parked_zoom,

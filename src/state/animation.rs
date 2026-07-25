@@ -341,7 +341,7 @@ impl DriftWm {
     /// Deliberately not the *drawn* rect: an open fade's shrink is carried onto
     /// the new chase and re-applied at draw time, so baking it into the seed
     /// would scale the arrival twice.
-    fn geometry_seed(
+    pub(crate) fn geometry_seed(
         &self,
         id: ElementId,
         loc: Point<i32, Logical>,

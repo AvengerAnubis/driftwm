@@ -5207,6 +5207,43 @@ fn a_fullscreen_exit_mid_open_fade_stamps_no_cover() {
     );
 }
 
+/// The open fade's shrink is re-applied every time the entry is drawn, so an
+/// exit has to seed its shrink from the chase rect and not from what is on
+/// screen — seeding from the drawn rect applies the shrink to itself and the
+/// window jumps smaller on the frame the exit arms, for the length of the exit's
+/// own freeze.
+#[test]
+fn a_fullscreen_exit_mid_open_fade_seeds_from_the_undrawn_rect() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    reset_view(&mut f);
+    let id = f.add_client();
+    let _surface = map_straight_into_fullscreen(&mut f, id, "fs", (400, 300));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    let eid = element_id(&mut f, &window);
+
+    // A geometry entry draws its own rect, so the target passed here is unused —
+    // the same call before and after is a fair comparison of what is on screen.
+    let probe = |f: &mut Fixture| {
+        f.state()
+            .animated_visual(eid, Point::from((0.0, 0.0)), Size::from((0.0, 0.0)))
+            .size
+    };
+    let before = probe(&mut f);
+    assert!(
+        before.w < 1920.0,
+        "precondition: the fade is drawing the window smaller than its rect \
+         ({before:?})"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+    let after = probe(&mut f);
+    assert!(
+        (after.w - before.w).abs() < 1.0 && (after.h - before.h).abs() < 1.0,
+        "the picture is continuous across the exit: {before:?} -> {after:?}"
+    );
+}
+
 /// A fit's camera pan is parked behind the freeze rather than firing at the
 /// action; this applies to the open-into-fit shortcut too, exactly as it does
 /// for a fit fired on an already-open window.
