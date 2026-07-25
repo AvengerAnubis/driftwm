@@ -240,8 +240,8 @@ impl DriftWm {
 
     /// Re-apply per-output rules (mode/scale/transform/position). Mode
     /// changes go through `pending_mode_changes`; everything else applies
-    /// in-place via `Output::change_current_state`. Same lookup as
-    /// `output_connected` so reload and startup compute identically.
+    /// in-place via `Output::change_current_state`. Same position lookup as
+    /// `output_connected` so reload and startup place outputs identically.
     fn apply_output_rules_after_reload(&mut self) {
         use driftwm::config::{OutputMode as ConfigOutputMode, OutputPosition};
         use smithay::utils::Transform;
@@ -255,8 +255,26 @@ impl DriftWm {
             let name = output.name();
             let cfg = self.config.output_config(&name);
 
+            // On a backend-owned output the mode, scale and transform come from
+            // the backend, not the config: recomputing them would revert the
+            // nested output's Y-flip transform and the host window's size and
+            // HiDPI scale. Position still applies, as it does at startup.
+            let backend_owned = crate::state::output_state(&output).backend_owned_mode;
+            if backend_owned
+                && cfg.is_some_and(|c| {
+                    c.scale.is_some()
+                        || c.transform.is_some()
+                        || c.mode != ConfigOutputMode::default()
+                })
+            {
+                tracing::info!(
+                    "output {name}: ignoring mode/scale/transform from [[outputs]] — \
+                     the backend owns them for this output"
+                );
+            }
+
             let want_mode = cfg.map(|c| &c.mode).cloned().unwrap_or_default();
-            if let Some(current) = output.current_mode() {
+            if !backend_owned && let Some(current) = output.current_mode() {
                 let (cur_w, cur_h) = (current.size.w, current.size.h);
                 let cur_hz_milli = current.refresh;
                 let intent = match &want_mode {
@@ -280,16 +298,10 @@ impl DriftWm {
                     // can't resolve "preferred"/"max" or tell whether the
                     // current mode already satisfies the rule. Queue
                     // unconditionally; the backend skips no-op modesets.
-                    // Not on winit: nothing drains the queue there, and the
-                    // default-rule intent would sit in debug counters forever.
-                    ConfigOutputMode::Preferred | ConfigOutputMode::Max
-                        if !matches!(self.backend, Some(crate::backend::Backend::Winit(_))) =>
-                    {
-                        Some(match &want_mode {
-                            ConfigOutputMode::Max => crate::state::ModeIntent::Max,
-                            _ => crate::state::ModeIntent::Preferred,
-                        })
-                    }
+                    ConfigOutputMode::Preferred | ConfigOutputMode::Max => Some(match &want_mode {
+                        ConfigOutputMode::Max => crate::state::ModeIntent::Max,
+                        _ => crate::state::ModeIntent::Preferred,
+                    }),
                     _ => None,
                 };
                 if let Some(intent) = intent {
@@ -300,7 +312,7 @@ impl DriftWm {
             // Missing field reverts to 1.0.
             let want_scale = cfg.and_then(|c| c.scale).unwrap_or(1.0);
             let cur_scale = output.current_scale().fractional_scale();
-            let new_scale = if (cur_scale - want_scale).abs() > f64::EPSILON {
+            let new_scale = if !backend_owned && (cur_scale - want_scale).abs() > f64::EPSILON {
                 Some(smithay::output::Scale::Fractional(want_scale))
             } else {
                 None
@@ -308,7 +320,7 @@ impl DriftWm {
 
             // Missing field reverts to Normal.
             let want_transform = cfg.and_then(|c| c.transform).unwrap_or(Transform::Normal);
-            let new_transform = if output.current_transform() != want_transform {
+            let new_transform = if !backend_owned && output.current_transform() != want_transform {
                 Some(want_transform)
             } else {
                 None

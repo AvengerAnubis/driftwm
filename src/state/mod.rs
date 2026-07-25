@@ -322,6 +322,11 @@ pub struct OutputState {
     /// center, with hysteresis. Recomputed per frame by the ext-workspace
     /// refresh; the focused output's value is what the protocol and IPC report.
     pub active_bookmark: Option<String>,
+    /// The backend, not the config, owns this output's mode, scale and
+    /// transform — set for the nested output, whose host window drives size
+    /// and scale and whose transform is the renderer's Y-flip compensation.
+    /// Config reload skips those three here and applies position only.
+    pub backend_owned_mode: bool,
 }
 
 pub fn init_output_state(
@@ -355,6 +360,7 @@ pub fn init_output_state(
             home_return: None,
             fullscreen_return: None,
             active_bookmark: None,
+            backend_owned_mode: false,
         })
     });
 }
@@ -2655,6 +2661,7 @@ mod tests {
             home_return: None,
             fullscreen_return: None,
             active_bookmark: None,
+            backend_owned_mode: false,
         }
     }
 

@@ -75,6 +75,10 @@ pub fn init_winit(
     // focus + pointer bootstrap, and Space mapping. Shared with the real
     // backends.
     data.output_connected(&output, &std::collections::HashMap::new());
+    // Mode and scale follow the host window's resizes, and the transform above
+    // is the renderer's Y-flip compensation — none of the three is
+    // config-derived, so config reload must leave them alone.
+    crate::state::output_state(&output).backend_owned_mode = true;
 
     // Notify output management clients about the winit output
     {
