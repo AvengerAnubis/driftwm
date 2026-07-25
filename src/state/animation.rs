@@ -48,9 +48,13 @@ impl DriftWm {
     /// keeps showing its pre-action frame long after the stage has flipped, and
     /// that frame has to keep the chrome it was drawn with.
     pub(crate) fn chrome_fullscreen(&self, window: &Window) -> bool {
-        self.stage
-            .id_of(window)
-            .and_then(|id| self.window_animations.frozen_chrome_fullscreen(id))
+        self.chrome_fullscreen_of(self.stage.id_of(window), window)
+    }
+
+    /// [`Self::chrome_fullscreen`] for a caller that has already resolved the id
+    /// (the render loop resolves it once per window per output).
+    pub(crate) fn chrome_fullscreen_of(&self, id: Option<ElementId>, window: &Window) -> bool {
+        id.and_then(|id| self.window_animations.frozen_chrome_fullscreen(id))
             .unwrap_or_else(|| self.stage.is_fullscreen(window))
     }
 

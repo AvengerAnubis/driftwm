@@ -838,10 +838,13 @@ pub fn compose_frame(
         let Some(wl_surface) = window.wl_surface() else {
             continue;
         };
+        // Resolved once: `Stage::id_of` is a linear scan and three of the passes
+        // below want the id.
+        let element_id = state.stage.id_of(window);
         // Not stage membership: a resize freeze holds the pre-action picture on
         // screen for up to half a second after the stage has flipped, and that
         // picture keeps the chrome it was drawn with (see `chrome_fullscreen`).
-        let is_fullscreen = state.chrome_fullscreen(window);
+        let is_fullscreen = state.chrome_fullscreen_of(element_id, window);
         let has_ssd = !is_fullscreen
             && state
                 .decorations
@@ -925,10 +928,7 @@ pub fn compose_frame(
             loc.to_f64()
         };
         let target_size = geom_size.to_f64();
-        let visual = state
-            .stage
-            .id_of(window)
-            .map(|id| state.animated_visual(id, anim_ref, target_size));
+        let visual = element_id.map(|id| state.animated_visual(id, anim_ref, target_size));
         let (visual_alpha, window_animation) = match visual {
             Some(v) if v.loc != anim_ref || v.size != target_size || v.alpha != 1.0 => {
                 let physical_zoom = output_scale * zoom;
@@ -973,9 +973,7 @@ pub fn compose_frame(
         // lands on the interpolated visual rect for Canvas and Screen entries
         // alike. Positioned at the *live* geometry rect, which that transform
         // then maps exactly as it maps the live content.
-        let resize_overlay = state
-            .stage
-            .id_of(window)
+        let resize_overlay = element_id
             .and_then(|id| state.resize_crossfades.get(&id))
             .map(|crossfade| {
                 let geometry_phys: Point<f64, Physical> = Point::from((
