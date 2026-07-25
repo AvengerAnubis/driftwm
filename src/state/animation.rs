@@ -471,32 +471,7 @@ impl DriftWm {
             return;
         };
         let corner_clip = self.render.corner_clip_shader.clone();
-        let on_screen = match self.stage.pin_of(window) {
-            Some(site) => self
-                .output_by_name(&site.output)
-                .map_or(1.0, |o| o.current_scale().fractional_scale()),
-            None => {
-                let stage_pos = self.stage.position_of(window).unwrap_or_default();
-                self.flatten_scale_for_canvas_rect(Rectangle::new(
-                    stage_pos,
-                    capture.pixels.geometry.size,
-                ))
-            }
-        };
-        // The overlay's first frame paints this bake over the frozen visual rect,
-        // which can be several times the rect the content was captured at (a
-        // fullscreen exit restores into a zoomed-out camera, where the rect is
-        // `screen / zoom`). Rasterize for the size it will be drawn at, or the
-        // fade lands visibly softer than the frozen frame it takes over from.
-        let captured = capture.pixels.geometry.size;
-        let stretch = self
-            .window_animations
-            .geometry_visual_rect(id)
-            .map_or(1.0, |visual| {
-                (visual.size.w / captured.w.max(1) as f64)
-                    .max(visual.size.h / captured.h.max(1) as f64)
-            });
-        let flatten_scale = on_screen * stretch;
+        let flatten_scale = self.resize_bake_scale(window, id, capture.pixels.geometry.size);
         let Some(mut backend) = self.backend.take() else {
             return;
         };
@@ -511,6 +486,42 @@ impl DriftWm {
         if let Some(crossfade) = crossfade {
             self.resize_crossfades.insert(id, crossfade);
         }
+    }
+
+    /// Texels per captured logical px a resize bake needs so one baked texel
+    /// lands on one physical pixel. The overlay's first frame paints the bake
+    /// over the frozen visual rect, which can be several times the rect the
+    /// content was captured at (a fullscreen exit restores into a zoomed-out
+    /// camera, where the rect is `screen / zoom`), and that rect is then drawn
+    /// through the same transform as live content — so the two factors multiply.
+    /// Deliberately unfloored: `resize_crossfade` applies the only floor this
+    /// needs, and flooring the render-scale half here would over-rasterize a
+    /// zoomed-out bake by `1 / (output_scale · zoom)`.
+    pub(crate) fn resize_bake_scale(
+        &self,
+        window: &Window,
+        id: ElementId,
+        captured: Size<i32, Logical>,
+    ) -> f64 {
+        let render_scale = match self.stage.pin_of(window) {
+            // A pinned window draws at zoom 1 on its own output.
+            Some(site) => self
+                .output_by_name(&site.output)
+                .map_or(1.0, |o| o.current_scale().fractional_scale()),
+            None => {
+                let stage_pos = self.stage.position_of(window).unwrap_or_default();
+                self.canvas_rect_render_scale(Rectangle::new(stage_pos, captured))
+                    .unwrap_or(1.0)
+            }
+        };
+        let stretch = self
+            .window_animations
+            .geometry_visual_rect(id)
+            .map_or(1.0, |visual| {
+                (visual.size.w / captured.w.max(1) as f64)
+                    .max(visual.size.h / captured.h.max(1) as f64)
+            });
+        render_scale * stretch
     }
 
     /// The chrome policy a bake has to reproduce: whether the window draws bare
@@ -563,9 +574,10 @@ impl DriftWm {
         self.resize_crossfades.remove(&id);
     }
 
-    /// Rasterization scale for a canvas rect: the max `output_scale·zoom` among
-    /// outputs whose viewport intersects it (floored at 1.0).
-    fn flatten_scale_for_canvas_rect(&self, rect: Rectangle<i32, Logical>) -> f64 {
+    /// Physical px per logical px a canvas rect is drawn at: the max
+    /// `output_scale·zoom` among the outputs whose viewport intersects it, or
+    /// `None` when none does.
+    fn canvas_rect_render_scale(&self, rect: Rectangle<i32, Logical>) -> Option<f64> {
         self.space
             .outputs()
             .filter_map(|o| {
@@ -580,7 +592,17 @@ impl DriftWm {
                     .overlaps(rect)
                     .then(|| o.current_scale().fractional_scale() * zoom)
             })
-            .fold(1.0_f64, f64::max)
+            .fold(None, |best: Option<f64>, s| {
+                Some(best.map_or(s, |b| b.max(s)))
+            })
+    }
+
+    /// Rasterization scale for a closing window's bake: the rect's render scale,
+    /// never below 1.0, so a zoomed-out close still bakes at full logical
+    /// resolution (as does a rect no output currently shows).
+    pub(crate) fn flatten_scale_for_canvas_rect(&self, rect: Rectangle<i32, Logical>) -> f64 {
+        self.canvas_rect_render_scale(rect)
+            .map_or(1.0, |scale| scale.max(1.0))
     }
 
     /// Flatten the captured content of a closing window into a queued snapshot

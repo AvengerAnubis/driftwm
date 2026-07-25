@@ -2237,6 +2237,110 @@ fn an_open_entry_over_a_frozen_resize_drops_the_crossfade() {
     tick_until_settled(&mut f);
 }
 
+/// The old-content bake is rasterized for the size it will be drawn at: one baked
+/// texel per physical pixel, at every output scale and camera zoom. The render
+/// side draws the bake across the entry's visual rect through the window's own
+/// transform, so the drawn extent is `visual · zoom · output_scale` — flooring
+/// the `output_scale · zoom` half at 1.0 (the close bake's rule) multiplies with
+/// a fullscreen exit's `1/zoom` stretch and bakes a texture several times that:
+/// 4x the pixels at zoom 0.5, 25x at 0.2, past `GL_MAX_TEXTURE_SIZE` below that,
+/// where the allocation fails and the crossfade is silently skipped.
+#[test]
+fn a_resize_bake_carries_one_texel_per_drawn_pixel() {
+    for scale in [1.0, 1.5, 2.0] {
+        for zoom in [1.0, 0.75, 0.5, 0.2] {
+            let mut f = Fixture::new();
+            let output = f.add_output(1, (1920, 1080));
+            output.change_current_state(
+                None,
+                None,
+                Some(smithay::output::Scale::Fractional(scale)),
+                None,
+            );
+            let id = f.add_client();
+            let _surface = map_window(&mut f, id, "a", (800, 600));
+            let window = window_by_app_id(&mut f, "a").unwrap();
+            reset_view(&mut f);
+            f.state().with_output_state(|os| os.zoom = zoom);
+            f.state().update_output_from_camera();
+            f.state()
+                .map_window(window.clone(), Point::from((100, 100)), false);
+            let eid = element_id(&mut f, &window);
+            tick_until_settled(&mut f);
+
+            // A fullscreen exit's shape: the captured picture is the fullscreen
+            // buffer (one viewport), frozen on a canvas rect of `viewport / zoom`
+            // while it restores to the windowed size.
+            let captured = crate::state::output_logical_size(&output);
+            let seed = Rectangle::new(
+                Point::from((100.0, 100.0)),
+                Size::from((captured.w as f64 / zoom, captured.h as f64 / zoom)),
+            );
+            f.state().begin_geometry_animation_seeded(
+                &window,
+                seed,
+                crate::state::window_animation::AnimSpace::Canvas,
+                Some(Size::from((800, 600))),
+                crate::state::window_animation::GeometryRole::FullscreenExit,
+                crate::state::window_animation::ContentPolicy::Cap,
+            );
+
+            let visual = f
+                .state()
+                .window_animations
+                .geometry_visual_rect(eid)
+                .expect("the exit seeded a frozen entry");
+            let texels = captured.w as f64 * f.state().resize_bake_scale(&window, eid, captured);
+            let drawn = visual.size.w * zoom * scale;
+            assert!(
+                (texels / drawn - 1.0).abs() < 1e-6,
+                "scale {scale}, zoom {zoom}: baked {texels:.0} texels for {drawn:.0} \
+                 drawn px"
+            );
+        }
+    }
+}
+
+/// The close bake keeps its floor: the resize bake's unfloored scale is a
+/// sibling, not a replacement. A close fades in canvas space, so a snapshot taken
+/// while zoomed out still rasterizes at full logical resolution.
+#[test]
+fn a_close_bake_never_rasterizes_below_logical_resolution() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    reset_view(&mut f);
+    let rect = Rectangle::new(Point::from((100, 100)), Size::from((400, 300)));
+
+    f.state().with_output_state(|os| os.zoom = 0.5);
+    f.state().update_output_from_camera();
+    assert_eq!(
+        f.state().flatten_scale_for_canvas_rect(rect),
+        1.0,
+        "zoomed out, the floor holds the bake at logical resolution"
+    );
+
+    output.change_current_state(
+        None,
+        None,
+        Some(smithay::output::Scale::Fractional(2.0)),
+        None,
+    );
+    f.state().with_output_state(|os| os.zoom = 1.0);
+    f.state().update_output_from_camera();
+    assert_eq!(
+        f.state().flatten_scale_for_canvas_rect(rect),
+        2.0,
+        "above the floor the rect's render scale is used as-is"
+    );
+
+    let off_screen = Rectangle::new(Point::from((100_000, 100_000)), Size::from((400, 300)));
+    assert_eq!(
+        f.state().flatten_scale_for_canvas_rect(off_screen),
+        1.0,
+        "a rect no output shows falls back to the same floor"
+    );
+}
+
 /// Adoption holds a slot rather than requesting a resize, so it is never frozen —
 /// its content is meant to stretch to fill immediately.
 #[test]
