@@ -9,6 +9,7 @@ use super::{
     DriftWm, PendingRecenter, PendingView, StageWindow, ZoomAnimationAnchor, output_state,
 };
 use driftwm::config;
+use driftwm::stage::ElementId;
 use driftwm::window_ext::WindowExt;
 
 /// Build a `SnapRect` from a hypothetical canvas position, size, SSD
@@ -316,9 +317,10 @@ impl DriftWm {
             .filter(|w| w != window)
             .collect()
         };
+        let primary_id = self.stage.id_of(window);
         let old_member_locs = self.cluster_member_positions(&cluster_members);
         self.shift_cluster_around_primary(window, old_rect, new_rect);
-        self.animate_cluster_shift(old_member_locs);
+        self.animate_cluster_shift(old_member_locs, primary_id);
         self.fit_window(window);
         for member in &cluster_members {
             self.refresh_stable_snap_rect(member);
@@ -362,9 +364,10 @@ impl DriftWm {
             .filter(|w| w != window)
             .collect()
         };
+        let primary_id = self.stage.id_of(window);
         let old_member_locs = self.cluster_member_positions(&cluster_members);
         self.shift_cluster_around_primary(window, old_rect, new_rect);
-        self.animate_cluster_shift(old_member_locs);
+        self.animate_cluster_shift(old_member_locs, primary_id);
         self.unfit_window(window);
         for member in &cluster_members {
             self.refresh_stable_snap_rect(member);
@@ -390,14 +393,18 @@ impl DriftWm {
     }
 
     /// Animate each client cluster member from its captured pre-shift position
-    /// to its new (already-applied) stage position.
+    /// to its new (already-applied) stage position, held back until `primary`'s
+    /// own resize freeze releases so the push and the window pushing it start on
+    /// the same tick. `primary`'s entry does not exist yet here — the wait is
+    /// resolved at tick time, and one that never resolves is simply dropped.
     fn animate_cluster_shift(
         &mut self,
         old_locs: Vec<(Window, smithay::utils::Point<i32, smithay::utils::Logical>)>,
+        primary: Option<ElementId>,
     ) {
         for (member, old_loc) in old_locs {
             if self.stage.position_of(&member) != Some(old_loc) {
-                self.animate_window_move_from(&member, old_loc);
+                self.animate_window_move_from(&member, old_loc, primary);
             }
         }
     }

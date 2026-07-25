@@ -167,6 +167,7 @@ impl DriftWm {
         role: GeometryRole,
         replace_visual: bool,
         content_policy: ContentPolicy,
+        waits_for: Option<ElementId>,
     ) {
         let Some(id) = self.stage.id_of(window) else {
             return;
@@ -241,6 +242,7 @@ impl DriftWm {
             replace_visual,
             content_policy,
             picture,
+            waits_for,
         );
     }
 
@@ -273,6 +275,7 @@ impl DriftWm {
             GeometryRole::Normal,
             false,
             ContentPolicy::Cap,
+            None,
         );
     }
 
@@ -295,15 +298,21 @@ impl DriftWm {
             role,
             true,
             content_policy,
+            None,
         );
     }
 
     /// Position-only canvas animation from `from_loc` (nudge, cluster shift).
     /// The stage already holds the new position; the seed pins the old one.
+    ///
+    /// `waits_for` names the entry this one is being pushed by, if any: the leg
+    /// stays parked on the seed until that entry's own resize freeze releases,
+    /// so a pushed neighbour and the window pushing it move as one.
     pub(crate) fn animate_window_move_from(
         &mut self,
         window: &Window,
         from_loc: Point<i32, Logical>,
+        waits_for: Option<ElementId>,
     ) {
         let Some(id) = self.stage.id_of(window) else {
             return;
@@ -325,6 +334,7 @@ impl DriftWm {
             GeometryRole::Normal,
             false,
             ContentPolicy::Cap,
+            waits_for,
         );
     }
 

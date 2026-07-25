@@ -111,7 +111,7 @@ impl DriftWm {
                         self.pending_recenter.remove(&surface.id());
                     }
                     self.map_window(window.clone(), new_loc, false);
-                    self.animate_window_move_from(&window, loc);
+                    self.animate_window_move_from(&window, loc, None);
                 }
             }
             Action::PanViewport(dir) => {

@@ -286,7 +286,7 @@ fn a_second_action_mid_flight_keeps_the_visual_path_continuous() {
     f.state()
         .map_window(window.clone(), Point::from((900, 300)), false);
     f.state()
-        .animate_window_move_from(&window, Point::from((400, 300)));
+        .animate_window_move_from(&window, Point::from((400, 300)), None);
 
     let continuous_tick = |f: &mut Fixture| {
         let target = f.state().stage.position_of(&window).unwrap().to_f64();
@@ -320,7 +320,7 @@ fn a_second_action_mid_flight_keeps_the_visual_path_continuous() {
     f.state()
         .map_window(window.clone(), Point::from((200, 700)), false);
     f.state()
-        .animate_window_move_from(&window, Point::from((900, 300)));
+        .animate_window_move_from(&window, Point::from((900, 300)), None);
 
     for _ in 0..MAX_TICKS {
         if !f.state().window_animations.is_active() {
@@ -349,7 +349,7 @@ fn mid_flight_map_window_retargets_without_snapping() {
     f.state()
         .map_window(window.clone(), Point::from((900, 300)), false);
     f.state()
-        .animate_window_move_from(&window, Point::from((400, 300)));
+        .animate_window_move_from(&window, Point::from((400, 300)), None);
     for _ in 0..3 {
         f.state().tick_window_animations(TICK);
     }
@@ -415,7 +415,7 @@ fn geometry_settles_in_the_same_time_regardless_of_distance() {
         tick_until_settled(&mut f);
         f.state().map_window(window.clone(), Point::from(to), false);
         f.state()
-            .animate_window_move_from(&window, Point::from(from));
+            .animate_window_move_from(&window, Point::from(from), None);
         assert!(
             f.state().window_animations.is_active(),
             "the move started a chase"
@@ -1594,7 +1594,7 @@ fn a_position_only_retarget_keeps_a_frozen_resize_frozen() {
     let from = f.state().stage.position_of(&window).unwrap();
     f.state()
         .map_window(window.clone(), Point::from((from.x + 40, from.y)), false);
-    f.state().animate_window_move_from(&window, from);
+    f.state().animate_window_move_from(&window, from, None);
 
     assert!(
         f.state().window_animations.start_held(eid),
@@ -1646,7 +1646,7 @@ fn repeated_nudges_never_extend_a_freeze() {
         let from = f.state().stage.position_of(&window).unwrap();
         f.state()
             .map_window(window.clone(), Point::from((from.x + 40, from.y)), false);
-        f.state().animate_window_move_from(&window, from);
+        f.state().animate_window_move_from(&window, from, None);
         f.state().tick_window_animations_at(TICK, now);
         assert!(
             f.state().window_animations.start_held(eid),
@@ -1708,7 +1708,7 @@ fn repeated_nudges_never_extend_an_endpoint_hold() {
         let from = f.state().stage.position_of(&window).unwrap();
         f.state()
             .map_window(window.clone(), Point::from((from.x + 40, from.y)), false);
-        f.state().animate_window_move_from(&window, from);
+        f.state().animate_window_move_from(&window, from, None);
         for _ in 0..20 {
             f.state().tick_window_animations_at(TICK, now);
         }
@@ -1763,7 +1763,7 @@ fn a_position_only_retarget_keeps_an_adopted_slot_stretching() {
     // Slide it while the slot hold is still outstanding.
     f.state()
         .map_window(adopted.clone(), Point::from((from.x + 40, from.y)), false);
-    f.state().animate_window_move_from(&adopted, from);
+    f.state().animate_window_move_from(&adopted, from, None);
 
     let committed = adopted.geometry().size.to_f64();
     let loc = f.state().stage.position_of(&adopted).unwrap().to_f64();
@@ -2119,7 +2119,7 @@ fn a_frozen_fullscreen_exit_keeps_its_fullscreen_chrome() {
     let from = f.state().stage.position_of(&window).unwrap();
     f.state()
         .map_window(window.clone(), Point::from((from.x + 40, from.y)), false);
-    f.state().animate_window_move_from(&window, from);
+    f.state().animate_window_move_from(&window, from, None);
     assert_eq!(
         chrome_alpha(&mut f, &window),
         0.0,

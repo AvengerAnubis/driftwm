@@ -44,6 +44,16 @@ impl StartHold {
     pub fn is_held(self) -> bool {
         !matches!(self, StartHold::Off)
     }
+
+    /// Whether this hold still holds after a tick at `now`. The tick that lets
+    /// a budget expire answers false — that one does move the window.
+    fn holds_at(self, now: Instant) -> bool {
+        match self {
+            StartHold::Off => false,
+            StartHold::Armed => true,
+            StartHold::Until(deadline) => now < deadline,
+        }
+    }
 }
 
 /// The rendered stand-in for a window while an animation is playing: where its
@@ -221,6 +231,12 @@ enum AnimationKind {
         /// camera and the window start together. Only stored, cleared and handed
         /// back here — what it means is the caller's business.
         pending_view: Option<PendingView>,
+        /// This entry does not advance until the entry it names has released its
+        /// start freeze — a cluster member pushed by a resize waits for the
+        /// window pushing it, so the two move as one. Resolved at tick time (the
+        /// named entry need not exist yet when this is set) and dropped as soon
+        /// as the wait no longer resolves.
+        waits_for: Option<ElementId>,
     },
 }
 
@@ -285,6 +301,7 @@ impl WindowAnimations {
         replace_visual: bool,
         content_policy: ContentPolicy,
         picture: FrozenPicture,
+        waits_for: Option<ElementId>,
     ) {
         if let Some(WindowAnimation {
             kind:
@@ -304,6 +321,7 @@ impl WindowAnimations {
                     picture: entry_picture,
                     generation: entry_generation,
                     pending_view,
+                    waits_for: entry_waits_for,
                 },
         }) = self.animations.get_mut(&id)
         {
@@ -318,6 +336,14 @@ impl WindowAnimations {
             *entry_space = space;
             *entry_role = role;
             *last_committed_size = committed_size;
+            // A member pushed again by a fresh cluster shift waits on the new
+            // primary. A retarget that names nobody leaves an existing wait
+            // alone: nudging a pushed neighbour mid-freeze does nothing until
+            // the freeze releases, which is right — it is still the thing being
+            // pushed.
+            if waits_for.is_some() {
+                *entry_waits_for = waits_for;
+            }
             // A position-only retarget is the same wait, moving: it leaves the
             // outstanding request, buffer staleness, content policy, both holds'
             // remaining budgets and the frozen picture's chrome stamp untouched, so
@@ -336,6 +362,9 @@ impl WindowAnimations {
                 // and it brings its own view policy — the parked move belongs to
                 // the one it just superseded.
                 *pending_view = None;
+                // A member that acquires its own resize stops waiting for
+                // anyone; it is now a window others can be pushed by.
+                *entry_waits_for = None;
                 // While the picture is frozen nothing can change it but the client's
                 // redraw, and that releases the freeze — so the stamp taken when it
                 // froze still describes what is on screen. Restating it from the
@@ -385,6 +414,7 @@ impl WindowAnimations {
                     generation,
                     role,
                     pending_view: None,
+                    waits_for,
                 },
             },
         );
@@ -504,20 +534,44 @@ impl WindowAnimations {
         })
     }
 
-    /// Whether `id` is frozen and will still be frozen after a tick at `now` —
-    /// i.e. it will paint the same picture again. The tick that lets a budget
-    /// expire reports false, since that one does move the window.
-    pub fn frozen_at(&self, id: ElementId, now: Instant) -> bool {
+    /// `id`'s freeze and the entry it is waiting on, if it has a geometry entry.
+    fn freeze_state(&self, id: ElementId) -> Option<(StartHold, Option<ElementId>)> {
         match self.animations.get(&id) {
             Some(WindowAnimation {
-                kind: AnimationKind::Geometry { start_hold, .. },
-            }) => match *start_hold {
-                StartHold::Off => false,
-                StartHold::Armed => true,
-                StartHold::Until(deadline) => now < deadline,
-            },
-            _ => false,
+                kind:
+                    AnimationKind::Geometry {
+                        start_hold,
+                        waits_for,
+                        ..
+                    },
+            }) => Some((*start_hold, *waits_for)),
+            _ => None,
         }
+    }
+
+    /// Whether `id` is frozen and will still be frozen after a tick at `now` —
+    /// i.e. it will paint the same picture again. The tick that lets a budget
+    /// expire reports false, since that one does move the window. A follower
+    /// parked on the entry it waits for counts the same: it repaints its seed,
+    /// and answering otherwise would mark its output for redraw every frame of
+    /// a freeze the primary marks only its own output for.
+    ///
+    /// The wait is resolved exactly one level deep, deliberately not
+    /// recursively: an entry can only be waited on if it freezes, only the
+    /// request-carrying start path freezes, and that path clears its own
+    /// `waits_for` — so waiters and waited-on are disjoint sets and no cycle is
+    /// constructible. Recursing would turn any future break of that into a hang.
+    pub fn frozen_at(&self, id: ElementId, now: Instant) -> bool {
+        let Some((start_hold, waits_for)) = self.freeze_state(id) else {
+            return false;
+        };
+        if start_hold.holds_at(now) {
+            return true;
+        }
+        waits_for.is_some_and(|other| {
+            self.freeze_state(other)
+                .is_some_and(|(hold, _)| hold.holds_at(now))
+        })
     }
 
     /// Whether any entry is frozen. The per-commit capture hook probes this
@@ -722,6 +776,21 @@ impl WindowAnimations {
         now: Instant,
         eligible: bool,
     ) -> bool {
+        // Resolved before the entry is borrowed, since the answer lives on a
+        // different entry. Asked as "still frozen after a tick at `now`" rather
+        // than "frozen": tick order over the map is arbitrary, so a predicate
+        // that ignores `now` would release followers a frame apart depending on
+        // whether they happened to be ticked before or after the primary.
+        let waiting = match self.animations.get(&id) {
+            Some(WindowAnimation {
+                kind:
+                    AnimationKind::Geometry {
+                        waits_for: Some(other),
+                        ..
+                    },
+            }) => self.frozen_at(*other, now),
+            _ => false,
+        };
         let Some(animation) = self.animations.get_mut(&id) else {
             return false;
         };
@@ -741,11 +810,20 @@ impl WindowAnimations {
                 requested_size,
                 hold_deadline,
                 start_hold,
+                waits_for,
                 ..
             } => {
                 if !eligible {
                     return false;
                 }
+                // Parked on the seed while the entry pushing this one is frozen,
+                // so the two start on the same tick and travel in lockstep.
+                if waiting {
+                    return true;
+                }
+                // The wait is dropped the moment it stops resolving — released,
+                // degraded, never armed, or the entry gone — and never retaken.
+                *waits_for = None;
                 // Frozen: nothing advances until the client redraws (handled in
                 // `on_window_commit`) or the budget runs out, which degrades to
                 // animating with capped stale content.
