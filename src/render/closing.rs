@@ -300,10 +300,15 @@ impl ResizeCrossfade {
 
 /// Flatten captured content into a crossfade overlay. Only the *content* is
 /// being exchanged — the live border, shadow and bar keep drawing themselves —
-/// so the bake stays clip-only: `CloseChrome` with every other field `None`.
+/// so the bake is at most a clip: `CloseChrome` with every other field `None`.
 /// Passing no chrome at all is not the same thing, and not what this wants: that
 /// bakes the surface tree's full bounds, which for a CSD client includes its own
 /// shadow well outside the geometry rect.
+///
+/// Either way the result covers exactly the geometry rect — the invariant the
+/// render side relies on when it draws this texture over the window's
+/// interpolated geometry rect. Anything that grew the bake past that rect would
+/// silently offset and stretch the overlay.
 pub(crate) fn resize_crossfade(
     renderer: &mut GlesRenderer,
     pixels: &ClosePixels,
@@ -311,30 +316,37 @@ pub(crate) fn resize_crossfade(
     corner_clip: Option<&GlesTexProgram>,
     chrome: BakeChrome,
 ) -> Option<ResizeCrossfade> {
-    let chrome = CloseChrome {
-        geometry: pixels.geometry.to_f64(),
-        corner_radius: chrome.corner_radius,
-        // A bare window is still cropped to its geometry rect like any other —
-        // that is the rect the render side maps onto the visual rect — it only
-        // skips the rounding. Accepted artifact: the live path leaves a bare
-        // window's overhang (a `decoration = "none"` client's own shadow) on
-        // screen and the fade drops it, which is the price of a bake the render
-        // side can place from the geometry rect alone.
-        corner_clip: (!chrome.bare).then_some(corner_clip).flatten(),
-        border_shader: None,
-        border_width: 0,
-        border_color: [0; 4],
-        focused: false,
-        shadow_shader: None,
-        bar: None,
+    let flatten_scale = flatten_scale.max(1.0);
+    let geometry = pixels.geometry.to_f64();
+    // A bare window is still cropped to its geometry rect like any other — that
+    // is the rect the render side maps onto the visual rect — it only skips the
+    // rounding. Accepted artifact: the live path leaves a bare window's overhang
+    // (a `decoration = "none"` client's own shadow) on screen and the fade drops
+    // it, which is the price of a bake the render side can place from the
+    // geometry rect alone.
+    let clip = (!chrome.bare).then_some(corner_clip).flatten();
+    let (buffer, texels) = match clip {
+        // Nothing to clip: `flatten`'s second pass would copy the first at full
+        // size for no effect, so bake straight into the geometry rect instead and
+        // spare a 4K-sized offscreen (a bare fullscreen bake is the common case).
+        None => bake_content(renderer, pixels, geometry, flatten_scale)?,
+        Some(clip) => {
+            let chrome = CloseChrome {
+                geometry,
+                corner_radius: chrome.corner_radius,
+                corner_clip: Some(clip),
+                border_shader: None,
+                border_width: 0,
+                border_color: [0; 4],
+                focused: false,
+                shadow_shader: None,
+                bar: None,
+            };
+            let (buffer, _bounds, texels) =
+                flatten(renderer, pixels, flatten_scale, Some(&chrome))?;
+            (buffer, texels)
+        }
     };
-    // The baked extent is discarded because it is known: with border, shadow and
-    // bar all `None`, the bake covers exactly `chrome.geometry` — the invariant
-    // the render side relies on when it draws this texture over the window's
-    // interpolated geometry rect. Any chrome that grew the bake past that rect
-    // would silently offset and stretch the overlay.
-    let (buffer, _bounds, texels) =
-        flatten(renderer, pixels, flatten_scale.max(1.0), Some(&chrome))?;
     Some(ResizeCrossfade {
         buffer,
         texels,

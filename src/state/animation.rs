@@ -488,6 +488,11 @@ impl DriftWm {
         let Some(capture) = self.resize_captures.take_for(id, generation) else {
             return;
         };
+        // At full speed the overlay is done on the very next tick, before it can
+        // ever be composed — so the GPU flatten it needs is pure waste.
+        if self.config.effects.animation_speed >= 1.0 {
+            return;
+        }
         let corner_clip = self.render.corner_clip_shader.clone();
         let flatten_scale = self.resize_bake_scale(window, id, capture.pixels.geometry.size);
         let Some(mut backend) = self.backend.take() else {
@@ -501,8 +506,13 @@ impl DriftWm {
             capture.chrome,
         );
         self.backend = Some(backend);
-        if let Some(crossfade) = crossfade {
-            self.resize_crossfades.insert(id, crossfade);
+        match crossfade {
+            Some(crossfade) => {
+                self.resize_crossfades.insert(id, crossfade);
+            }
+            // The resize still animates, just without the old content fading over
+            // it — a degrade the user might notice and the log otherwise wouldn't.
+            None => tracing::warn!("resize crossfade bake failed; animating without it"),
         }
     }
 
