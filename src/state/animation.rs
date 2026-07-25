@@ -136,6 +136,22 @@ impl DriftWm {
         self.window_animations.start_open(id);
     }
 
+    /// Drop everything staged for `window`'s animation — the entry itself and
+    /// both halves of its resize crossfade — leaving it drawn at its live
+    /// geometry, with no freeze, no leg and nothing fading over it.
+    ///
+    /// This is how an action makes a geometry change instant: apply the change,
+    /// then take down what it armed. A change that lands whole in one frame has
+    /// nothing for a leg to travel over — it would only chase a scene the
+    /// camera, or the window's output, has already left.
+    pub(crate) fn cancel_window_animation(&mut self, window: &Window) {
+        let Some(id) = self.stage.id_of(window) else {
+            return;
+        };
+        self.window_animations.remove(id);
+        self.drop_resize_crossfade(id);
+    }
+
     /// Shared start path for every geometry chase: resolve the id, honor the
     /// interactive-grab guard, instant-complete (skip) when the seed rect
     /// intersects no drawable output, else (re)start the chase. `replace_visual`

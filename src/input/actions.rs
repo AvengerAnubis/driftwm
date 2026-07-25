@@ -315,7 +315,12 @@ impl DriftWm {
                             // Set camera/zoom directly — enter_fullscreen locks the viewport
                             self.set_camera(ret.camera);
                             self.set_zoom(ret.zoom);
-                            self.enter_fullscreen(ret.fullscreen_window.as_ref().unwrap(), None);
+                            let window = ret.fullscreen_window.as_ref().unwrap();
+                            self.enter_fullscreen(window, None);
+                            // The camera arrived in one frame, so the window
+                            // does too, instead of growing into a viewport it
+                            // is already filling.
+                            self.cancel_window_animation(window);
                         } else {
                             let vc = self.usable_center_screen();
                             self.set_zoom_animation_anchor(
@@ -341,9 +346,14 @@ impl DriftWm {
                     self.set_overview_return(None);
                     let vc = self.usable_center_screen();
                     let home = Point::from((-vc.x, -vc.y));
-                    if was_fullscreen.is_some() {
+                    if let Some(window) = &was_fullscreen {
                         // Snap instantly — matches the instant return path and
                         // avoids animation warps that misplace the cursor.
+                        // Whatever exited fullscreen to get here also armed a
+                        // leg back toward the view this snap is leaving, so
+                        // cancel it and let the window come along instead of
+                        // shrinking into a stale viewport.
+                        self.cancel_window_animation(window);
                         self.set_camera(home);
                         self.set_zoom(1.0);
                         self.update_output_from_camera();
@@ -555,6 +565,10 @@ impl DriftWm {
                         // (restoring its camera/zoom and any suspended pin) and
                         // sets focus itself.
                         self.enter_fullscreen(window, Some(target_output));
+                        // The window is fullscreen on both sides of this, so it
+                        // lands at the target's size rather than replaying an
+                        // entry out of a windowed rect it never returned to.
+                        self.cancel_window_animation(window);
                         return;
                     }
                     if self.is_pinned(window) {
@@ -708,10 +722,7 @@ impl DriftWm {
         // would keep a stale-space visual, so drop it. A recenter owed from a
         // preceding fullscreen exit goes too — it would re-place the window after
         // the pin decided where it lives.
-        if let Some(id) = self.stage.id_of(&window) {
-            self.window_animations.remove(id);
-            self.drop_resize_crossfade(id);
-        }
+        self.cancel_window_animation(&window);
         if let Some(surface) = window.wl_surface() {
             self.pending_recenter.remove(&surface.id());
         }
