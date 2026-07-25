@@ -27,6 +27,7 @@ use driftwm::stage::ElementId;
 use smithay::desktop::Window;
 use wayland_client::protocol::wl_surface::WlSurface as ClientSurface;
 
+use crate::state::window_animation::AnimSpace;
 use crate::state::{StageWindow, SuspendedId};
 
 use super::client::ClientId;
@@ -3654,6 +3655,55 @@ fn a_follower_releases_at_the_degrade_deadline_with_the_entry_it_waits_on() {
     );
 }
 
+/// A follower that is *also* frozen on a resize of its own runs the two budgets
+/// concurrently rather than end to end. Its own freeze anchors on the first tick
+/// that reaches it, ahead of the wait, so it degrades alongside the entry it
+/// waits on instead of starting a fresh budget once that one lets go — twice the
+/// freeze, motionless, with its capture and its parked view held for all of it.
+#[test]
+fn a_frozen_follower_runs_both_budgets_concurrently() {
+    let mut f = Fixture::new();
+    let ParkedFollower {
+        peid,
+        feid,
+        follower,
+        seed,
+        ..
+    } = parked_follower(&mut f);
+
+    // The follower acquires a resize of its own (which drops the wait), and is
+    // then pushed by the primary's, which parks it again on top of its freeze.
+    let committed = follower.geometry().size;
+    f.state().animate_window_geometry(
+        &follower,
+        Size::from((committed.w + 300, committed.h + 300)),
+        None,
+    );
+    assert!(
+        f.state().window_animations.start_held(feid),
+        "precondition: the follower froze on its own resize"
+    );
+    f.state()
+        .animate_window_move_from(&follower, seed, Some(peid));
+    assert!(
+        f.state().window_animations.start_held(feid),
+        "precondition: a position-only push leaves that freeze in place"
+    );
+
+    let base = Instant::now();
+    f.state().tick_window_animations_at(TICK, base);
+    let past = base + PAST_HOLD;
+    f.state().tick_window_animations_at(TICK, past);
+    assert!(
+        !f.state().window_animations.start_held(peid),
+        "the primary's budget expired"
+    );
+    assert!(
+        !f.state().window_animations.start_held(feid),
+        "and the follower's ran alongside it, rather than starting only now"
+    );
+}
+
 /// A follower named against an entry that never freezes (a same-size request,
 /// which carries nothing worth waiting for) advances on the very first tick.
 #[test]
@@ -4118,7 +4168,7 @@ fn no_entry_starts_on_a_stand_in_under_an_interactive_grab() {
 #[test]
 fn pinning_at_zoom_half_grows_from_the_pre_toggle_rect_to_the_pin_site() {
     let mut f = Fixture::new();
-    f.add_output(1, (1920, 1080));
+    let output = f.add_output(1, (1920, 1080));
     let id = f.add_client();
     map_window(&mut f, id, "a", (400, 300));
     let window = window_by_app_id(&mut f, "a").unwrap();
@@ -4159,6 +4209,14 @@ fn pinning_at_zoom_half_grows_from_the_pre_toggle_rect_to_the_pin_site() {
         (first_frame.loc, first_frame.size),
         (pre_toggle.loc, pre_toggle.size),
         "the first frame after pinning draws exactly the pre-toggle on-screen rect"
+    );
+    // The numbers above are identical in either space at this instant, so the
+    // rect alone would pass with the seed planted in the wrong one and every
+    // later frame drawn through the camera transform instead of the pin's.
+    assert_eq!(
+        f.state().window_animations.geometry_space(eid),
+        Some(AnimSpace::Screen(output.name())),
+        "the pinned chase runs in its output's screen space"
     );
 
     tick_until_settled(&mut f);
@@ -4221,6 +4279,11 @@ fn unpinning_at_zoom_half_shrinks_from_the_pin_site_to_the_canvas_rect() {
         (first_frame.loc, first_frame.size),
         (pre_toggle.loc, pre_toggle.size),
         "the first frame after unpinning draws the pre-toggle rect in canvas space"
+    );
+    assert_eq!(
+        f.state().window_animations.geometry_space(eid),
+        Some(AnimSpace::Canvas),
+        "the unpinned chase runs through the camera again, not the pin's screen space"
     );
 
     tick_until_settled(&mut f);

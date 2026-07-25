@@ -588,6 +588,7 @@ impl DriftWm {
         // next tick — one stale frame of a slide that has nothing left to slide.
         if let Some(eid) = self.stage.id_of(&element) {
             self.window_animations.remove(eid);
+            self.drop_resize_crossfade(eid);
         }
 
         self.stage.remove(&element);

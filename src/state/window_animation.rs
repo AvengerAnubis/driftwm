@@ -399,9 +399,6 @@ impl WindowAnimations {
                 // and it brings its own view policy — the parked move belongs to
                 // the one it just superseded.
                 *pending_view = None;
-                // A member that acquires its own resize stops waiting for
-                // anyone; it is now a window others can be pushed by.
-                *entry_waits_for = None;
                 // An open fade deliberately survives this: fullscreening a
                 // window and toggling it back off before the client acks
                 // retargets the same entry, and dropping the fade there would
@@ -472,6 +469,19 @@ impl WindowAnimations {
                 kind: AnimationKind::Open { progress }
             }) if *progress == 0.0
         )
+    }
+
+    /// Stop `id` waiting to be pushed by anyone. Called for a window that has
+    /// acquired an action of its own, judged on what its caller asked for
+    /// rather than on the request that survives the visible-resize threshold —
+    /// a request too small to freeze for is still this window's own.
+    pub fn clear_waits_for(&mut self, id: ElementId) {
+        if let Some(WindowAnimation {
+            kind: AnimationKind::Geometry { waits_for, .. },
+        }) = self.animations.get_mut(&id)
+        {
+            *waits_for = None;
+        }
     }
 
     /// Whether `id`'s geometry entry is playing an open fade.
@@ -632,11 +642,13 @@ impl WindowAnimations {
     /// and answering otherwise would mark its output for redraw every frame of
     /// a freeze the primary marks only its own output for.
     ///
-    /// The wait is resolved exactly one level deep, deliberately not
-    /// recursively: an entry can only be waited on if it freezes, only the
-    /// request-carrying start path freezes, and that path clears its own
-    /// `waits_for` — so waiters and waited-on are disjoint sets and no cycle is
-    /// constructible. Recursing would turn any future break of that into a hang.
+    /// The wait is resolved exactly one hop, deliberately not recursively —
+    /// and that, rather than any property of the entries, is what makes this
+    /// terminate. Chains are constructible: a position-only retarget can name a
+    /// primary on an entry that is itself frozen and waiting, so following
+    /// `waits_for` transitively would be a hang waiting for a cycle to be built.
+    /// One hop is also all the answer is worth: an entry two removes away is
+    /// somebody else's lockstep, not this one's.
     pub fn frozen_at(&self, id: ElementId, now: Instant) -> bool {
         let Some((start_hold, waits_for)) = self.freeze_state(id) else {
             return false;
@@ -917,6 +929,18 @@ impl WindowAnimations {
                 if !eligible {
                     return false;
                 }
+                // Frozen: nothing advances until the client redraws (handled in
+                // `on_window_commit`) or the budget runs out, which degrades to
+                // animating with capped stale content. The deadline anchors on
+                // the first tick that reaches it — ahead of the wait below, so
+                // an entry that is both frozen on its own resize and following
+                // another runs the two budgets concurrently instead of end to
+                // end (twice the freeze, motionless, with its capture and its
+                // parked view held for all of it).
+                if *start_hold == StartHold::Armed {
+                    *start_hold = StartHold::Until(now + MAX_START_HOLD);
+                }
+                let frozen = start_hold.holds_at(now);
                 // Parked on the seed while the entry pushing this one is frozen,
                 // so the two start on the same tick and travel in lockstep.
                 if waiting {
@@ -925,18 +949,11 @@ impl WindowAnimations {
                 // The wait is dropped the moment it stops resolving — released,
                 // degraded, never armed, or the entry gone — and never retaken.
                 *waits_for = None;
-                // Frozen: nothing advances until the client redraws (handled in
-                // `on_window_commit`) or the budget runs out, which degrades to
-                // animating with capped stale content.
-                match *start_hold {
-                    StartHold::Armed => {
-                        *start_hold = StartHold::Until(now + MAX_START_HOLD);
-                        return true;
-                    }
-                    StartHold::Until(deadline) if now < deadline => return true,
-                    StartHold::Until(_) => *start_hold = StartHold::Off,
-                    StartHold::Off => {}
+                if frozen {
+                    return true;
                 }
+                // Past the deadline (or never held): the leg runs from here.
+                *start_hold = StartHold::Off;
                 // Pinned at zero for the whole freeze by the returns above, so a
                 // frozen window draws nothing at all rather than fading in over
                 // the stale picture it was configured out of.

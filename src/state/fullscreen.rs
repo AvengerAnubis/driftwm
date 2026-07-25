@@ -255,7 +255,7 @@ impl DriftWm {
             // Where this chase lands, for a window fullscreened in the same
             // commit that mapped it: it fades in already fullscreen rather than
             // showing the placement rect it was never meant to have.
-            Some(Rectangle::new(camera_i32.to_f64(), viewport_size.to_f64())),
+            Some(camera_i32),
         );
 
         self.raise_window(window, false);

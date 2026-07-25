@@ -113,16 +113,9 @@ impl DriftWm {
             .id_of(window)
             .and_then(|id| self.window_animations.generation_of(id));
 
-        // The fit rect is passed in because the stage still holds the pre-fit
-        // one — the map below is what writes it.
-        self.animate_window_geometry(
-            window,
-            target_size,
-            Some(smithay::utils::Rectangle::new(
-                new_loc.to_f64(),
-                target_size.to_f64(),
-            )),
-        );
+        // The fit position is passed in because the stage still holds the
+        // pre-fit one — the map below is what writes it.
+        self.animate_window_geometry(window, target_size, Some(new_loc));
         window.enter_fit_configure(target_size);
         self.map_window(window.clone(), new_loc, false);
         // After the map — set_fit needs the window's stage entry, which the

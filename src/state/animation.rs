@@ -152,7 +152,7 @@ impl DriftWm {
     /// forces the seed onto an existing entry — the seeded (fullscreen) callers
     /// convert coordinate frames, so keeping the old visual would jump at zoom≠1.
     ///
-    /// `final_rect` is where this chase ends up, and only the caller knows it:
+    /// `final_loc` is where this chase ends up, and only the caller knows it:
     /// a fullscreen enter maps before arming while a fit arms before mapping, so
     /// deriving it from the stage would be right for one and the placement rect
     /// for the other. Supplied only by the two callers that can run inside a
@@ -168,7 +168,7 @@ impl DriftWm {
         replace_visual: bool,
         content_policy: ContentPolicy,
         waits_for: Option<ElementId>,
-        final_rect: Option<Rectangle<f64, Logical>>,
+        final_loc: Option<Point<i32, Logical>>,
     ) {
         let Some(id) = self.stage.id_of(element) else {
             return;
@@ -176,6 +176,11 @@ impl DriftWm {
         if self.element_under_interactive_grab(element) {
             return;
         }
+        // A window that acquires an action of its own stops waiting to be pushed
+        // by anyone else's. Read from what the caller asked for, before the
+        // threshold below can drop it: a resize too small to freeze for is still
+        // this window's own action.
+        let carries_request = requested_size.is_some();
         let committed = element.geometry().size;
         // A request the window cannot visibly answer is no request at all: drop
         // it here, once, so the freeze `start_geometry` arms and the capture
@@ -194,9 +199,9 @@ impl DriftWm {
         // (or already fitted) instead of popping in at the placement rect and
         // then sliding. The size comes from the surviving request so the seed is
         // exactly what the tick converges to.
-        let (seed, open_fade) = match final_rect {
-            Some(rect) if self.window_animations.open_unshown(id) => (
-                Rectangle::new(rect.loc, requested_size.unwrap_or(committed).to_f64()),
+        let (seed, open_fade) = match final_loc {
+            Some(loc) if self.window_animations.open_unshown(id) => (
+                Rectangle::new(loc.to_f64(), requested_size.unwrap_or(committed).to_f64()),
                 Some(0.0),
             ),
             _ => (seed, None),
@@ -250,6 +255,9 @@ impl DriftWm {
                 _ => self.is_pinned(element),
             },
         };
+        if carries_request {
+            self.window_animations.clear_waits_for(id);
+        }
         self.window_animations.start_geometry(
             id,
             seed,
@@ -292,15 +300,22 @@ impl DriftWm {
         if let Some(id) = id
             && let Some(visual) = self.window_animations.geometry_visual_rect(id)
         {
-            return match self.window_animations.geometry_space(id)? {
-                // A pinned entry already chases in screen px at zoom 1.
-                AnimSpace::Screen(_) => Some(visual),
-                AnimSpace::Canvas => Some(canvas_to_screen(visual)),
-            };
+            match self.window_animations.geometry_space(id)? {
+                // A pinned entry already chases in screen px at zoom 1 — but
+                // only on the output it is pinned to. Another output's entry
+                // says nothing about this one, so fall through to the live
+                // answer rather than hand back a neighbour's coordinates.
+                AnimSpace::Screen(name) if name == output.name() => return Some(visual),
+                AnimSpace::Screen(_) => {}
+                AnimSpace::Canvas => return Some(canvas_to_screen(visual)),
+            }
         }
         let size = window.geometry().size.to_f64();
         match self.stage.pin_of(window) {
-            Some(site) => Some(Rectangle::new(site.screen_pos.to_f64(), size)),
+            Some(site) if site.output == output.name() => {
+                Some(Rectangle::new(site.screen_pos.to_f64(), size))
+            }
+            Some(_) => None,
             None => {
                 let loc = self.stage.position_of(window)?;
                 Some(canvas_to_screen(Rectangle::new(loc.to_f64(), size)))
@@ -322,14 +337,14 @@ impl DriftWm {
 
     /// Canvas geometry animation toward a size configure (fill/fit). Must be
     /// called while the stage still holds the pre-action rect; the chase target
-    /// is then the new live stage position. `final_rect` is that post-action
-    /// rect, for a caller that can run inside a window's map commit (see
+    /// is then the new live stage position. `final_loc` is that post-action
+    /// position, for a caller that can run inside a window's map commit (see
     /// [`Self::start_geometry_entry`]) — the stage does not hold it yet.
     pub(crate) fn animate_window_geometry(
         &mut self,
         window: &Window,
         to_size: Size<i32, Logical>,
-        final_rect: Option<Rectangle<f64, Logical>>,
+        final_loc: Option<Point<i32, Logical>>,
     ) {
         let Some(id) = self.stage.id_of(window) else {
             return;
@@ -345,13 +360,13 @@ impl DriftWm {
             false,
             ContentPolicy::Cap,
             None,
-            final_rect,
+            final_loc,
         );
     }
 
     /// Geometry animation with an explicit, frame-converted seed (fullscreen
     /// enter/exit cross the locked-viewport ↔ camera ↔ pin-screen boundary).
-    /// `final_rect` as in [`Self::start_geometry_entry`].
+    /// `final_loc` as in [`Self::start_geometry_entry`].
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn begin_geometry_animation_seeded(
         &mut self,
@@ -361,7 +376,7 @@ impl DriftWm {
         requested_size: Option<Size<i32, Logical>>,
         role: GeometryRole,
         content_policy: ContentPolicy,
-        final_rect: Option<Rectangle<f64, Logical>>,
+        final_loc: Option<Point<i32, Logical>>,
     ) {
         self.start_geometry_entry(
             &StageWindow::Client(window.clone()),
@@ -372,7 +387,7 @@ impl DriftWm {
             true,
             content_policy,
             None,
-            final_rect,
+            final_loc,
         );
     }
 
