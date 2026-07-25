@@ -18,9 +18,10 @@ const TARGET_MOVED_EPSILON: f64 = 0.5;
 /// no longer than this after first reaching it.
 pub(crate) const MAX_ENDPOINT_HOLD: Duration = Duration::from_millis(500);
 /// How long a compositor-initiated resize waits for the client's first redraw
-/// before giving up and animating with stale content. Same bound as the endpoint
-/// hold: a client that misses one misses both.
-pub(crate) const MAX_START_HOLD: Duration = MAX_ENDPOINT_HOLD;
+/// before giving up and animating with stale content. Deliberately shorter than
+/// the endpoint hold, which the eye reads as a settled window lingering; this one
+/// is a keystroke answered by nothing moving at all.
+pub(crate) const MAX_START_HOLD: Duration = Duration::from_millis(300);
 
 /// The freeze that precedes a compositor-initiated resize leg. Nothing moves
 /// until the client delivers the new size, so the leg can play with real content

@@ -17,6 +17,15 @@ use smithay::output::Output;
 use super::window_animation::{AnimSpace, AnimatedVisual, ContentPolicy, GeometryRole};
 use super::{DriftWm, FocusTarget, output_state};
 
+/// A compositor resize smaller than this (per axis) carries no request at all.
+/// It is not worth freezing the window, stashing its content, flattening that on
+/// the GPU and crossfading it — and worse, a client that *cannot* honour a small
+/// request (cell-quantized terminals, aspect-locked players, fixed-size dialogs)
+/// answers by committing its old size, which is indistinguishable from not
+/// answering, so the freeze would burn its whole budget over a resize nobody can
+/// see. The geometry leg still runs; it just has nothing to wait for.
+const MIN_ANIMATED_RESIZE: i32 = 10;
+
 impl DriftWm {
     /// Frame-rate independent lerp factor for smooth animations.
     /// Returns how much of the remaining distance to cover this frame.
@@ -138,10 +147,15 @@ impl DriftWm {
             return;
         }
         let committed = window.geometry().size;
-        // A request the window already satisfies is no request at all: drop it
-        // here, once, so the freeze `start_geometry` arms and the capture dropped
-        // below can never disagree about whether a resize is starting.
-        let requested_size = requested_size.filter(|size| *size != committed);
+        // A request the window cannot visibly answer is no request at all: drop
+        // it here, once, so the freeze `start_geometry` arms and the capture
+        // dropped below can never disagree about whether a resize is starting.
+        let requested_size = requested_size.filter(|size| {
+            (size.w - committed.w)
+                .abs()
+                .max((size.h - committed.h).abs())
+                > MIN_ANIMATED_RESIZE
+        });
         // A brand new resize supersedes the last one: its captured content is for
         // a request nobody waits on any more, and a live overlay belongs to a leg
         // that no longer exists.

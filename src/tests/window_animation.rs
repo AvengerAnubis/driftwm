@@ -1551,9 +1551,9 @@ fn repeated_nudges_never_extend_a_freeze() {
         "frozen by the fit"
     );
 
-    // Key repeat: a nudge every 100ms as the clock walks toward the deadline.
+    // Key repeat: a nudge every 50ms as the clock walks toward the deadline.
     for step in 1..=4 {
-        let now = base + Duration::from_millis(100 * step);
+        let now = base + Duration::from_millis(50 * step);
         let from = f.state().stage.position_of(&window).unwrap();
         f.state()
             .map_window(window.clone(), Point::from((from.x + 40, from.y)), false);
@@ -1565,7 +1565,7 @@ fn repeated_nudges_never_extend_a_freeze() {
         );
     }
 
-    // 400ms of nudging bought no extra budget.
+    // 200ms of nudging bought no extra budget.
     let past = base + crate::state::window_animation::MAX_START_HOLD + TICK;
     f.state().tick_window_animations_at(TICK, past);
     assert!(
@@ -2075,6 +2075,43 @@ fn a_fit_during_a_fullscreen_exit_freeze_keeps_the_frozen_chrome() {
         "only the client's redraw changes it"
     );
     tick_until_settled(&mut f);
+}
+
+/// A resize the client may not even be able to honour is not worth a freeze, a
+/// stash, a GPU flatten and a crossfade. Worse, a client that *cannot* take a
+/// few-pixel request answers by committing the size it already had, which no arm
+/// can tell from silence — so the freeze would burn its whole budget over a
+/// resize nobody can see.
+#[test]
+fn a_sub_threshold_resize_carries_no_request() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    let committed = window.geometry().size;
+    f.state()
+        .animate_window_geometry(&window, Size::from((committed.w + 10, committed.h + 3)));
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "a resize this small has nothing worth waiting for"
+    );
+    // No budget was opened, so the leg converges on its own — with a freeze armed
+    // this spins until the deadline instead.
+    tick_until_settled(&mut f);
+
+    f.state()
+        .animate_window_geometry(&window, Size::from((committed.w + 11, committed.h)));
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "one pixel more is a real resize, and freezes like one"
+    );
 }
 
 /// The mirror: an exit armed while the *enter* is still frozen must not strip the
