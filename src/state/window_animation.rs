@@ -254,6 +254,14 @@ enum AnimationKind {
         /// How the picture the freeze holds on screen was drawn — see
         /// [`FrozenPicture`].
         picture: FrozenPicture,
+        /// How far the chrome has come from what `picture` wore toward what the
+        /// live window wears. Its own accumulator for the same reason
+        /// `open_fade` is one, and read the same way: it belongs to the picture,
+        /// so it is reset only where that picture is restated. Riding `progress`
+        /// instead re-fades chrome that has already gone every time a retarget
+        /// or a moved target re-seeds the leg — a nudge mid-shrink, a cluster
+        /// shift, the endpoint hold expiring.
+        chrome_travelled: f64,
         /// Bumped by every request-carrying (re)start. Stamps the captured old
         /// content so a stale capture can never be paired with a newer leg.
         generation: u64,
@@ -362,6 +370,7 @@ impl WindowAnimations {
                     content_policy: entry_policy,
                     start_hold,
                     picture: entry_picture,
+                    chrome_travelled,
                     generation: entry_generation,
                     pending_view,
                     waits_for: entry_waits_for,
@@ -428,6 +437,7 @@ impl WindowAnimations {
                 // *covers* is a separate question, answered above.
                 if !start_hold.is_held() {
                     *entry_picture = picture;
+                    *chrome_travelled = 0.0;
                 }
                 // A brand new resize: freeze again from wherever the visual is,
                 // and invalidate any content captured for the previous request.
@@ -466,6 +476,7 @@ impl WindowAnimations {
                         StartHold::Off
                     },
                     picture,
+                    chrome_travelled: 0.0,
                     generation,
                     role,
                     pending_view: None,
@@ -592,8 +603,8 @@ impl WindowAnimations {
         }
     }
 
-    /// The chrome opacity `id`'s picture started from, and how far its leg has
-    /// travelled toward whatever the *live* window wears. `None` when no geometry
+    /// The chrome opacity `id`'s picture started from, and how far the hand-over
+    /// to whatever the *live* window wears has come. `None` when no geometry
     /// entry governs it and the live answer stands alone.
     ///
     /// Interpolating avoids a chrome pop: without it, bar, border and shadow
@@ -606,9 +617,8 @@ impl WindowAnimations {
         let Some(WindowAnimation {
             kind:
                 AnimationKind::Geometry {
-                    start_hold,
                     picture,
-                    progress,
+                    chrome_travelled,
                     ..
                 },
         }) = self.animations.get(&id)
@@ -629,11 +639,7 @@ impl WindowAnimations {
         } else {
             1.0
         };
-        let travelled = if start_hold.is_held() {
-            0.0
-        } else {
-            progress.clamp(0.0, 1.0) as f32
-        };
+        let travelled = chrome_travelled.clamp(0.0, 1.0) as f32;
         Some((from, travelled))
     }
 
@@ -970,6 +976,7 @@ impl WindowAnimations {
                 start_hold,
                 waits_for,
                 open_fade,
+                chrome_travelled,
                 ..
             } => {
                 if !eligible {
@@ -1010,6 +1017,10 @@ impl WindowAnimations {
                 }
                 // Past the deadline (or never held): the leg runs from here.
                 *start_hold = StartHold::Off;
+                // The chrome travels with the leg but keeps its own clock: it is
+                // handing one picture over to another, and neither a retarget nor
+                // a moved target changes which two those are.
+                *chrome_travelled += (1.0 - *chrome_travelled) * frame_factor;
                 let target = Rectangle::new(
                     target_loc,
                     requested_size.map(|s| s.to_f64()).unwrap_or(live_size),

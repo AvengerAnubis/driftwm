@@ -2151,6 +2151,102 @@ fn a_frozen_fullscreen_exit_keeps_its_fullscreen_chrome() {
     );
 }
 
+/// The chrome hand-over keeps its own clock. A position-only retarget starts a
+/// fresh leg — a full-duration slide from wherever the window is — while
+/// deliberately leaving the picture that leg started from alone, so chrome that
+/// is already half back must not dip and fade in a second time.
+#[test]
+fn a_nudge_mid_shrink_does_not_re_fade_the_chrome() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (800, 600));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    reset_view(&mut f);
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    tick_until_settled(&mut f);
+
+    f.state().exit_fullscreen_on(&output);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    f.state().tick_window_animations(TICK);
+    let before = chrome_alpha(&mut f, &window);
+    assert!(
+        before > 0.0 && before < 1.0,
+        "precondition: the shrink is partway through bringing the chrome back \
+         ({before})"
+    );
+
+    let from = f.state().stage.position_of(&window).unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((from.x + 100, from.y)), false);
+    f.state().animate_window_move_from(&window, from, None);
+    let after = chrome_alpha(&mut f, &window);
+    assert!(
+        after >= before,
+        "the nudge is the same picture moving, not a second hand-over: the \
+         chrome fell back from {before} to {after}"
+    );
+
+    f.state().tick_window_animations(TICK);
+    let next = chrome_alpha(&mut f, &window);
+    assert!(next >= after, "and it keeps arriving ({after} -> {next})");
+    tick_until_settled(&mut f);
+    assert_eq!(chrome_alpha(&mut f, &window), 1.0);
+}
+
+/// The endpoint hold expiring re-seeds the leg toward the live size — with no
+/// user input at all, on a client that simply never redrew. The picture the
+/// hand-over started from has not changed, so the windowed chrome must not
+/// reappear over a window that has already grown to fill the output.
+#[test]
+fn an_expired_endpoint_hold_does_not_bring_the_chrome_back() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (400, 300));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    let base = Instant::now();
+    f.state().tick_window_animations_at(TICK, base);
+
+    // Nothing acks: the freeze degrades and the leg runs to the fullscreen
+    // endpoint on stale content, with the request still outstanding.
+    let degraded = base + Duration::from_millis(400);
+    for _ in 0..40 {
+        f.state().tick_window_animations_at(TICK, degraded);
+    }
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "the start budget expired"
+    );
+    assert!(
+        f.state().chrome_fullscreen(&window),
+        "the leg reached the output bounds and the chrome went with it"
+    );
+
+    // The endpoint budget expires in turn, dropping the request and re-seeding
+    // the leg back toward the size the client never left.
+    let past = degraded + PAST_HOLD;
+    for _ in 0..3 {
+        f.state().tick_window_animations_at(TICK, past);
+        assert!(
+            f.state().chrome_fullscreen(&window),
+            "a re-seeded leg is not a new picture: chrome came back at {}",
+            chrome_alpha(&mut f, &window)
+        );
+    }
+
+    f.state().exit_fullscreen_on(&output);
+}
+
 /// A *resize* landing on a frozen exit is a new request, so it re-freezes and
 /// re-arms — but the picture on screen is still the fullscreen one it froze on,
 /// so the chrome stamp has to survive. Restating it from the fit's role would pop
