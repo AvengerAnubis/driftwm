@@ -86,6 +86,10 @@ impl DriftWm {
         if !self.canvas_rect_drawable(Rectangle::new(loc, StageElement::size(window))) {
             return;
         }
+        // An open entry overwrites whatever the id was doing — a hide-to-tray app
+        // can remap mid-resize — so the crossfade halves of the geometry entry it
+        // replaces go with it, rather than fading over the opening window.
+        self.drop_resize_crossfade(id);
         self.window_animations.start_open(id);
     }
 
@@ -119,11 +123,14 @@ impl DriftWm {
             return;
         }
         let committed = window.geometry().size;
+        // A request the window already satisfies is no request at all: drop it
+        // here, once, so the freeze `start_geometry` arms and the capture dropped
+        // below can never disagree about whether a resize is starting.
+        let requested_size = requested_size.filter(|size| *size != committed);
         // A brand new resize supersedes the last one: its captured content is for
         // a request nobody waits on any more, and a live overlay belongs to a leg
-        // that no longer exists. Same filter `start_geometry` applies, so a
-        // request the window already satisfies leaves an in-flight fade alone.
-        if requested_size.is_some_and(|size| size != committed) {
+        // that no longer exists.
+        if requested_size.is_some() {
             self.drop_resize_crossfade(id);
         }
         self.window_animations.start_geometry(

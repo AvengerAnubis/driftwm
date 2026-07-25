@@ -1470,9 +1470,9 @@ fn the_hold_deadline_release_stays_capped() {
 }
 
 /// A position-only retarget (a nudge, a cluster shift) landing on a frozen resize
-/// keeps the freeze — it is the same wait, just aimed somewhere else — and
-/// re-anchors the budget from the user's latest action. It must not cancel the
-/// wait and start animating with content the client has not delivered.
+/// keeps the freeze — it is the same wait, just aimed somewhere else. It must not
+/// cancel the wait and start animating with content the client has not
+/// delivered.
 #[test]
 fn a_position_only_retarget_keeps_a_frozen_resize_frozen() {
     let mut f = Fixture::new();
@@ -1513,13 +1513,60 @@ fn a_position_only_retarget_keeps_a_frozen_resize_frozen() {
         "and does not invalidate the resize — no new request was made"
     );
 
-    // The budget was re-anchored: ticking to just short of the ORIGINAL deadline
-    // still finds it frozen.
-    let near_original = base + crate::state::window_animation::MAX_START_HOLD + TICK;
-    f.state().tick_window_animations_at(TICK, near_original);
+    // It is still the wait it was, so it still ends when that wait's budget does.
+    let past = base + crate::state::window_animation::MAX_START_HOLD + TICK;
+    f.state().tick_window_animations_at(TICK, past);
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "and the budget it was armed with still ends it"
+    );
+}
+
+/// A moving freeze keeps the budget it started with. Re-arming it on every
+/// position-only retarget would let a held nudge key refresh the deadline faster
+/// than it expires and leave the window frozen for as long as the key is down.
+#[test]
+fn repeated_nudges_never_extend_a_freeze() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.state().fit_window(&window);
+    // The first tick anchors the deadline at `base`.
+    let base = Instant::now();
+    f.state().tick_window_animations_at(TICK, base);
     assert!(
         f.state().window_animations.start_held(eid),
-        "the deadline re-anchored at the nudge, so the original one has no effect"
+        "frozen by the fit"
+    );
+
+    // Key repeat: a nudge every 100ms as the clock walks toward the deadline.
+    for step in 1..=4 {
+        let now = base + Duration::from_millis(100 * step);
+        let from = f.state().stage.position_of(&window).unwrap();
+        f.state()
+            .map_window(window.clone(), Point::from((from.x + 40, from.y)), false);
+        f.state().animate_window_move_from(&window, from);
+        f.state().tick_window_animations_at(TICK, now);
+        assert!(
+            f.state().window_animations.start_held(eid),
+            "still frozen before the original deadline (step {step})"
+        );
+    }
+
+    // 400ms of nudging bought no extra budget.
+    let past = base + crate::state::window_animation::MAX_START_HOLD + TICK;
+    f.state().tick_window_animations_at(TICK, past);
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "the freeze expired on the deadline it was armed with"
     );
 }
 
@@ -2010,6 +2057,44 @@ fn conversion_mid_freeze_drops_the_crossfade_with_the_entry() {
     if let Some(sid) = sid {
         f.state().dismiss_suspended(sid);
     }
+}
+
+/// A window that remaps mid-freeze (a hide-to-tray reshow) gets an open entry
+/// written straight over its geometry entry — there is no remove site to hang
+/// the cleanup on — so the crossfade halves have to go at the open itself.
+/// Otherwise the old picture keeps fading over a window that is scaling in.
+#[test]
+fn an_open_entry_over_a_frozen_resize_drops_the_crossfade() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.state().fit_window(&window);
+    f.state().tick_window_animations_at(TICK, Instant::now());
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the fit froze the window"
+    );
+    seed_resize_capture(&mut f, eid);
+
+    f.state().start_window_open_animation(&window);
+    assert!(
+        !f.state().window_animations.start_held(eid),
+        "the open entry replaced the frozen chase"
+    );
+    assert_eq!(
+        f.state().debug_counters()["resize_captures"],
+        0,
+        "and its captured content went with it"
+    );
+    tick_until_settled(&mut f);
 }
 
 /// Adoption holds a slot rather than requesting a resize, so it is never frozen —

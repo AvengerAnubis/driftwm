@@ -202,6 +202,10 @@ impl WindowAnimations {
     /// `replace_visual` caller (fullscreen enter/exit converts coordinate
     /// frames) or a change of chase space overwrites the visual with `seed`, or
     /// a canvas rect would linger where a screen rect belongs (and vice versa).
+    ///
+    /// `requested_size` is `Some` only for a resize the window has yet to make
+    /// — the caller drops a request the window already satisfies, so that one
+    /// decision also governs the render-side capture it discards.
     #[allow(clippy::too_many_arguments)]
     pub fn start_geometry(
         &mut self,
@@ -214,9 +218,6 @@ impl WindowAnimations {
         replace_visual: bool,
         content_policy: ContentPolicy,
     ) {
-        // A request that already equals the committed size must not ride to the
-        // hold deadline — resolve it immediately.
-        let requested_size = requested_size.filter(|sz| *sz != committed_size);
         if let Some(WindowAnimation {
             kind:
                 AnimationKind::Geometry {
@@ -249,11 +250,14 @@ impl WindowAnimations {
             *hold_deadline = None;
             *last_committed_size = committed_size;
             // A position-only retarget is the same hold, moving: it leaves the
-            // outstanding request, the buffer's staleness, and the content policy
-            // exactly as they were, so a nudged window mid-resize keeps holding
-            // (capped) and a nudged adopted window keeps filling its slot. Only a
-            // retarget that carries a size request restates them — a new request
-            // makes the buffer stale by definition and brings its own policy.
+            // outstanding request, the buffer's staleness, the content policy and
+            // the freeze's remaining budget exactly as they were, so a nudged
+            // window mid-resize keeps holding (capped) and a nudged adopted window
+            // keeps filling its slot. Re-arming the freeze instead would let a held
+            // nudge key refresh the deadline on every repeat and freeze the window
+            // indefinitely. Only a retarget that carries a size request restates
+            // them — a new request makes the buffer stale by definition and brings
+            // its own policy.
             if requested_size.is_some() {
                 *entry_request = requested_size;
                 *buffer_stale = true;
@@ -267,10 +271,6 @@ impl WindowAnimations {
                 } else {
                     StartHold::Off
                 };
-            } else if start_hold.is_held() {
-                // Still the same freeze, just moving — but re-anchor it, so the
-                // budget is measured from the user's latest action.
-                *start_hold = StartHold::Armed;
             }
             return;
         }
