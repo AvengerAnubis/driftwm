@@ -2349,6 +2349,46 @@ fn a_frozen_fullscreen_exit_still_covers_its_output() {
     tick_until_settled(&mut f);
 }
 
+/// Handing one output's fullscreen from one window to another arms both halves
+/// at once: the outgoing window's exit freezes on its fullscreen picture while
+/// the incoming one starts growing above it. The cull behind a covered output
+/// keeps a single window, so a covered report here would compose the entering
+/// window out of every frame of its own growth and pop it in when the freeze
+/// drops.
+#[test]
+fn a_fullscreen_entry_over_a_frozen_exit_leaves_the_output_uncovered() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let leaving = map_window(&mut f, id, "a", (800, 600));
+    let arriving = map_window(&mut f, id, "b", (800, 600));
+    let first = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    tick_until_settled(&mut f);
+
+    f.client(id).window(&leaving).set_fullscreen(None);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &leaving);
+    tick_until_settled(&mut f);
+    assert!(f.state().is_output_visually_fullscreen(&output));
+
+    f.client(id).window(&arriving).set_fullscreen(None);
+    f.double_roundtrip(id);
+    let leaving_id = element_id(&mut f, &first);
+    assert!(
+        f.state().window_animations.start_held(leaving_id),
+        "precondition: the displaced window's exit is frozen on its fullscreen \
+         picture, so it is claiming the output"
+    );
+    assert!(
+        !f.state().is_output_visually_fullscreen(&output),
+        "but the window taking over is still growing, and it is drawn above that \
+         picture"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+}
+
 /// A frozen fullscreen picture covers its output only while it is still drawn
 /// where it was frozen. Re-entering fullscreen inside the exit's freeze reseeds
 /// the rect that picture was drawn at, so the claim has to go with it —

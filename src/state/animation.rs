@@ -457,10 +457,15 @@ impl DriftWm {
     /// after the stage has already let it go — a waybar popping in over a
     /// motionless fullscreen frame is the same leak from the other side.
     pub(crate) fn is_output_visually_fullscreen(&self, output: &Output) -> bool {
-        if self.frozen_fullscreen_cover(output).is_some() {
-            return true;
+        // A growing entry beats a frozen exit cover, even though both can be in
+        // flight at once on one output: taking one window's fullscreen away and
+        // giving it to another arms both. The cull this report drives keeps a
+        // single window, so answering "covered" would compose the entering window
+        // — the one drawn above the frozen picture — out of its own growth.
+        if self.fullscreen_entry_on(output).is_some() {
+            return false;
         }
-        self.is_output_fullscreen(output) && self.fullscreen_entry_on(output).is_none()
+        self.frozen_fullscreen_cover(output).is_some() || self.is_output_fullscreen(output)
     }
 
     /// The frozen fullscreen picture still covering `output` — one held under the
