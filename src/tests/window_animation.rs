@@ -1208,6 +1208,17 @@ fn adoption_holds_the_adopted_rect_until_the_client_catches_up() {
         (held.size.w - 600.0).abs() <= 0.5,
         "still filling the slot ({held:?})"
     );
+
+    // And the content is actually stretched to fill it. A slot hold is the one
+    // case where a stale buffer must be magnified: capping it here renders the
+    // adopted window undersized at the slot's corner, the flicker this fixed.
+    let committed = adopted.geometry().size.to_f64();
+    let v = f.state().animated_visual(eid, pos.to_f64(), committed);
+    let (sx, sy) = crate::state::window_animation::content_scale(v.size, committed, v.cap_content);
+    assert!(
+        (sx - 600.0 / committed.w).abs() < 1e-6 && (sy - 400.0 / committed.h).abs() < 1e-6,
+        "the held slot stretches the stale buffer to fill it (got {sx:.2}x, {sy:.2}x)"
+    );
 }
 
 /// A fit, fill, or fullscreen grows the window's rect several times over before
@@ -1238,8 +1249,8 @@ fn a_growing_animation_never_magnifies_the_stale_buffer() {
     let loc = f.state().stage.position_of(&window).unwrap().to_f64();
     let v = f.state().animated_visual(eid, loc, committed);
     assert!(
-        v.content_stale,
-        "the client has not acked the fit size, so its buffer is stale"
+        v.cap_content,
+        "the client has not acked the fit size, so its stale buffer must be capped"
     );
     // The rect really has grown far past the buffer...
     assert!(
@@ -1248,8 +1259,7 @@ fn a_growing_animation_never_magnifies_the_stale_buffer() {
         v.size
     );
     // ...but the content drawn into it is never blown up.
-    let (sx, sy) =
-        crate::state::window_animation::content_scale(v.size, committed, v.content_stale);
+    let (sx, sy) = crate::state::window_animation::content_scale(v.size, committed, v.cap_content);
     assert!(
         sx <= 1.0 && sy <= 1.0,
         "stale content must not be magnified (got {sx:.2}x, {sy:.2}x)"
@@ -1294,4 +1304,46 @@ fn dismissing_a_stand_in_leaves_no_render_transient_headless() {
         counters["decorations"], 0,
         "the stand-in's chrome caches were evicted"
     );
+}
+
+/// The 500ms hold deadline drops the outstanding request, but no commit ever
+/// landed — the buffer is still stale. Staleness therefore has to outlive the
+/// request, or the release leg back to the live size renders uncapped and the
+/// window pops to several times its size before shrinking away.
+#[test]
+fn the_hold_deadline_release_stays_capped() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let _surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    // A fit the client never acks: reach the endpoint, then blow past the cap.
+    f.state().fit_window(&window);
+    let base = Instant::now();
+    for _ in 0..30 {
+        f.state().tick_window_animations_at(TICK, base);
+    }
+    let past = base + crate::state::window_animation::MAX_ENDPOINT_HOLD + TICK;
+
+    let committed = window.geometry().size.to_f64();
+    let loc = f.state().stage.position_of(&window).unwrap().to_f64();
+    for _ in 0..MAX_TICKS {
+        if !f.state().window_animations.is_active() {
+            break;
+        }
+        f.state().tick_window_animations_at(TICK, past);
+        let v = f.state().animated_visual(eid, loc, committed);
+        let (sx, sy) =
+            crate::state::window_animation::content_scale(v.size, committed, v.cap_content);
+        assert!(
+            sx <= 1.0 && sy <= 1.0,
+            "the release leg must stay capped — no commit ever landed (got {sx:.2}x)"
+        );
+    }
 }

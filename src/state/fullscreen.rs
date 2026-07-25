@@ -5,7 +5,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use super::window_animation::{AnimSpace, GeometryRole};
+use super::window_animation::{AnimSpace, ContentPolicy, GeometryRole};
 use super::{DriftWm, FocusTarget, PendingRecenter};
 use driftwm::window_ext::WindowExt;
 
@@ -249,6 +249,7 @@ impl DriftWm {
             AnimSpace::Canvas,
             Some(viewport_size),
             GeometryRole::FullscreenEntry,
+            ContentPolicy::Cap,
         );
 
         self.raise_window(window, false);
@@ -437,6 +438,7 @@ impl DriftWm {
                     space,
                     Some(entry.saved_size),
                     GeometryRole::Normal,
+                    ContentPolicy::Cap,
                 );
             }
         }

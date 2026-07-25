@@ -13,7 +13,7 @@ use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 
 use smithay::output::Output;
 
-use super::window_animation::{AnimSpace, AnimatedVisual, GeometryRole};
+use super::window_animation::{AnimSpace, AnimatedVisual, ContentPolicy, GeometryRole};
 use super::{DriftWm, FocusTarget, output_state};
 
 impl DriftWm {
@@ -93,6 +93,7 @@ impl DriftWm {
     /// intersects no drawable output, else (re)start the chase. `replace_visual`
     /// forces the seed onto an existing entry — the seeded (fullscreen) callers
     /// convert coordinate frames, so keeping the old visual would jump at zoom≠1.
+    #[allow(clippy::too_many_arguments)]
     fn start_geometry_entry(
         &mut self,
         window: &Window,
@@ -101,6 +102,7 @@ impl DriftWm {
         requested_size: Option<Size<i32, Logical>>,
         role: GeometryRole,
         replace_visual: bool,
+        content_policy: ContentPolicy,
     ) {
         let Some(id) = self.stage.id_of(window) else {
             return;
@@ -124,6 +126,7 @@ impl DriftWm {
             committed,
             role,
             replace_visual,
+            content_policy,
         );
     }
 
@@ -155,6 +158,7 @@ impl DriftWm {
             Some(to_size),
             GeometryRole::Normal,
             false,
+            ContentPolicy::Cap,
         );
     }
 
@@ -167,8 +171,17 @@ impl DriftWm {
         space: AnimSpace,
         requested_size: Option<Size<i32, Logical>>,
         role: GeometryRole,
+        content_policy: ContentPolicy,
     ) {
-        self.start_geometry_entry(window, seed, space, requested_size, role, true);
+        self.start_geometry_entry(
+            window,
+            seed,
+            space,
+            requested_size,
+            role,
+            true,
+            content_policy,
+        );
     }
 
     /// Position-only canvas animation from `from_loc` (nudge, cluster shift).
@@ -197,6 +210,7 @@ impl DriftWm {
             None,
             GeometryRole::Normal,
             false,
+            ContentPolicy::Cap,
         );
     }
 

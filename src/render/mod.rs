@@ -942,7 +942,7 @@ pub fn compose_frame(
                     scale: Scale::from(crate::state::window_animation::content_scale(
                         v.size,
                         target_size,
-                        v.content_stale,
+                        v.cap_content,
                     )),
                 };
                 (v.alpha, Some(animation))

@@ -26,10 +26,24 @@ pub(crate) struct AnimatedVisual {
     pub loc: Point<f64, Logical>,
     pub size: Size<f64, Logical>,
     pub alpha: f32,
-    /// The client has not yet committed the size we asked for, so its buffer
-    /// does not match `size`. Callers must not magnify content in this state —
-    /// see [`content_scale`].
-    pub content_stale: bool,
+    /// The buffer is stale *and* this entry's policy says not to magnify it —
+    /// see [`content_scale`] and [`ContentPolicy`].
+    pub cap_content: bool,
+}
+
+/// What to do with a stale buffer while a geometry entry animates. The two cases
+/// want opposite treatments, so each entry records which it is rather than the
+/// render path guessing from whether a request is outstanding.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ContentPolicy {
+    /// A live chase toward a size we just requested: cap the scale at 1. The rect
+    /// grows several times over before the client redraws, and magnifying the old
+    /// buffer to meet it renders the interface hugely oversized.
+    Cap,
+    /// A seeded hold onto a rect the window has inherited (an adopted stand-in
+    /// slot): stretch to fill. Drawing this one at its committed size would leave
+    /// the window undersized in the corner of the slot, under the crossfade.
+    Stretch,
 }
 
 /// Scale to draw a window's committed buffer at, to fill `visual` on screen.
@@ -43,13 +57,13 @@ pub(crate) struct AnimatedVisual {
 pub(crate) fn content_scale(
     visual: Size<f64, Logical>,
     committed: Size<f64, Logical>,
-    content_stale: bool,
+    cap_content: bool,
 ) -> (f64, f64) {
     let (sx, sy) = (
         visual.w / committed.w.max(1.0),
         visual.h / committed.h.max(1.0),
     );
-    if content_stale {
+    if cap_content {
         (sx.min(1.0), sy.min(1.0))
     } else {
         (sx, sy)
@@ -93,6 +107,13 @@ enum AnimationKind {
         progress: f64,
         space: AnimSpace,
         requested_size: Option<Size<i32, Logical>>,
+        /// We have configured a size the client has not committed yet, so its
+        /// buffer does not match the rect being animated. A property of the
+        /// buffer, not of the request: it outlives the hold deadline (which drops
+        /// the request without any commit having landed) and is cleared only by an
+        /// actual commit, so the release leg stays capped instead of popping.
+        buffer_stale: bool,
+        content_policy: ContentPolicy,
         /// Committed size last observed, so a commit that changes size to
         /// anything other than the request reads as "client chose its own".
         last_committed_size: Size<i32, Logical>,
@@ -156,6 +177,7 @@ impl WindowAnimations {
         committed_size: Size<i32, Logical>,
         role: GeometryRole,
         replace_visual: bool,
+        content_policy: ContentPolicy,
     ) {
         // A request that already equals the committed size must not ride to the
         // hold deadline — resolve it immediately.
@@ -172,6 +194,8 @@ impl WindowAnimations {
                     role: entry_role,
                     hold_deadline,
                     last_committed_size,
+                    buffer_stale,
+                    content_policy: entry_policy,
                 },
         }) = self.animations.get_mut(&id)
         {
@@ -188,6 +212,8 @@ impl WindowAnimations {
             *entry_role = role;
             *hold_deadline = None;
             *last_committed_size = committed_size;
+            *buffer_stale = requested_size.is_some();
+            *entry_policy = content_policy;
             return;
         }
         self.animations.insert(
@@ -200,6 +226,8 @@ impl WindowAnimations {
                     progress: 0.0,
                     space,
                     requested_size,
+                    buffer_stale: requested_size.is_some(),
+                    content_policy,
                     last_committed_size: committed_size,
                     hold_deadline: None,
                     role,
@@ -263,7 +291,7 @@ impl WindowAnimations {
                 loc: target_loc,
                 size: target_size,
                 alpha: 1.0,
-                content_stale: false,
+                cap_content: false,
             };
         };
         match &animation.kind {
@@ -283,18 +311,19 @@ impl WindowAnimations {
                     // through most of the grow-in, then smoothly asymptotes to
                     // full opacity at p=1 — eased, with no saturation corner.
                     alpha: (1.0 - (1.0 - p) * (1.0 - p)) as f32,
-                    content_stale: false,
+                    cap_content: false,
                 }
             }
             AnimationKind::Geometry {
                 visual,
-                requested_size,
+                buffer_stale,
+                content_policy,
                 ..
             } => AnimatedVisual {
                 loc: visual.loc,
                 size: visual.size,
                 alpha: 1.0,
-                content_stale: requested_size.is_some(),
+                cap_content: *buffer_stale && *content_policy == ContentPolicy::Cap,
             },
         }
     }
@@ -308,6 +337,7 @@ impl WindowAnimations {
                 AnimationKind::Geometry {
                     requested_size,
                     last_committed_size,
+                    buffer_stale,
                     ..
                 },
         }) = self.animations.get_mut(&id)
@@ -318,6 +348,8 @@ impl WindowAnimations {
             };
             if committed_size == request || committed_size != *last_committed_size {
                 *requested_size = None;
+                // Only an actual commit clears staleness.
+                *buffer_stale = false;
             }
             *last_committed_size = committed_size;
         }
@@ -402,6 +434,9 @@ impl WindowAnimations {
                 // client commits, or the deadline (anchored here, at
                 // endpoint-reach) releases it — clearing the request moves the
                 // target, which re-seeds a final leg back to the live size.
+                // `buffer_stale` deliberately survives that release: no commit
+                // landed, so the release leg must stay capped rather than
+                // magnifying the old buffer on its way back down.
                 *visual = target;
                 match hold_deadline {
                     Some(deadline) if now >= *deadline => {
