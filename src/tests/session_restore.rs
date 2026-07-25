@@ -5,7 +5,7 @@
 //! post-`run()` wiring itself (Quit + signalfd both reaching it) is hardware
 //! smoke, not covered here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use driftwm::config::Config;
@@ -265,6 +265,15 @@ fn focus_round_trips_onto_the_restored_stand_in() {
         ),
         "the restored focus is the auto-placement anchor"
     );
+    let order: Vec<&str> = restored
+        .iter()
+        .map(|(s, _)| s.identity.app_id.as_str())
+        .collect();
+    assert_eq!(
+        order,
+        vec!["alpha", "beta"],
+        "granting the focus does not raise the stand-in — the saved z-order stands"
+    );
 
     for (s, _) in restored {
         f.state().dismiss_suspended(s.id);
@@ -316,7 +325,7 @@ fn an_unfocused_session_restores_unfocused() {
 /// starts unfocused rather than pointing relaunch and dismiss at a window
 /// nothing on screen shows.
 #[test]
-fn an_off_screen_restored_focus_is_dropped() {
+fn an_off_screen_restored_focus_is_withheld() {
     let tmp = TempDir::new();
     let path = tmp.path().join("session.json");
 
@@ -344,6 +353,88 @@ fn an_off_screen_restored_focus_is_dropped() {
         f.state().gated_suspended_focus(),
         None,
         "focus is not handed to a stand-in outside the viewport"
+    );
+
+    for (s, _) in restored {
+        f.state().dismiss_suspended(s.id);
+    }
+}
+
+/// A withheld hand-over must not destroy the record. Every write re-emits the
+/// flag while nothing else has taken focus, so the boot after — one whose camera
+/// actually frames the stand-in — still finds it. Without this, the ordinary
+/// `restore_camera = false` boot erases the flag on its first write and the
+/// feature silently self-destructs.
+#[test]
+fn a_withheld_restored_focus_survives_to_the_next_boot() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let mut far = entry(1, "faraway", Origin::Explicit);
+    far.position = [40_000, 40_000];
+    far.focused = true;
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![far],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    // Boot one: the default camera leaves the stand-in off screen, so the focus
+    // is withheld — and then the session is written straight back out.
+    {
+        let mut f = Fixture::with_config(config_restore(true));
+        // This boot quits with its stand-in still on the canvas, as a real one
+        // does — dismissing it to reach the baseline would rewrite the file the
+        // second boot reads.
+        f.skip_baseline_check();
+        f.add_output(1, (1920, 1080));
+        f.state().session_store.path = Some(path.clone());
+        f.state().load_session();
+        f.state().apply_restored_focus();
+        assert_eq!(
+            f.state().gated_suspended_focus(),
+            None,
+            "the off-screen stand-in is not focused"
+        );
+        f.state().serialize_session_on_shutdown();
+    }
+
+    let rewritten = session::read(&path);
+    let flagged: Vec<&str> = rewritten
+        .entries
+        .iter()
+        .filter(|e| e.focused)
+        .map(|e| e.app_id.as_str())
+        .collect();
+    assert_eq!(
+        flagged,
+        vec!["faraway"],
+        "the rewrite keeps the record a withheld hand-over left pending"
+    );
+
+    // Boot two, camera parked on the stand-in: the surviving flag is what the
+    // focus is granted from.
+    let mut f = Fixture::with_config(config_restore(true));
+    // Canvas coords are center-based and y-up, so the entry's [40_000, 40_000]
+    // sits at internal (39_800, -40_150): frame it from a little up-left of that.
+    let saved = HashMap::from([(
+        "HEADLESS-1".to_string(),
+        (Point::from((39_600.0, -40_350.0)), 1.0),
+    )]);
+    super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &saved);
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+    f.state().apply_restored_focus();
+
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(restored.len(), 1);
+    assert_eq!(
+        f.state().gated_suspended_focus(),
+        Some(restored[0].0.id),
+        "the next boot that can see the stand-in grants the focus"
     );
 
     for (s, _) in restored {
