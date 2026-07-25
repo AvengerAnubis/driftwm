@@ -92,7 +92,9 @@ impl DriftWm {
     /// once per output): the only windows drawn there are fullscreen pictures,
     /// and the bucket would invert them — an exit that re-pinned on its way out
     /// would draw over the very window taking its fullscreen over, for the whole
-    /// handover. Sharing one bucket leaves the stage's z-order to decide. The pin
+    /// handover. Sharing the normal bucket leaves the stage's z-order to decide,
+    /// which a fullscreen picture never loses: widgets — the one other bucket a
+    /// window can land in — never fullscreen and are never a cover. The pin
     /// *marker* still follows [`Self::pinned_picture_of`], and a covering picture
     /// wears no title bar to put it on anyway.
     pub(crate) fn draws_pinned_on(

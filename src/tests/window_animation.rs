@@ -2429,13 +2429,15 @@ fn a_fullscreen_handover_draws_both_the_frozen_exit_and_the_growing_entry() {
 /// out, so its frozen picture claims the screen-pinned bucket that draws above
 /// every normal window — including the one growing into the fullscreen it is
 /// handing over. On a covered output the fullscreen pictures share one bucket
-/// instead, so stage z-order decides and the incoming window is on top.
+/// instead, and nothing may reorder the two behind the compositor's back: a
+/// pinned window's per-camera-move re-anchor must not raise it either.
 #[test]
 fn a_fullscreen_handover_from_a_pinned_window_does_not_bury_the_incoming_one() {
     let mut f = Fixture::with_config(
         Config::from_toml("[[window_rules]]\napp_id = \"p\"\npinned_to_screen = true\n").unwrap(),
     );
     let output = f.add_output(1, (1920, 1080));
+    let other = f.add_output(2, (1280, 720));
     let id = f.add_client();
     let leaving = map_window(&mut f, id, "p", (400, 300));
     let arriving = map_window(&mut f, id, "b", (800, 600));
@@ -2452,7 +2454,6 @@ fn a_fullscreen_handover_from_a_pinned_window_does_not_bury_the_incoming_one() {
     f.client(id).window(&arriving).set_fullscreen(None);
     f.double_roundtrip(id);
     let leaving_id = f.state().stage.id_of(&first);
-    let arriving_id = f.state().stage.id_of(&second);
     assert!(
         f.state().pinned_picture_of(leaving_id, &first),
         "precondition: the exit re-pinned, so its frozen picture wears the pin"
@@ -2467,10 +2468,16 @@ fn a_fullscreen_handover_from_a_pinned_window_does_not_bury_the_incoming_one() {
         "the outgoing picture gives up the bucket that would draw it over the \
          window taking its fullscreen"
     );
+
+    // A pan on the *other* monitor, mid-handover — momentum keeps these coming
+    // for as long as the freeze lasts, and each one re-anchors every pinned
+    // window on the canvas.
+    crate::state::output_state(&other).camera.x += 60.0;
+    f.state().update_output_from_camera();
     assert!(
-        !f.state().draws_pinned_on(arriving_id, &second, covered),
-        "so both fullscreen pictures share one, and stage z-order puts the \
-         incoming window on top"
+        stage_index(&mut f, &second) > stage_index(&mut f, &first),
+        "and stays below it in the stage's own z-order, so the shared bucket \
+         still draws the incoming window on top"
     );
     assert!(
         f.state()
@@ -2480,6 +2487,15 @@ fn a_fullscreen_handover_from_a_pinned_window_does_not_bury_the_incoming_one() {
     );
 
     f.state().exit_fullscreen_on(&output);
+}
+
+/// Where `window` sits in the stage's z-order: higher is closer to the front.
+fn stage_index(f: &mut Fixture, window: &Window) -> usize {
+    f.state()
+        .stage
+        .windows()
+        .position(|w| w.client() == Some(window))
+        .expect("the window is stage-mapped")
 }
 
 /// A frozen fullscreen picture covers its output only while it is still drawn

@@ -941,8 +941,7 @@ mod harness {
         }
 
         /// Mirrors `DriftWm::exit_fullscreen_on`'s stage half, including the
-        /// pin restore and the pinned-loc sync (which re-maps every pinned
-        /// window, raising it) that follows.
+        /// pin restore and the pinned-loc sync that follows.
         fn exit_fullscreen(&mut self, output: &str) {
             if let Some(entry) = self.stage.take_fullscreen(output) {
                 entry.window.exit_fullscreen_configure(entry.saved_size);
@@ -957,8 +956,8 @@ mod harness {
             }
         }
 
-        /// Mirrors `sync_pinned_locs`: re-map every pinned window in z-order
-        /// (each map raises, so relative pinned stacking is preserved).
+        /// Mirrors `sync_pinned_locs`: re-anchor every pinned window's position
+        /// in place, leaving the z-order alone.
         fn sync_pinned(&mut self) {
             let pinned: Vec<TestWindow> = self
                 .stage
@@ -969,7 +968,7 @@ mod harness {
                 let Some(pos) = self.stage.position_of(&w) else {
                     continue;
                 };
-                self.stage.map(w, pos);
+                self.stage.set_position(&w, pos);
             }
         }
 

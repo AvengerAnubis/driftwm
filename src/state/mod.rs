@@ -1942,7 +1942,9 @@ impl DriftWm {
     /// rendering the background, so their `background_last_animate` stamps
     /// go stale and would otherwise read as permanently due. A fullscreen-entry
     /// transition keeps its canvas visible until the window covers it, so its
-    /// background stays eligible for that short interval. Shared by the idle
+    /// background stays eligible for that short interval — unless the fullscreen
+    /// it is growing into is being handed over by a window whose exit freeze is
+    /// still hiding the output, in which case nothing was uncovered. Shared by the idle
     /// due-check, the tick-timer arming wait, and the per-frame dirty-marking so
     /// all three agree on which outputs count.
     pub(crate) fn background_render_eligible_outputs(&self) -> impl Iterator<Item = &Output> {
@@ -2320,15 +2322,15 @@ impl DriftWm {
         }
     }
 
-    /// Re-anchor each pinned window's `Space` location to the canvas point its
-    /// fixed `screen_pos` currently maps to. Without this the loc freezes at
-    /// placement and `Space::refresh` drifts it off its output as the camera
-    /// pans — triggering spurious `output_leave` and the visibility culls, which
-    /// would freeze the pinned window at 0 FPS. Re-mapped bottom-to-top in the
-    /// current z-order because `Space::map_element` raises the element to the
-    /// top of its z-class, so order-preserving re-map keeps multi-pinned
-    /// stacking and focus-raise intact. Only the canvas loc is touched —
-    /// rendering and hit-testing still read `screen_pos`.
+    /// Re-anchor each pinned window's canvas location to the point its fixed
+    /// `screen_pos` currently maps to. Without this the loc freezes at placement
+    /// and drifts off its output as the camera pans — triggering spurious
+    /// `output_leave` and the visibility culls, which would freeze the pinned
+    /// window at 0 FPS. Only the position is touched: this runs on every camera
+    /// move, and a re-map would raise each pinned window to the top of the
+    /// z-order every time, above windows the user put there — including one
+    /// growing into the fullscreen a pinned window is on its way out of.
+    /// Rendering and hit-testing still read `screen_pos`.
     fn sync_pinned_locs(&mut self) {
         if !self.stage.has_pinned() {
             return;
@@ -2353,7 +2355,7 @@ impl DriftWm {
             )
             .0
             .to_i32_round();
-            self.map_window(window, canvas, false);
+            self.stage.set_position(&window, canvas);
         }
     }
 

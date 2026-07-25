@@ -716,7 +716,11 @@ pub fn compose_frame(
     // fullscreen picture keeps showing that picture instead of being culled
     // along with everything else — and so does a window growing into the
     // fullscreen that exit is handing over.
-    let fullscreen_windows = state.visually_fullscreen_windows_on(output);
+    let fullscreen_windows = if output_fullscreen {
+        state.visually_fullscreen_windows_on(output)
+    } else {
+        Vec::new()
+    };
     let mut did_init_bg = false;
     if output_fullscreen {
         // Fullscreen fully occludes the canvas: free its chunk caches and skip
@@ -1448,7 +1452,11 @@ pub fn compose_frame(
                     elem_start,
                     elem_count,
                     // Must follow the bucket the elements went into, since the
-                    // blur splices by that bucket's prefix offset.
+                    // blur splices by that bucket's prefix offset. The tag also
+                    // marks a layer as screen-fixed, so its blur recomputes on
+                    // camera moves — moot for a picture giving the bucket up,
+                    // since a fullscreen output's camera is locked and there is
+                    // no scene left behind it to pan anyway.
                     layer: if bucket_pinned {
                         BlurLayer::Pinned
                     } else if is_widget {

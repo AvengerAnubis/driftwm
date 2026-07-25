@@ -170,9 +170,9 @@ pub(crate) enum GeometryRole {
     },
 }
 
-/// The output a frozen *fullscreen* picture covers, and the viewport it covers
-/// it under. Fullscreen pictures wear no compositor chrome, and while one is
-/// frozen its output has to keep hiding everything underneath.
+/// The output a frozen picture hides, and the viewport it hides it under. While
+/// one is frozen its output has to keep hiding everything underneath. Purely
+/// about coverage — what the picture is drawn *as* is [`FrozenPicture::bare`].
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FullscreenCover {
     pub output: String,
@@ -202,7 +202,9 @@ pub(crate) struct FrozenPicture {
     /// Drawn with no compositor chrome at all — the fullscreen look. What the
     /// chrome hand-over ramps *from*.
     pub bare: bool,
-    /// Drawn in the screen-pinned z-bucket, marked pinned on its title bar.
+    /// Marked pinned on its title bar, and drawn in the screen-pinned z-bucket
+    /// — except on an output some picture is covering, where see
+    /// [`crate::state::DriftWm::draws_pinned_on`].
     pub pinned: bool,
     /// There is no earlier picture at all: this entry took over an open fade
     /// that had never been drawn, so the fields above describe nothing that was
