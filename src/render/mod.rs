@@ -21,8 +21,9 @@ pub(crate) use blur::compile_blur_shaders;
 pub use blur::{BlurCache, SharedBlur};
 pub use capture::{render_capture_frames, render_screencopy, render_toplevel_captures};
 pub(crate) use closing::{
-    CloseChrome, ClosePixels, ClosingSnapshot, ResizeCaptures, ResizeCrossfade, StandInFade,
-    capture_close_pixels, close_pixels_fresh, resize_crossfade, snapshot_canvas, snapshot_screen,
+    BakeChrome, CloseChrome, ClosePixels, ClosingSnapshot, ResizeCaptures, ResizeCrossfade,
+    StandInFade, capture_close_pixels, close_pixels_fresh, resize_crossfade, snapshot_canvas,
+    snapshot_screen,
 };
 pub use cursor::build_cursor_elements;
 pub use elements::{
@@ -837,7 +838,10 @@ pub fn compose_frame(
         let Some(wl_surface) = window.wl_surface() else {
             continue;
         };
-        let is_fullscreen = state.stage.is_fullscreen(window);
+        // Not stage membership: a resize freeze holds the pre-action picture on
+        // screen for up to half a second after the stage has flipped, and that
+        // picture keeps the chrome it was drawn with (see `chrome_fullscreen`).
+        let is_fullscreen = state.chrome_fullscreen(window);
         let has_ssd = !is_fullscreen
             && state
                 .decorations

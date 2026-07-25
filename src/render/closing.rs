@@ -172,11 +172,25 @@ impl ClosePixels {
     }
 }
 
+/// How a bake reproduces the compositor chrome its content was drawn with:
+/// `bare` windows (fullscreen, or `decoration = "none"`) get no rounding at all,
+/// the rest are clipped to `corner_radius` — bottom corners only under an SSD
+/// bar, which covers the top edge.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BakeChrome {
+    pub bare: bool,
+    pub corner_radius: [f32; 4],
+}
+
 /// The content a window is about to replace, cloned while a compositor resize
 /// holds it frozen. Kept until the client's redraw lands, where it becomes the
 /// fading half of the crossfade.
 pub(crate) struct ResizeCapture {
     pub pixels: ClosePixels,
+    /// The chrome the captured picture wore, resolved when it was captured
+    /// rather than when it is baked: the freeze holds one picture still while
+    /// fullscreen membership, window rules and config can all move under it.
+    pub chrome: BakeChrome,
     /// Which request this content belongs to (see `WindowAnimations`' generation
     /// counter).
     generation: u64,
@@ -195,8 +209,21 @@ impl ResizeCaptures {
 
     /// Replace `id`'s capture with the content of the buffer being retired, so
     /// the crossfade always starts from the last picture that was on screen.
-    pub fn stash(&mut self, id: ElementId, pixels: ClosePixels, generation: u64) {
-        self.0.insert(id, ResizeCapture { pixels, generation });
+    pub fn stash(
+        &mut self,
+        id: ElementId,
+        pixels: ClosePixels,
+        chrome: BakeChrome,
+        generation: u64,
+    ) {
+        self.0.insert(
+            id,
+            ResizeCapture {
+                pixels,
+                chrome,
+                generation,
+            },
+        );
     }
 
     pub fn drop_for(&mut self, id: ElementId) {
@@ -271,24 +298,29 @@ impl ResizeCrossfade {
     }
 }
 
-/// Flatten captured content into a crossfade overlay. The chrome is built here
-/// rather than passed in: it must stay clip-only, both because the live border,
-/// shadow, and bar keep drawing themselves (only the content is being exchanged)
-/// and because anything outside the geometry rect would grow the bake past it,
-/// while the render side maps it onto the interpolated visual rect as if it were
-/// exactly that rect. Passing no chrome at all is not the same thing — that
-/// skips the clip too.
+/// Flatten captured content into a crossfade overlay. Only the *content* is
+/// being exchanged — the live border, shadow and bar keep drawing themselves —
+/// so the bake stays clip-only: `CloseChrome` with every other field `None`.
+/// Passing no chrome at all is not the same thing, and not what this wants: that
+/// bakes the surface tree's full bounds, which for a CSD client includes its own
+/// shadow well outside the geometry rect.
 pub(crate) fn resize_crossfade(
     renderer: &mut GlesRenderer,
     pixels: &ClosePixels,
     flatten_scale: f64,
     corner_clip: Option<&GlesTexProgram>,
-    corner_radius: [f32; 4],
+    chrome: BakeChrome,
 ) -> Option<ResizeCrossfade> {
     let chrome = CloseChrome {
         geometry: pixels.geometry.to_f64(),
-        corner_radius,
-        corner_clip,
+        corner_radius: chrome.corner_radius,
+        // A bare window is still cropped to its geometry rect like any other —
+        // that is the rect the render side maps onto the visual rect — it only
+        // skips the rounding. Accepted artifact: the live path leaves a bare
+        // window's overhang (a `decoration = "none"` client's own shadow) on
+        // screen and the fade drops it, which is the price of a bake the render
+        // side can place from the geometry rect alone.
+        corner_clip: (!chrome.bare).then_some(corner_clip).flatten(),
         border_shader: None,
         border_width: 0,
         border_color: [0; 4],
@@ -296,6 +328,11 @@ pub(crate) fn resize_crossfade(
         shadow_shader: None,
         bar: None,
     };
+    // The baked extent is discarded because it is known: with border, shadow and
+    // bar all `None`, the bake covers exactly `chrome.geometry` — the invariant
+    // the render side relies on when it draws this texture over the window's
+    // interpolated geometry rect. Any chrome that grew the bake past that rect
+    // would silently offset and stretch the overlay.
     let (buffer, _bounds, texels) =
         flatten(renderer, pixels, flatten_scale.max(1.0), Some(&chrome))?;
     Some(ResizeCrossfade {
@@ -809,12 +846,19 @@ mod resize_capture_tests {
         ClosePixels::empty(Rectangle::from_size(Size::from((400, 300))))
     }
 
+    fn chrome() -> BakeChrome {
+        BakeChrome {
+            bare: true,
+            corner_radius: [0.0; 4],
+        }
+    }
+
     /// The leg that made the request gets its content, once.
     #[test]
     fn a_matching_capture_is_consumed_exactly_once() {
         let mut captures = ResizeCaptures::default();
         let id = ElementId(1);
-        captures.stash(id, capture(), 7);
+        captures.stash(id, capture(), chrome(), 7);
         assert!(captures.take_for(id, 7).is_some(), "the leg's own content");
         assert!(captures.take_for(id, 7).is_none(), "and it is consumed");
     }
@@ -828,7 +872,7 @@ mod resize_capture_tests {
     fn a_stale_generation_capture_is_dropped_not_consumed() {
         let mut captures = ResizeCaptures::default();
         let id = ElementId(1);
-        captures.stash(id, capture(), 7);
+        captures.stash(id, capture(), chrome(), 7);
         assert!(
             captures.take_for(id, 8).is_none(),
             "a newer leg must not wear the superseded request's content"
@@ -842,8 +886,8 @@ mod resize_capture_tests {
     fn a_refresh_replaces_the_previous_capture() {
         let mut captures = ResizeCaptures::default();
         let id = ElementId(1);
-        captures.stash(id, capture(), 7);
-        captures.stash(id, capture(), 7);
+        captures.stash(id, capture(), chrome(), 7);
+        captures.stash(id, capture(), chrome(), 7);
         assert_eq!(captures.len(), 1);
     }
 }

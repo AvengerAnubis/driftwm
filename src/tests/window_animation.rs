@@ -99,6 +99,10 @@ fn seed_resize_capture(f: &mut Fixture, id: ElementId) {
     f.state().resize_captures.stash(
         id,
         crate::render::ClosePixels::empty(Rectangle::from_size(Size::from((400, 300)))),
+        crate::render::BakeChrome {
+            bare: true,
+            corner_radius: [0.0; 4],
+        },
         generation,
     );
     assert_eq!(
@@ -1853,6 +1857,97 @@ fn a_frozen_resize_renders_uncapped_at_its_seed_ratio() {
         (sx - 2.0).abs() < 1e-6 && (sy - 2.0).abs() < 1e-6,
         "it renders at the seed ratio, reproducing the pre-action look ({sx:.2}x)"
     );
+}
+
+/// A fullscreen enter flips stage membership at the action, but the freeze holds
+/// the *windowed* picture on screen for up to half a second after that. Chrome
+/// follows the picture, not the membership — stripping the bar, border and shadow
+/// (and uncropping a CSD client's own shadow) at the action would leave a
+/// motionless frame wearing the wrong dress for the whole freeze.
+#[test]
+fn a_frozen_fullscreen_enter_keeps_its_windowed_chrome() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (800, 600));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the enter waits for the client to redraw at the fullscreen size"
+    );
+    assert!(
+        f.state().stage.is_fullscreen(&window),
+        "the stage flipped the instant the action ran"
+    );
+    assert!(
+        !f.state().chrome_fullscreen(&window),
+        "but the picture on screen is still the windowed one, chrome and all"
+    );
+
+    // The redraw the freeze was waiting for: now the picture IS fullscreen.
+    super::adopt_last_configure(&mut f, id, &surface);
+    assert!(
+        f.state().chrome_fullscreen(&window),
+        "the client redrew fullscreen, so the chrome goes with it"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+}
+
+/// The mirror case, and the one a user can nudge: an exit's freeze holds the
+/// fullscreen picture after the stage has already let it go, so chrome stays off
+/// until the client redraws at its windowed size. A position-only retarget is the
+/// same freeze moving and must not restate what that picture wore.
+#[test]
+fn a_frozen_fullscreen_exit_keeps_its_fullscreen_chrome() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "fs", (800, 600));
+    let window = window_by_app_id(&mut f, "fs").unwrap();
+    reset_view(&mut f);
+    let eid = element_id(&mut f, &window);
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    tick_until_settled(&mut f);
+
+    f.state().exit_fullscreen_on(&output);
+    f.double_roundtrip(id);
+    assert!(
+        f.state().window_animations.start_held(eid),
+        "the exit waits for the client to redraw at its windowed size"
+    );
+    assert!(
+        !f.state().stage.is_fullscreen(&window),
+        "the stage let it go the instant the action ran"
+    );
+    assert!(
+        f.state().chrome_fullscreen(&window),
+        "but the picture on screen is still the fullscreen one, so no chrome"
+    );
+
+    let from = f.state().stage.position_of(&window).unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((from.x + 40, from.y)), false);
+    f.state().animate_window_move_from(&window, from);
+    assert!(
+        f.state().chrome_fullscreen(&window),
+        "a nudge moves the freeze, it does not redress the frozen picture"
+    );
+
+    super::adopt_last_configure(&mut f, id, &surface);
+    assert!(
+        !f.state().chrome_fullscreen(&window),
+        "the windowed redraw brings the chrome back"
+    );
+    tick_until_settled(&mut f);
 }
 
 /// A request for the size the window already has resolves at the seed, so there is

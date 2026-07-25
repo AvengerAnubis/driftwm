@@ -437,7 +437,7 @@ impl DriftWm {
                     seed,
                     space,
                     Some(entry.saved_size),
-                    GeometryRole::Normal,
+                    GeometryRole::FullscreenExit,
                     ContentPolicy::Cap,
                 );
             }

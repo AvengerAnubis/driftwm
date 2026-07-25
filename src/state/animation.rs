@@ -43,6 +43,17 @@ impl DriftWm {
         )
     }
 
+    /// Whether the picture on screen for `window` is a fullscreen one — no
+    /// compositor chrome. Normally that is stage membership, but a frozen resize
+    /// keeps showing its pre-action frame long after the stage has flipped, and
+    /// that frame has to keep the chrome it was drawn with.
+    pub(crate) fn chrome_fullscreen(&self, window: &Window) -> bool {
+        self.stage
+            .id_of(window)
+            .and_then(|id| self.window_animations.frozen_chrome_fullscreen(id))
+            .unwrap_or_else(|| self.stage.is_fullscreen(window))
+    }
+
     fn window_geometry_grab_active(&self, window: &Window) -> bool {
         window
             .wl_surface()
@@ -133,6 +144,14 @@ impl DriftWm {
         if requested_size.is_some() {
             self.drop_resize_crossfade(id);
         }
+        // What the picture this leg starts from wore. A fullscreen leg is armed
+        // after the stage has already flipped, so its role is the only witness of
+        // the side it came from.
+        let chrome_fullscreen = match role {
+            GeometryRole::FullscreenEntry => false,
+            GeometryRole::FullscreenExit => true,
+            GeometryRole::Normal => self.stage.is_fullscreen(window),
+        };
         self.window_animations.start_geometry(
             id,
             seed,
@@ -142,6 +161,7 @@ impl DriftWm {
             role,
             replace_visual,
             content_policy,
+            chrome_fullscreen,
         );
     }
 
@@ -415,8 +435,11 @@ impl DriftWm {
             return;
         };
         // Pre-commit, both the textures and the geometry still describe the
-        // picture being retired.
+        // picture being retired — and so does the chrome around it. Resolve that
+        // here too: by the time this is baked, a config reload or the fullscreen
+        // membership this freeze is riding could answer differently.
         let geometry = window.geometry();
+        let chrome = self.baked_chrome_policy(surface, self.chrome_fullscreen(&window));
         let Some(mut backend) = self.backend.take() else {
             return;
         };
@@ -426,7 +449,7 @@ impl DriftWm {
             geometry,
             Instant::now(),
         ) {
-            self.resize_captures.stash(id, pixels, generation);
+            self.resize_captures.stash(id, pixels, chrome, generation);
         }
         self.backend = Some(backend);
     }
@@ -439,15 +462,6 @@ impl DriftWm {
         let Some(capture) = self.resize_captures.take_for(id, generation) else {
             return;
         };
-        let Some(surface) = window.wl_surface().map(|s| s.into_owned()) else {
-            return;
-        };
-        // Clip like the live path clips, so the fade starts from the picture the
-        // window had. A bare window passes its content through untouched, which is
-        // no clip at all — a radius-0 clip would still crop to the geometry rect.
-        // The bar itself is not baked, it keeps drawing live above the fade.
-        let (bare, corner_radius) =
-            self.baked_chrome_policy(&surface, self.stage.is_fullscreen(window));
         let corner_clip = self.render.corner_clip_shader.clone();
         let flatten_scale = match self.stage.pin_of(window) {
             Some(site) => self
@@ -468,8 +482,8 @@ impl DriftWm {
             backend.renderer(),
             &capture.pixels,
             flatten_scale,
-            if bare { None } else { corner_clip.as_ref() },
-            corner_radius,
+            corner_clip.as_ref(),
+            capture.chrome,
         );
         self.backend = Some(backend);
         if let Some(crossfade) = crossfade {
@@ -482,14 +496,21 @@ impl DriftWm {
     /// `decoration = "none"` hard-vetoes it) and the per-corner radius the live
     /// clip applies. Under an SSD bar only the bottom corners round — the bar
     /// covers the top edge.
-    fn baked_chrome_policy(&self, surface: &WlSurface, fullscreen: bool) -> (bool, [f32; 4]) {
+    fn baked_chrome_policy(
+        &self,
+        surface: &WlSurface,
+        fullscreen: bool,
+    ) -> crate::render::BakeChrome {
         let applied = driftwm::config::applied_rule(surface);
         let mode = driftwm::config::effective_decoration_mode(
             applied.as_ref().and_then(|r| r.decoration.as_ref()),
             &self.config.decorations.default_mode,
         );
         if fullscreen || matches!(mode, driftwm::config::DecorationMode::None) {
-            return (true, [0.0; 4]);
+            return crate::render::BakeChrome {
+                bare: true,
+                corner_radius: [0.0; 4],
+            };
         }
         let radius = driftwm::config::effective_corner_radius(
             applied.as_ref(),
@@ -504,7 +525,10 @@ impl DriftWm {
         } else {
             [radius; 4]
         };
-        (false, corner_radius)
+        crate::render::BakeChrome {
+            bare: false,
+            corner_radius,
+        }
     }
 
     /// Drop both halves of a resize crossfade for `id`: content stashed for a
@@ -601,8 +625,9 @@ impl DriftWm {
         let shadow_shader = self.render.shadow_shader.clone();
         // A bare window bakes with no clip, no border and no shadow, matching the
         // nothing it draws live.
-        let (bare, corner_radius) = self.baked_chrome_policy(surface, fullscreen_output.is_some());
-        let chrome = if bare {
+        let policy = self.baked_chrome_policy(surface, fullscreen_output.is_some());
+        let corner_radius = policy.corner_radius;
+        let chrome = if policy.bare {
             None
         } else {
             let applied = driftwm::config::applied_rule(surface);

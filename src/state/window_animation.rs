@@ -104,10 +104,15 @@ pub(crate) enum AnimSpace {
     Screen(String),
 }
 
+/// Which fullscreen transition a geometry leg is, if any. Besides gating the
+/// "visually fullscreen" report, this is how a leg knows what the picture it
+/// starts from wore: stage fullscreen membership flips when the action runs, so
+/// by the time the leg is armed it already describes the destination.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum GeometryRole {
     Normal,
     FullscreenEntry,
+    FullscreenExit,
 }
 
 /// One entry's output-scoping data: its id, and `Some((space, visual rect))`
@@ -150,6 +155,12 @@ enum AnimationKind {
         /// target comes from it) while `p` advances, so a predicate would
         /// contradict the degrade.
         start_hold: StartHold,
+        /// Whether the picture the freeze holds on screen is a fullscreen one,
+        /// i.e. wears no compositor chrome. Stamped when the freeze is armed and
+        /// held for its duration: the stage flips membership at the action, half
+        /// a second before the client redraws into it, so reading it live would
+        /// strip (or add) chrome around a motionless pre-action frame.
+        chrome_fullscreen: bool,
         /// Bumped by every request-carrying (re)start. Stamps the captured old
         /// content so a stale capture can never be paired with a newer leg.
         generation: u64,
@@ -217,6 +228,7 @@ impl WindowAnimations {
         role: GeometryRole,
         replace_visual: bool,
         content_policy: ContentPolicy,
+        chrome_fullscreen: bool,
     ) {
         if let Some(WindowAnimation {
             kind:
@@ -233,6 +245,7 @@ impl WindowAnimations {
                     buffer_stale,
                     content_policy: entry_policy,
                     start_hold,
+                    chrome_fullscreen: entry_chrome,
                     generation: entry_generation,
                 },
         }) = self.animations.get_mut(&id)
@@ -262,6 +275,7 @@ impl WindowAnimations {
                 *entry_request = requested_size;
                 *buffer_stale = true;
                 *entry_policy = content_policy;
+                *entry_chrome = chrome_fullscreen;
                 // A brand new resize: freeze again from wherever the visual is,
                 // and invalidate any content captured for the previous request.
                 self.generation += 1;
@@ -298,6 +312,7 @@ impl WindowAnimations {
                     } else {
                         StartHold::Off
                     },
+                    chrome_fullscreen,
                     generation,
                     role,
                 },
@@ -314,6 +329,22 @@ impl WindowAnimations {
                 kind: AnimationKind::Geometry { start_hold, .. }
             }) if start_hold.is_held()
         )
+    }
+
+    /// Whether the picture `id`'s freeze is holding on screen is a fullscreen
+    /// one — `None` when nothing is frozen and the live stage answer applies.
+    pub fn frozen_chrome_fullscreen(&self, id: ElementId) -> Option<bool> {
+        match self.animations.get(&id) {
+            Some(WindowAnimation {
+                kind:
+                    AnimationKind::Geometry {
+                        start_hold,
+                        chrome_fullscreen,
+                        ..
+                    },
+            }) if start_hold.is_held() => Some(*chrome_fullscreen),
+            _ => None,
+        }
     }
 
     /// Capture generation of `id`'s current request, for pairing stashed content.
