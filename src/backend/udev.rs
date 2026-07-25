@@ -591,7 +591,7 @@ pub fn init_udev(
             } => {
                 tracing::info!(
                     "Connector connected: {}-{} (CRTC {:?})",
-                    connector_type_name(&connector),
+                    connector.interface().as_str(),
                     connector.interface_id(),
                     crtc,
                 );
@@ -609,14 +609,14 @@ pub fn init_udev(
             } => {
                 tracing::warn!(
                     "Connector {}-{} has no available CRTC",
-                    connector_type_name(&connector),
+                    connector.interface().as_str(),
                     connector.interface_id()
                 );
             }
             DrmScanEvent::Disconnected { connector, crtc } => {
                 tracing::debug!(
                     "Connector {}-{} disconnected (CRTC {:?})",
-                    connector_type_name(&connector),
+                    connector.interface().as_str(),
                     connector.interface_id(),
                     crtc,
                 );
@@ -790,7 +790,7 @@ pub fn init_udev(
                                     }
                                     tracing::info!(
                                         "Hotplug: {}-{} connected",
-                                        connector_type_name(&connector),
+                                        connector.interface().as_str(),
                                         connector.interface_id()
                                     );
                                     // Placeholders are retired inside output_connected,
@@ -903,7 +903,7 @@ fn log_drm_connectors(drm: &DrmDevice) {
         if let Ok(info) = ControlDevice::get_connector(drm, handle, true) {
             tracing::info!(
                 "  connector {}-{}: state={:?}, modes={}",
-                connector_type_name(&info),
+                info.interface().as_str(),
                 info.interface_id(),
                 info.state(),
                 info.modes().len(),
@@ -1038,7 +1038,7 @@ fn create_surface(
 ) -> Option<SurfaceData> {
     let connector_name = format!(
         "{}-{}",
-        connector_type_name(connector),
+        connector.interface().as_str(),
         connector.interface_id()
     );
 
@@ -1696,22 +1696,5 @@ fn convert_subpixel(sp: connector::SubPixel) -> Subpixel {
         connector::SubPixel::VerticalBgr => Subpixel::VerticalBgr,
         connector::SubPixel::None => Subpixel::None,
         _ => Subpixel::Unknown,
-    }
-}
-
-fn connector_type_name(connector: &connector::Info) -> &'static str {
-    match connector.interface() {
-        connector::Interface::DVII => "DVI-I",
-        connector::Interface::DVID => "DVI-D",
-        connector::Interface::DVIA => "DVI-A",
-        connector::Interface::SVideo => "S-Video",
-        connector::Interface::DisplayPort => "DP",
-        connector::Interface::HDMIA => "HDMI-A",
-        connector::Interface::HDMIB => "HDMI-B",
-        connector::Interface::EmbeddedDisplayPort => "eDP",
-        connector::Interface::LVDS => "LVDS",
-        connector::Interface::DSI => "DSI",
-        connector::Interface::VGA => "VGA",
-        _ => "Unknown",
     }
 }
