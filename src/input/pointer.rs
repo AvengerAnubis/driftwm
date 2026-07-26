@@ -1084,6 +1084,10 @@ impl DriftWm {
 
     /// Start a screen-space move grab for a pinned window. The grab tracks the
     /// cursor with the fixed screen-offset captured here.
+    ///
+    /// Returns `true` when the grab was installed; `false` on a silent bail (the
+    /// window isn't pinned, or its pin output is gone), so callers that raise or
+    /// focus around the drag can hold that back until the grab is certain.
     pub(crate) fn start_pinned_move(
         &mut self,
         pointer: &smithay::input::pointer::PointerHandle<DriftWm>,
@@ -1091,12 +1095,12 @@ impl DriftWm {
         pos: Point<f64, smithay::utils::Logical>,
         button: u32,
         serial: smithay::utils::Serial,
-    ) {
+    ) -> bool {
         let Some(site) = self.stage.pin_of(window).cloned() else {
-            return;
+            return false;
         };
         let Some(output) = self.output_by_name(&site.output) else {
-            return;
+            return false;
         };
         let screen_pos = site.screen_pos;
         let (camera, zoom) = {
@@ -1113,6 +1117,7 @@ impl DriftWm {
         self.arm_interactive_move(window);
         let grab = MoveGrab::new_pinned(start_data, window.clone(), output, grab_offset);
         pointer.set_grab(self, grab, serial, Focus::Clear);
+        true
     }
 
     /// Start a compositor-side resize grab. If `explicit_edge` is provided, use it;
@@ -1130,7 +1135,7 @@ impl DriftWm {
         button: u32,
         serial: smithay::utils::Serial,
         want_cluster: bool,
-    ) {
+    ) -> bool {
         self.start_compositor_resize_with_edge(
             pointer,
             window,
@@ -1139,11 +1144,18 @@ impl DriftWm {
             serial,
             None,
             want_cluster,
-        );
+        )
     }
 
+    /// Returns `true` when the grab was installed. Every bail comes before the
+    /// first side effect, so `false` means nothing was touched — no fit/fill
+    /// clear, no `ResizeState`, no `Resizing` on the toplevel, no grab cursor —
+    /// so a caller that raised or focused for this resize can hold that back
+    /// instead of stranding a half-started resize. The gesture arms do exactly
+    /// that; the pointer callers here raise first and ignore the result, since
+    /// their own pickers already rule every bail out.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn start_compositor_resize_with_edge(
+    pub(crate) fn start_compositor_resize_with_edge(
         &mut self,
         pointer: &smithay::input::pointer::PointerHandle<DriftWm>,
         window: &smithay::desktop::Window,
@@ -1152,11 +1164,27 @@ impl DriftWm {
         serial: smithay::utils::Serial,
         explicit_edge: Option<xdg_toplevel::ResizeEdge>,
         want_cluster: bool,
-    ) {
+    ) -> bool {
         let Some(initial_window_location) = self.stage.position_of(window) else {
-            return;
+            return false;
         };
         let initial_window_size = window.geometry().size;
+
+        let Some(wl_surface) = window.wl_surface().map(|s| s.into_owned()) else {
+            return false;
+        };
+
+        // Pinned windows resize in screen space; capture their `screen_pos` and
+        // fixed output so the grab and the commit-time reposition use the right
+        // anchor. `None` for normal canvas windows.
+        let pinned_site = self.stage.pin_of(window).cloned();
+        let pinned_initial_screen_pos = pinned_site.as_ref().map(|s| s.screen_pos);
+        let pinned_output = pinned_site
+            .as_ref()
+            .and_then(|s| self.output_by_name(&s.output));
+        let Some(output) = pinned_output.or_else(|| self.active_output()) else {
+            return false;
+        };
 
         let edges = explicit_edge.unwrap_or_else(|| {
             // Pinned windows live in screen space — infer the edge against their
@@ -1178,24 +1206,11 @@ impl DriftWm {
             }
         });
 
-        // Store resize state for commit() repositioning
-        let Some(wl_surface) = window.wl_surface().map(|s| s.into_owned()) else {
-            return;
-        };
-
         // Clear fit/fill state — user took manual control
         self.stage.clear_fit(window);
         self.stage.clear_fill(window);
 
-        // Pinned windows resize in screen space; capture their `screen_pos` and
-        // fixed output so the grab and the commit-time reposition use the right
-        // anchor. `None` for normal canvas windows.
-        let pinned_site = self.stage.pin_of(window).cloned();
-        let pinned_initial_screen_pos = pinned_site.as_ref().map(|s| s.screen_pos);
-        let pinned_output = pinned_site
-            .as_ref()
-            .and_then(|s| self.output_by_name(&s.output));
-
+        // Store resize state for commit() repositioning
         with_states(&wl_surface, |states| {
             states
                 .data_map
@@ -1226,9 +1241,6 @@ impl DriftWm {
             focus: None,
             button,
             location: pos,
-        };
-        let Some(output) = pinned_output.clone().or_else(|| self.active_output()) else {
-            return;
         };
         // Only snapshot the cluster when the caller opted in. Pinned windows
         // never cluster (they're off-canvas), so force the empty snapshot.
@@ -1261,6 +1273,7 @@ impl DriftWm {
             locked_ratio,
         };
         pointer.set_grab(self, grab, serial, Focus::Clear);
+        true
     }
 
     pub(super) fn on_pointer_axis<I: InputBackend>(&mut self, event: I::PointerAxisEvent) {

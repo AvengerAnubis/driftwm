@@ -157,6 +157,7 @@ impl ExtWorkspace {
 pub struct Window {
     pub qh: QueueHandle<State>,
     pub spbm: WpSinglePixelBufferManagerV1,
+    pub seat: WlSeat,
 
     pub surface: WlSurface,
     pub xdg_surface: XdgSurface,
@@ -459,6 +460,7 @@ impl State {
         let window = Window {
             qh: self.qh.clone(),
             spbm: self.spbm.clone().unwrap(),
+            seat: self.seat.clone().unwrap(),
 
             surface,
             xdg_surface,
@@ -693,6 +695,13 @@ impl Window {
 
     pub fn unset_maximized(&self) {
         self.xdg_toplevel.unset_maximized();
+    }
+
+    /// Ask the compositor to resize this window from `edges`, as a CSD client
+    /// does when the user drags its own border. The serial isn't validated —
+    /// the compositor gates the request on the seat's pointer grab instead.
+    pub fn resize(&self, edges: xdg_toplevel::ResizeEdge, serial: u32) {
+        self.xdg_toplevel.resize(&self.seat, serial, edges);
     }
 
     pub fn set_parent(&self, parent: Option<&XdgToplevel>) {

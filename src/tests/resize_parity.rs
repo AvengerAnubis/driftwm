@@ -10,6 +10,10 @@
 //! early-returning). Suspended grabs run through the real `try_suspended_button`
 //! button path so the cursor and cluster install exactly as production drives
 //! them — the single-motion precedent in `suspended.rs`.
+//!
+//! The tests at the end instead drive the start paths themselves — the pointer
+//! helpers directly, and the client's own `xdg_toplevel.resize` over the wire —
+//! since what they pin down is what those paths do before any grab exists.
 
 use std::cell::RefCell;
 
@@ -27,11 +31,15 @@ use smithay::wayland::compositor::with_states;
 
 use driftwm::config::{BTN_LEFT, Config};
 use driftwm::layout::snap::SnapState;
+use wayland_client::protocol::wl_surface::WlSurface as WlClientSurface;
 
 use crate::grabs::{ResizeGrab, ResizeState, SizeConstraints};
-use crate::state::{ClusterMember, ClusterResizeSnapshot, StageWindow};
+use crate::state::{ClusterMember, ClusterResizeSnapshot, FocusTarget, StageWindow};
 
-use super::{Fixture, adopt_last_configure, map_window, server_surface, window_by_app_id};
+use super::{
+    Fixture, adopt_last_configure, client_sees_maximized, fit_and_frame, map_window,
+    server_surface, window_by_app_id,
+};
 
 fn pt(x: f64, y: f64) -> Point<f64, Logical> {
     Point::from((x, y))
@@ -714,4 +722,216 @@ fn client_dead_mid_resize_stops_cascade_and_cleans_up() {
     );
 
     f.state().dismiss_suspended(nid);
+}
+
+/// Map a client at (400, 300), fit it, and frame the viewport on it. Returns
+/// the client id, its surface, the server-side window, and a grab point inside
+/// the window's right edge.
+fn fitted_client(
+    f: &mut Fixture,
+) -> (
+    super::client::ClientId,
+    WlClientSurface,
+    Window,
+    Point<f64, Logical>,
+) {
+    // Moving the camera seeds a per-output blur generation that only clears on
+    // output disconnect, so it can't return to the construction baseline.
+    f.skip_baseline_check();
+    origin_view(f);
+    let id = f.add_client();
+    let csurface = map_window(f, id, "c", (400, 300));
+    let window = window_by_app_id(f, "c").unwrap();
+    f.state().map_window(
+        StageWindow::Client(window.clone()),
+        Point::from((400, 300)),
+        true,
+    );
+    let grab_at = fit_and_frame(f, &window, id);
+    assert!(
+        client_sees_maximized(f, id, &csurface),
+        "precondition: the fit told the client it is maximized"
+    );
+    (id, csurface, window, grab_at)
+}
+
+/// Resizing a fitted window clears the compositor's fit state, so the configure
+/// that starts the resize has to clear the client's `Maximized` too. A client
+/// left holding it has a dead restore button: the `unmaximize_request` that
+/// button dispatches finds no fit left and `unfit_window` drops it silently.
+/// The pointer arm here; `gesture_resize.rs` covers the trackpad and touch
+/// arms, so the four cannot diverge unnoticed.
+#[test]
+fn pointer_resize_of_a_fitted_window_clears_the_client_maximized_state() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let (id, csurface, window, grab_at) = fitted_client(&mut f);
+
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let serial = SERIAL_COUNTER.next_serial();
+    assert!(
+        f.state().start_compositor_resize_with_edge(
+            &pointer, &window, grab_at, BTN_LEFT, serial, None, false,
+        ),
+        "the pointer resize grab was installed"
+    );
+    motion(&mut f, grab_at + pt(100.0, 0.0));
+    f.double_roundtrip(id);
+
+    assert!(
+        !client_sees_maximized(&mut f, id, &csurface),
+        "the pointer resize told the client it is no longer maximized"
+    );
+    release(&mut f);
+}
+
+/// The fourth arm: a CSD client dragging its own border sends
+/// `xdg_toplevel.resize`, which clears fit state like every other arm and so
+/// owes the client the same `Maximized` clear — otherwise the window it just
+/// dragged still shows a restore button that does nothing.
+#[test]
+fn client_resize_request_on_a_fitted_window_clears_the_client_maximized_state() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let (id, csurface, window, grab_at) = fitted_client(&mut f);
+    let ssurface = server_surface(&window);
+
+    // A press over the window installs smithay's `ClickGrab` with the surface
+    // as its focus — the pointer grab `check_grab` gates the request on.
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let focus = Some((FocusTarget(ssurface.clone()), Point::from((0.0, 0.0))));
+    pointer.motion(
+        f.state(),
+        focus,
+        &MotionEvent {
+            location: grab_at,
+            serial: SERIAL_COUNTER.next_serial(),
+            time: 0,
+        },
+    );
+    pointer.button(
+        f.state(),
+        &ButtonEvent {
+            button: BTN_LEFT,
+            state: ButtonState::Pressed,
+            serial: SERIAL_COUNTER.next_serial(),
+            time: 0,
+        },
+    );
+
+    f.client(id).window(&csurface).resize(
+        wayland_protocols::xdg::shell::client::xdg_toplevel::ResizeEdge::Right,
+        1,
+    );
+    f.double_roundtrip(id);
+    assert!(
+        matches!(resize_state(&ssurface), ResizeState::Resizing { .. }),
+        "precondition: the request installed the compositor's resize grab"
+    );
+
+    motion(&mut f, grab_at + pt(100.0, 0.0));
+    f.double_roundtrip(id);
+
+    assert!(
+        !client_sees_maximized(&mut f, id, &csurface),
+        "the client's own resize request told it it is no longer maximized"
+    );
+    release(&mut f);
+}
+
+/// A resize that cannot start leaves the window untouched, per
+/// `start_compositor_resize_with_edge`'s bail-before-mutation contract: no
+/// fit clear, no `ResizeState`, no `Resizing` on the toplevel, no grab
+/// cursor, no grab installed.
+#[test]
+fn a_resize_that_cannot_start_touches_nothing() {
+    // No output at all, so `active_output()` is `None` — the bail furthest down
+    // the start path, past everything it would otherwise have written.
+    let mut f = Fixture::new();
+    let id = f.add_client();
+    map_window(&mut f, id, "c", (400, 300));
+    let window = window_by_app_id(&mut f, "c").expect("mapped with no output attached");
+    f.state().map_window(
+        StageWindow::Client(window.clone()),
+        Point::from((400, 300)),
+        true,
+    );
+    let ssurface = server_surface(&window);
+    f.state().stage.set_fit(&window, Size::from((400, 300)));
+
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let serial = SERIAL_COUNTER.next_serial();
+    assert!(
+        !f.state().start_compositor_resize_with_edge(
+            &pointer,
+            &window,
+            pt(700.0, 450.0),
+            BTN_LEFT,
+            serial,
+            None,
+            false,
+        ),
+        "with no output there is nothing to anchor a resize against"
+    );
+
+    assert!(
+        f.state().stage.is_fit(&window),
+        "the fit state survives a resize that never started"
+    );
+    assert!(
+        with_states(&ssurface, |states| states
+            .data_map
+            .get::<RefCell<ResizeState>>()
+            .is_none_or(|cell| matches!(*cell.borrow(), ResizeState::Idle))),
+        "no ResizeState was seeded"
+    );
+    assert!(
+        !window
+            .toplevel()
+            .unwrap()
+            .with_pending_state(|s| s.states.contains(xdg_toplevel::State::Resizing)),
+        "the client was never told it is resizing"
+    );
+    assert!(
+        !f.state().cursor.grab_cursor,
+        "the cursor was not handed to a resize that never started"
+    );
+    assert!(
+        !f.state().seat.get_pointer().unwrap().is_grabbed(),
+        "no grab was installed"
+    );
+}
+
+/// A pinned move that cannot start reports it, rather than leaving the caller
+/// to assume a grab exists. The trackpad's pinned arm keys its raise + focus
+/// and its `SwipeMove` latch off exactly this.
+#[test]
+fn a_pinned_move_on_an_unpinned_window_reports_failure() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let id = f.add_client();
+    map_window(&mut f, id, "c", (400, 300));
+    let window = window_by_app_id(&mut f, "c").unwrap();
+    f.state().map_window(
+        StageWindow::Client(window.clone()),
+        Point::from((400, 300)),
+        true,
+    );
+    assert!(
+        !f.state().stage.is_pinned(&window),
+        "precondition: the window is a plain canvas window"
+    );
+
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let serial = SERIAL_COUNTER.next_serial();
+    assert!(
+        !f.state()
+            .start_pinned_move(&pointer, &window, pt(600.0, 450.0), BTN_LEFT, serial),
+        "there is no pin site to move the window within"
+    );
+    assert!(
+        !f.state().seat.get_pointer().unwrap().is_grabbed(),
+        "no grab was installed"
+    );
 }

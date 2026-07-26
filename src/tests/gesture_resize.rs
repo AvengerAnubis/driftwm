@@ -22,7 +22,10 @@ use smithay::wayland::compositor::with_states;
 use crate::grabs::ResizeState;
 use crate::state::StageWindow;
 
-use super::{Fixture, adopt_last_configure, config, map_window, server_surface, window_by_app_id};
+use super::{
+    Fixture, adopt_last_configure, client_sees_maximized, config, fit_and_frame, map_window,
+    server_surface, window_by_app_id,
+};
 
 fn pt(x: f64, y: f64) -> Point<f64, Logical> {
     Point::from((x, y))
@@ -603,6 +606,70 @@ size = [400, 300]
         site,
         "the pin site is untouched"
     );
+}
+
+/// Resizing a fitted window clears the compositor's fit state, so the configure
+/// that starts the resize has to clear the client's `Maximized` too. A client
+/// left holding it has a dead restore button: the `unmaximize_request` that
+/// button dispatches finds no fit left and `unfit_window` drops it silently.
+/// The two gesture arms here; `resize_parity.rs` covers the pointer arm and the
+/// client's own `xdg_toplevel.resize`, so the four cannot diverge unnoticed.
+#[test]
+fn gesture_resize_of_a_fitted_window_clears_the_client_maximized_state() {
+    {
+        let mut f = Fixture::new();
+        f.add_output(1, (1920, 1080));
+        // Moving the camera seeds a per-output blur generation that only clears
+        // on output disconnect, so it can't return to the construction baseline.
+        f.skip_baseline_check();
+        origin_view(&mut f);
+        let id = f.add_client();
+        let csurface = map_window(&mut f, id, "c", (400, 300));
+        let window = window_by_app_id(&mut f, "c").unwrap();
+        f.state()
+            .map_window(StageWindow::Client(window.clone()), INITIAL, true);
+
+        let grab_at = fit_and_frame(&mut f, &window, id);
+        assert!(
+            client_sees_maximized(&mut f, id, &csurface),
+            "precondition: the fit told the client it is maximized"
+        );
+
+        assert!(f.state().try_start_gesture_resize(grab_at, false));
+        motion(&mut f, grab_at + pt(100.0, 0.0));
+        f.double_roundtrip(id);
+
+        assert!(
+            !client_sees_maximized(&mut f, id, &csurface),
+            "the trackpad resize told the client it is no longer maximized"
+        );
+        end_swipe(&mut f);
+    }
+
+    {
+        let mut f = Fixture::new();
+        let out = f.add_output(1, (1920, 1080));
+        f.skip_baseline_check();
+        origin_view(&mut f);
+        let id = f.add_client();
+        let csurface = map_window(&mut f, id, "c", (400, 300));
+        let window = window_by_app_id(&mut f, "c").unwrap();
+        f.state()
+            .map_window(StageWindow::Client(window.clone()), INITIAL, true);
+
+        let grab_at = fit_and_frame(&mut f, &window, id);
+        assert!(client_sees_maximized(&mut f, id, &csurface));
+
+        assert!(start_touch_gesture_resize(&mut f, grab_at, out));
+        touch_motion(&mut f, grab_at + pt(100.0, 0.0));
+        f.double_roundtrip(id);
+
+        assert!(
+            !client_sees_maximized(&mut f, id, &csurface),
+            "the touch resize says the same"
+        );
+        lift_finger(&mut f);
+    }
 }
 
 /// Both gesture resizes arm the interactive-move guard for the length of the

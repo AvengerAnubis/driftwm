@@ -556,6 +556,10 @@ impl XdgShellHandler for DriftWm {
 
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Resizing);
+            // Mirror the fit-state clear above, or the client keeps a Maximized
+            // it can no longer shed — its restore button would dispatch an
+            // unmaximize_request that `unfit_window` silently drops.
+            state.states.unset(xdg_toplevel::State::Maximized);
         });
 
         self.cursor.grab_cursor = true;

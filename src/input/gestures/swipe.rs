@@ -432,11 +432,17 @@ impl DriftWm {
         let serial = SERIAL_COUNTER.next_serial();
         let element = match target {
             // Screen-pinned windows move in screen space via the same grab as
-            // Alt+drag; the SwipeMove warp drives it.
+            // Alt+drag; the SwipeMove warp drives it. The picker above already
+            // resolved a pin site on the active output, so `start_pinned_move`'s
+            // bails can't fire here — checking anyway is defensive, matching the
+            // canvas arm's raise-after-grab-is-certain ordering below in case the
+            // picker's guarantee ever loosens.
             GestureTarget::Pinned(window) => {
-                self.raise_and_focus(&window, serial);
                 let pointer = self.seat.get_pointer().unwrap();
-                self.start_pinned_move(&pointer, &window, pos, 0, serial);
+                if !self.start_pinned_move(&pointer, &window, pos, 0, serial) {
+                    return false;
+                }
+                self.raise_and_focus(&window, serial);
                 self.gesture_state = Some(GestureState::SwipeMove);
                 return true;
             }
@@ -502,11 +508,14 @@ impl DriftWm {
             // Pinned windows resize in screen space; reuse the pointer resize
             // path, which infers the edge against the screen rect and threads the
             // pinned anchor through to the grab and the commit-time reposition.
+            // The picker above already resolved a pin site on the active output,
+            // so that path's bails can't fire here — checking anyway is
+            // defensive, matching the canvas arm's raise-after-grab-is-certain
+            // ordering below in case the picker's guarantee ever loosens.
             GestureTarget::Pinned(window) => {
                 let serial = SERIAL_COUNTER.next_serial();
-                self.raise_and_focus(&window, serial);
                 let pointer = self.seat.get_pointer().unwrap();
-                self.start_compositor_resize_with_edge(
+                if !self.start_compositor_resize_with_edge(
                     &pointer,
                     &window,
                     pos,
@@ -514,7 +523,10 @@ impl DriftWm {
                     serial,
                     None,
                     want_cluster,
-                );
+                ) {
+                    return false;
+                }
+                self.raise_and_focus(&window, serial);
                 self.gesture_state = Some(GestureState::SwipeResizeGrab);
                 return true;
             }
@@ -566,6 +578,11 @@ impl DriftWm {
                 if let Some(toplevel) = window.toplevel() {
                     toplevel.with_pending_state(|state| {
                         state.states.set(xdg_toplevel::State::Resizing);
+                        // Mirror the fit-state clear above, or the client keeps a
+                        // Maximized it can no longer shed — its restore button
+                        // would dispatch an unmaximize_request that `unfit_window`
+                        // silently drops.
+                        state.states.unset(xdg_toplevel::State::Maximized);
                     });
                 }
                 (

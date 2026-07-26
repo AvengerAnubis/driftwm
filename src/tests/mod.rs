@@ -204,6 +204,57 @@ fn server_surface(window: &Window) -> WlSurface {
     window.wl_surface().unwrap().into_owned()
 }
 
+/// Whether the client's most recent configure carried `Maximized` — what a
+/// client's own restore button keys off. Shared by every resize arm's test, so
+/// the check that keeps the arms in sync isn't itself duplicated.
+fn client_sees_maximized(
+    f: &mut Fixture,
+    id: client::ClientId,
+    surface: &wayland_client::protocol::wl_surface::WlSurface,
+) -> bool {
+    f.client(id)
+        .window(surface)
+        .configures_received
+        .last()
+        .unwrap()
+        .1
+        .states
+        .contains(&wayland_protocols::xdg::shell::client::xdg_toplevel::State::Maximized)
+}
+
+/// Fit `window`, then snap the viewport onto it: the fit only *animates* the
+/// camera, while a resize grab clamps the pointer to the output, so an
+/// un-settled camera would swallow the drag. Returns a grab point 10px inside
+/// the window's right edge — the client hasn't acked the fit size yet, so the
+/// rect to aim at is still the pre-fit one.
+fn fit_and_frame(
+    f: &mut Fixture,
+    window: &Window,
+    id: client::ClientId,
+) -> smithay::utils::Point<f64, smithay::utils::Logical> {
+    use crate::state::StageWindow;
+    use smithay::utils::Point;
+
+    f.state().fit_window(window);
+    let loc = f
+        .state()
+        .stage
+        .position_of(&StageWindow::Client(window.clone()))
+        .unwrap();
+    f.state().with_output_state(|os| {
+        os.camera = Point::from((loc.x as f64, loc.y as f64));
+        os.camera_target = None;
+        os.zoom = 1.0;
+        os.zoom_target = None;
+    });
+    f.double_roundtrip(id);
+    let size = window.geometry().size;
+    Point::from((
+        loc.x as f64 + size.w as f64 - 10.0,
+        loc.y as f64 + size.h as f64 / 2.0,
+    ))
+}
+
 /// Whether `window`'s toplevel currently carries the xdg `Activated` state
 /// (the "focused window" chrome hint the compositor sets exclusively).
 fn is_activated(window: &Window) -> bool {
