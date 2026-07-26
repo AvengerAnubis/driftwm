@@ -26,7 +26,7 @@ pub use focus::{FocusIntent, FocusTarget};
 pub(crate) use navigation::CLICK_NAVIGATE_SLOP;
 pub use persistence::{read_all_per_output_state, remove_state_file};
 pub use render_cache::{BorderCacheEntry, RenderCache, ShadowCacheEntry};
-pub use session_store::SessionStore;
+pub use session_store::{CameraSeed, SessionStore};
 pub use stage_window::{StageWindow, SuspendedId, SuspendedWindow};
 pub use suspended::{PendingRelaunch, RelaunchMarker, SuspendMark, UnmapSnapshot};
 

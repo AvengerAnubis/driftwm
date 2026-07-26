@@ -15,7 +15,7 @@ use smithay::utils::{Point, Rectangle, SERIAL_COUNTER, Size};
 
 use crate::decorations::DecorationHit;
 use crate::input::DecoTarget;
-use crate::state::{FocusTarget, StageWindow, SuspendedWindow};
+use crate::state::{CameraSeed, FocusTarget, StageWindow, SuspendedWindow};
 
 use super::real::TempDir;
 use super::{Fixture, map_window, server_surface, window_by_app_id};
@@ -455,7 +455,7 @@ fn a_withheld_restored_focus_survives_to_the_next_boot() {
     // sits at internal (39_800, -40_150): frame it from a little up-left of that.
     let saved = HashMap::from([(
         "HEADLESS-1".to_string(),
-        (Point::from((39_600.0, -40_350.0)), 1.0),
+        (CameraSeed::Camera(Point::from((39_600.0, -40_350.0))), 1.0),
     )]);
     super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &saved);
     f.state().session_store.path = Some(path.clone());
@@ -700,7 +700,7 @@ fn durable_camera_seeds_fresh_boot() {
     f.state().load_session();
 
     // Fresh boot: no runtime entry for HEADLESS-1, so the durable seed applies.
-    let seed = f.state().session_store.durable_cameras.clone();
+    let seed = f.state().saved_camera_state();
     let (output, _global) =
         super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &seed);
     let (camera, zoom) = {
@@ -709,6 +709,78 @@ fn durable_camera_seeds_fresh_boot() {
     };
     assert_eq!(camera, Point::from((-1234.0, -5678.0)));
     assert_eq!(zoom, 0.75);
+}
+
+/// The runtime state file publishes each output's viewport centre, so a seed
+/// from it restores the viewport that centre framed — at a zoom where centre
+/// and internal camera are far apart.
+#[test]
+fn center_seed_restores_the_framed_viewport() {
+    let mut f = Fixture::with_config(Config::default());
+    let logical = Size::from((1920, 1080));
+    let camera = Point::from((-1234.0, -5678.0));
+    let zoom = 0.75;
+    let (x, y) = driftwm::canvas::viewport_center(camera, zoom, logical);
+
+    let saved = HashMap::from([(
+        "HEADLESS-1".to_string(),
+        (CameraSeed::Center { x, y }, zoom),
+    )]);
+    let (output, _global) =
+        super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &saved);
+
+    let (restored, restored_zoom) = {
+        let os = crate::state::output_state(&output);
+        (os.camera, os.zoom)
+    };
+    assert!(
+        (restored.x - camera.x).abs() < 1e-6 && (restored.y - camera.y).abs() < 1e-6,
+        "restored camera {restored:?} does not frame the published centre"
+    );
+    assert_eq!(restored_zoom, zoom);
+}
+
+/// The seed is checked after it resolves, so the bounds guard the camera the
+/// output actually takes. A centre that is itself inside the canvas limit but
+/// lands outside it once the half-viewport is subtracted is refused, and the
+/// output keeps its default viewport.
+#[test]
+fn a_center_seed_resolving_out_of_range_is_refused() {
+    let mut f = Fixture::with_config(Config::default());
+    let saved = HashMap::from([(
+        "HEADLESS-1".to_string(),
+        (CameraSeed::Center { x: -1e9, y: 0.0 }, 0.5),
+    )]);
+    let (output, _global) =
+        super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &saved);
+
+    let (camera, zoom) = {
+        let os = crate::state::output_state(&output);
+        (os.camera, os.zoom)
+    };
+    assert_eq!(camera, Point::from((-960.0, -540.0)), "default camera");
+    assert_eq!(zoom, 1.0, "default zoom");
+}
+
+/// A `zoom: 0.0` centre seed (hand-edit / corruption in the runtime state file,
+/// which validates nothing itself) divides the conversion to infinity. The
+/// output falls back to its default viewport instead of taking an inf camera.
+#[test]
+fn a_corrupt_zoom_center_seed_is_refused() {
+    let mut f = Fixture::with_config(Config::default());
+    let saved = HashMap::from([(
+        "HEADLESS-1".to_string(),
+        (CameraSeed::Center { x: 0.0, y: 0.0 }, 0.0),
+    )]);
+    let (output, _global) =
+        super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &saved);
+
+    let (camera, zoom) = {
+        let os = crate::state::output_state(&output);
+        (os.camera, os.zoom)
+    };
+    assert_eq!(camera, Point::from((-960.0, -540.0)), "default camera");
+    assert_eq!(zoom, 1.0, "default zoom");
 }
 
 /// A parseable entry with out-of-range geometry (a hand-edit / flipped byte)
@@ -793,7 +865,7 @@ fn invalid_zoom_seed_is_ignored_and_reserializes_sane() {
     );
 
     // The output connects with the default centered camera/zoom.
-    let seed = f.state().session_store.durable_cameras.clone();
+    let seed = f.state().saved_camera_state();
     let (output, _global) =
         super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &seed);
     let (camera, zoom) = {

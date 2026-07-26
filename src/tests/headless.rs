@@ -21,10 +21,7 @@ pub fn add_output_with_saved(
     state: &mut DriftWm,
     n: u8,
     size: (u16, u16),
-    saved: &std::collections::HashMap<
-        String,
-        (smithay::utils::Point<f64, smithay::utils::Logical>, f64),
-    >,
+    saved: &std::collections::HashMap<String, (crate::state::CameraSeed, f64)>,
 ) -> (Output, GlobalId) {
     let output = Output::new(
         format!("HEADLESS-{n}"),

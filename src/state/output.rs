@@ -5,7 +5,7 @@ use smithay::utils::{Logical, Point};
 
 use driftwm::config::OutputPosition;
 
-use super::{DriftWm, init_output_state, output_logical_size, output_state};
+use super::{CameraSeed, DriftWm, init_output_state, output_logical_size, output_state};
 
 impl DriftWm {
     /// Retire every virtual placeholder output (the ones held while all physical
@@ -49,11 +49,12 @@ impl DriftWm {
     /// this owns that plus the per-output viewport state, focus bootstrap,
     /// [`Space`] mapping, and re-anchoring of orphaned pinned windows.
     ///
-    /// `saved` holds any persisted `(camera, zoom)` per output name to restore.
+    /// `saved` holds any persisted `(viewport seed, zoom)` per output name to
+    /// restore.
     pub fn output_connected(
         &mut self,
         output: &Output,
-        saved: &HashMap<String, (Point<f64, Logical>, f64)>,
+        saved: &HashMap<String, (CameraSeed, f64)>,
     ) {
         // Retire first: unmapping placeholders shrinks the auto-position sum below.
         self.retire_placeholders();
@@ -87,11 +88,14 @@ impl DriftWm {
         let camera = Point::from((-(logical.w as f64) / 2.0, -(logical.h as f64) / 2.0));
         init_output_state(output, camera, self.config.drift, position);
 
-        // Restore per-output camera/zoom from the state file if available. A
-        // seed outside sane bounds (a hand-edit / corruption reaching here via
-        // the runtime file, which has no validation of its own) is ignored so
-        // the output keeps its default camera instead of an inf/NaN viewport.
-        if let Some(&(saved_cam, saved_zoom)) = saved.get(&output.name()) {
+        // Restore per-output camera/zoom from the state file if available. The
+        // seed is resolved to an internal camera first, so the bounds check
+        // guards the value actually assigned: a seed outside sane bounds (a
+        // hand-edit / corruption reaching here via the runtime file, which has
+        // no validation of its own) is ignored so the output keeps its default
+        // camera instead of an inf/NaN viewport.
+        if let Some(&(seed, saved_zoom)) = saved.get(&output.name()) {
+            let saved_cam = seed.resolve(saved_zoom, logical);
             if super::session_store::valid_camera_seed(saved_cam, saved_zoom) {
                 let mut os = output_state(output);
                 os.camera = saved_cam;

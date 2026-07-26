@@ -33,6 +33,30 @@ use super::{
 /// How long a move/resize coalesces before the durable write lands.
 const WRITE_DEBOUNCE: Duration = Duration::from_secs(1);
 
+/// A per-output viewport seed waiting for its output to connect. The two
+/// sources speak different conventions, so the variant carries which one this
+/// is instead of leaving two meanings under one `Point`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CameraSeed {
+    /// The durable envelope's internal top-left camera, Y-down.
+    Camera(Point<f64, Logical>),
+    /// The runtime state file's published viewport centre, Y-up. Resolving it
+    /// needs the output's logical size and zoom, so it stays unresolved until
+    /// [`DriftWm::output_connected`].
+    Center { x: f64, y: f64 },
+}
+
+impl CameraSeed {
+    /// The internal camera this seed stands for on an output of `logical` size
+    /// at `zoom`.
+    pub fn resolve(self, zoom: f64, logical: Size<i32, Logical>) -> Point<f64, Logical> {
+        match self {
+            CameraSeed::Camera(camera) => camera,
+            CameraSeed::Center { x, y } => driftwm::canvas::camera_for_center(x, y, zoom, logical),
+        }
+    }
+}
+
 /// Runtime bookkeeping for the durable session store.
 #[derive(Default)]
 pub struct SessionStore {
@@ -183,18 +207,22 @@ impl DriftWm {
     /// Per-output cameras to restore on connect: the durable fresh-boot seed
     /// with the runtime state file layered on top, so runtime wins within a
     /// login session and durable only fills gaps the runtime file lacks.
-    pub fn saved_camera_state(&self) -> HashMap<String, (Point<f64, Logical>, f64)> {
+    pub fn saved_camera_state(&self) -> HashMap<String, (CameraSeed, f64)> {
         // Camera restore is opt-in: without it, a connecting output starts at
         // its default centered camera, so the durable seed is withheld here (it
         // still carries forward on the write side). The runtime state file is
         // unconditional — it drives within-session output reconnects, a
         // separate concern from restoring across restarts.
         let durable = if self.config.session.restore_camera {
-            self.session_store.durable_cameras.clone()
+            self.session_store
+                .durable_cameras
+                .iter()
+                .map(|(name, &(cam, zoom))| (name.clone(), (CameraSeed::Camera(cam), zoom)))
+                .collect()
         } else {
             HashMap::new()
         };
-        merge_saved_cameras(&durable, super::read_all_per_output_state())
+        merge_saved_cameras(durable, super::read_all_per_output_state())
     }
 
     /// Immediate write for a create/dismiss: cancel any pending debounce and
@@ -482,12 +510,11 @@ fn suspended_entry(s: &SuspendedWindow, loc: Point<i32, Logical>) -> SessionEntr
 
 /// Merge the durable fresh-boot seed under the runtime file, which wins.
 fn merge_saved_cameras(
-    durable: &HashMap<String, (Point<f64, Logical>, f64)>,
-    runtime: HashMap<String, (Point<f64, Logical>, f64)>,
-) -> HashMap<String, (Point<f64, Logical>, f64)> {
-    let mut merged = durable.clone();
-    merged.extend(runtime);
-    merged
+    mut durable: HashMap<String, (CameraSeed, f64)>,
+    runtime: HashMap<String, (CameraSeed, f64)>,
+) -> HashMap<String, (CameraSeed, f64)> {
+    durable.extend(runtime);
+    durable
 }
 
 fn now_unix() -> u64 {
@@ -591,18 +618,57 @@ mod tests {
     #[test]
     fn runtime_camera_wins_over_durable_seed() {
         let mut durable = HashMap::new();
-        durable.insert("only-durable".to_string(), (Point::from((1.0, 2.0)), 1.0));
-        durable.insert("shared".to_string(), (Point::from((3.0, 4.0)), 1.5));
+        durable.insert(
+            "only-durable".to_string(),
+            (CameraSeed::Camera(Point::from((1.0, 2.0))), 1.0),
+        );
+        durable.insert(
+            "shared".to_string(),
+            (CameraSeed::Camera(Point::from((3.0, 4.0))), 1.5),
+        );
 
         let mut runtime = HashMap::new();
-        runtime.insert("shared".to_string(), (Point::from((9.0, 9.0)), 2.0));
-        runtime.insert("only-runtime".to_string(), (Point::from((5.0, 6.0)), 0.5));
+        runtime.insert(
+            "shared".to_string(),
+            (CameraSeed::Center { x: 9.0, y: 9.0 }, 1.0),
+        );
+        runtime.insert(
+            "only-runtime".to_string(),
+            (CameraSeed::Center { x: 5.0, y: 6.0 }, 0.5),
+        );
 
-        let merged = merge_saved_cameras(&durable, runtime);
+        let merged = merge_saved_cameras(durable, runtime);
         // A durable-only output is seeded on fresh boot.
-        assert_eq!(merged["only-durable"], (Point::from((1.0, 2.0)), 1.0));
+        assert_eq!(
+            merged["only-durable"],
+            (CameraSeed::Camera(Point::from((1.0, 2.0))), 1.0)
+        );
         // The runtime file wins within a login session.
-        assert_eq!(merged["shared"], (Point::from((9.0, 9.0)), 2.0));
-        assert_eq!(merged["only-runtime"], (Point::from((5.0, 6.0)), 0.5));
+        assert_eq!(
+            merged["shared"],
+            (CameraSeed::Center { x: 9.0, y: 9.0 }, 1.0)
+        );
+        assert_eq!(
+            merged["only-runtime"],
+            (CameraSeed::Center { x: 5.0, y: 6.0 }, 0.5)
+        );
+    }
+
+    #[test]
+    fn resolving_a_center_cannot_smuggle_a_bad_camera_past_validation() {
+        let logical = Size::from((1920, 1080));
+
+        // A corrupt zoom divides the half-viewport to infinity. Validating
+        // under a sane zoom isolates the camera clauses as what rejects it.
+        let camera = CameraSeed::Center { x: 0.0, y: 0.0 }.resolve(0.0, logical);
+        assert!(!camera.x.is_finite() && !camera.y.is_finite());
+        assert!(
+            !valid_camera_seed(camera, 1.0),
+            "a non-finite camera is refused even under a sane zoom"
+        );
+
+        // A centre inside the canvas limit can still resolve past it.
+        let camera = CameraSeed::Center { x: -1e9, y: 0.0 }.resolve(0.5, logical);
+        assert!(!valid_camera_seed(camera, 0.5));
     }
 }

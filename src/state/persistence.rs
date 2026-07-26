@@ -17,6 +17,10 @@
 //! `position` is the window **center** in the rule convention (Y-up), but
 //! relative to the **output center** rather than the canvas origin, so the
 //! numbers paste straight into a `pinned_to_screen` rule's `position`.
+//!
+//! `outputs.{name}.camera_x`/`camera_y` are that output's viewport **center**
+//! in canvas coordinates (Y-up), like the top-level `x=`/`y=` — not the
+//! internal camera.
 
 use serde::Serialize;
 use smithay::utils::{Logical, Point, Size};
@@ -28,7 +32,7 @@ use driftwm::window_ext::WindowExt;
 
 use crate::ipc::protocol::{CanvasLayerInfo, OutputFullscreen, OutputPinned, WindowInfo};
 
-use super::{DriftWm, output_logical_size, output_state};
+use super::{CameraSeed, DriftWm, output_logical_size, output_state};
 
 /// A fullscreen window in the state file's per-output section.
 #[derive(Serialize)]
@@ -497,10 +501,7 @@ impl DriftWm {
                 let os = output_state(output);
                 (os.camera, os.zoom)
             };
-            content += &format!(
-                "outputs.{name}.camera_x={:.1}\noutputs.{name}.camera_y={:.1}\noutputs.{name}.zoom={z:.3}\n",
-                cam.x, cam.y
-            );
+            content += &per_output_camera_lines(&name, cam, z, output_logical_size(output));
 
             if let Some(info) = fullscreen_by_output.get(&name)
                 && let Ok(json) = serde_json::to_string(info)
@@ -535,6 +536,22 @@ impl DriftWm {
     }
 }
 
+/// The `outputs.{name}.camera_x/camera_y/zoom` lines for one output. The camera
+/// is published as the viewport centre in canvas coordinates (Y-up), the same
+/// convention as the top-level `x=`/`y=` and IPC's per-output `camera`, not the
+/// internal top-left camera.
+fn per_output_camera_lines(
+    name: &str,
+    camera: Point<f64, Logical>,
+    zoom: f64,
+    logical: Size<i32, Logical>,
+) -> String {
+    let (cx, cy) = driftwm::canvas::viewport_center(camera, zoom, logical);
+    format!(
+        "outputs.{name}.camera_x={cx:.1}\noutputs.{name}.camera_y={cy:.1}\noutputs.{name}.zoom={zoom:.3}\n"
+    )
+}
+
 fn state_file_dir() -> Option<std::path::PathBuf> {
     std::env::var("XDG_RUNTIME_DIR")
         .ok()
@@ -549,17 +566,21 @@ pub fn remove_state_file() {
     }
 }
 
-/// Read all per-output camera/zoom entries from the state file.
-/// Returns a map from output name to `(camera, zoom)`.
-pub fn read_all_per_output_state() -> HashMap<String, (Point<f64, Logical>, f64)> {
-    let mut result = HashMap::new();
+/// Read all per-output viewport entries from the state file. Returns a map from
+/// output name to `(centre, zoom)`, unresolved because the conversion back to an
+/// internal camera needs the output's logical size (see [`CameraSeed`]).
+pub fn read_all_per_output_state() -> HashMap<String, (CameraSeed, f64)> {
     let Some(dir) = state_file_dir() else {
-        return result;
+        return HashMap::new();
     };
     let Ok(content) = std::fs::read_to_string(dir.join("state")) else {
-        return result;
+        return HashMap::new();
     };
+    parse_per_output_state(&content)
+}
 
+fn parse_per_output_state(content: &str) -> HashMap<String, (CameraSeed, f64)> {
+    let mut result = HashMap::new();
     // Parse lines like "outputs.eDP-1.camera_x=123.4"
     type Partial = (Option<f64>, Option<f64>, Option<f64>);
     let mut entries: HashMap<String, Partial> = HashMap::new();
@@ -584,7 +605,7 @@ pub fn read_all_per_output_state() -> HashMap<String, (Point<f64, Logical>, f64)
     }
     for (name, (cx, cy, z)) in entries {
         if let (Some(x), Some(y), Some(zoom)) = (cx, cy, z) {
-            result.insert(name, (Point::from((x, y)), zoom));
+            result.insert(name, (CameraSeed::Center { x, y }, zoom));
         }
     }
     result
@@ -619,6 +640,31 @@ mod tests {
         let a = vec![win(1, "one"), win(2, "two")];
         let b = vec![win(1, "one"), win(2, "two")];
         assert!(!window_titles_changed(&a, &b));
+    }
+
+    #[test]
+    fn per_output_camera_publishes_the_viewport_center() {
+        let logical = Size::from((1920, 1080));
+        let camera = Point::from((-1234.0, -5678.0));
+        let zoom = 0.75;
+
+        let content = per_output_camera_lines("eDP-1", camera, zoom, logical);
+        assert!(
+            content.contains("outputs.eDP-1.camera_x=46.0\n")
+                && content.contains("outputs.eDP-1.camera_y=4958.0\n"),
+            "camera is published as the Y-up viewport centre, not the internal \
+             top-left camera: {content}"
+        );
+        assert!(content.contains("outputs.eDP-1.zoom=0.750\n"));
+
+        // A reader converts back with the output's size and zoom.
+        let (seed, parsed_zoom) = parse_per_output_state(&content)["eDP-1"];
+        assert_eq!(parsed_zoom, zoom);
+        let resolved = seed.resolve(parsed_zoom, logical);
+        assert!(
+            (resolved.x - camera.x).abs() < 0.1 && (resolved.y - camera.y).abs() < 0.1,
+            "round trip landed at {resolved:?}"
+        );
     }
 
     #[test]
