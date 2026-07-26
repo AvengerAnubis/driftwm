@@ -188,6 +188,10 @@ fn toml_touch_thresholds_default_to_the_recognizer_constants() {
     assert_eq!(th.swipe_distance_mm, 15.0);
     assert_eq!(th.pinch_in_scale, 0.85);
     assert_eq!(th.pinch_out_scale, 1.15);
+    assert_eq!(th.tap_max_ms, 250);
+    assert_eq!(th.double_tap_ms, 300);
+    assert_eq!(th.hold_ms, 350);
+    assert_eq!(th.dead_zone_mm, 2.0);
     assert!(
         warnings.is_empty(),
         "defaults must not warn, got {warnings:?}"
@@ -201,12 +205,20 @@ fn toml_touch_thresholds_can_be_overridden() {
         swipe_threshold = 25.0
         pinch_in_threshold = 0.7
         pinch_out_threshold = 1.4
+        tap_time = 180
+        double_tap_time = 220
+        hold_time = 500
+        tap_travel = 3.5
     "#;
     let (config, warnings) = Config::from_toml_collect(toml).unwrap();
     let th = &config.touch_thresholds;
     assert_eq!(th.swipe_distance_mm, 25.0);
     assert_eq!(th.pinch_in_scale, 0.7);
     assert_eq!(th.pinch_out_scale, 1.4);
+    assert_eq!(th.tap_max_ms, 180);
+    assert_eq!(th.double_tap_ms, 220);
+    assert_eq!(th.hold_ms, 500);
+    assert_eq!(th.dead_zone_mm, 3.5);
     assert!(
         warnings.is_empty(),
         "valid values must not warn, got {warnings:?}"
@@ -253,6 +265,25 @@ fn toml_touch_thresholds_reject_negatives_with_a_warning() {
     assert!(
         warnings.iter().any(|w| w.contains("touch.swipe_threshold")),
         "a negative value should floor at 0 with a warning, got {warnings:?}"
+    );
+}
+
+/// The timings are integers, so a negative one must still correct-and-warn like
+/// every other numeric key rather than failing the whole file to parse.
+#[test]
+fn toml_touch_timings_reject_negatives_with_a_warning() {
+    let toml = r#"
+        [touch]
+        tap_time = -1
+        hold_time = -200
+    "#;
+    let (config, warnings) = Config::from_toml_collect(toml).unwrap();
+    assert_eq!(config.touch_thresholds.tap_max_ms, 0);
+    assert_eq!(config.touch_thresholds.hold_ms, 0);
+    assert!(
+        warnings.iter().any(|w| w.contains("touch.tap_time"))
+            && warnings.iter().any(|w| w.contains("touch.hold_time")),
+        "negative timings should floor at 0 with a warning, got {warnings:?}"
     );
 }
 

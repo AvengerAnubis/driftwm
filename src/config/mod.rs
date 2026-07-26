@@ -838,6 +838,26 @@ impl Config {
                 "touch.pinch_out_threshold",
                 &mut errors,
             ),
+            tap_max_ms: non_negative(
+                raw.touch.tap_time.unwrap_or(250),
+                "touch.tap_time",
+                &mut errors,
+            ) as u32,
+            double_tap_ms: non_negative(
+                raw.touch.double_tap_time.unwrap_or(300),
+                "touch.double_tap_time",
+                &mut errors,
+            ) as u32,
+            hold_ms: non_negative(
+                raw.touch.hold_time.unwrap_or(350),
+                "touch.hold_time",
+                &mut errors,
+            ) as u32,
+            dead_zone_mm: non_negative(
+                raw.touch.tap_travel.unwrap_or(2.0),
+                "touch.tap_travel",
+                &mut errors,
+            ),
         };
 
         let keyboard_layout = {

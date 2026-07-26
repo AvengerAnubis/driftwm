@@ -485,16 +485,35 @@ impl Default for GestureThresholds {
     }
 }
 
-/// Touch equivalents of [`GestureThresholds`], kept separate because a
+/// Every threshold the touch recognizer arbitrates on. The first three are the
+/// touch equivalents of [`GestureThresholds`], kept separate because a
 /// touchscreen is a display: swipe travel is measured in millimetres and scaled
 /// by the panel's `px_per_mm`, so a command gesture feels the same on a phone
 /// panel and a 15" tablet. A trackpad has no such physical anchor and measures
-/// its swipe in px, so the two knobs cannot share a value.
+/// its swipe in px, so the two knobs cannot share a value. The rest are the
+/// tap/hold timings, which a trackpad has no counterpart for at all — a
+/// touchscreen tap is a whole finger landing on glass, not a pad click.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TouchThresholds {
     pub swipe_distance_mm: f64,
     pub pinch_in_scale: f64,
     pub pinch_out_scale: f64,
+    /// Max duration of a tap (center / fit trigger). A lift later than this is a
+    /// slow press, not a tap, and fires nothing.
+    pub tap_max_ms: u32,
+    /// Window for a second tap to count as a double-tap. Also how long a single
+    /// tap's action is *deferred*, since the recognizer can't know a second tap
+    /// isn't coming until the window closes.
+    pub double_tap_ms: u32,
+    /// Dwell before a drag commits that turns it into a hold gesture: hold-swipe
+    /// (no prior tap) or doubletap-hold-swipe (after a double-tap). Long enough
+    /// that a normal pan, which drags promptly, never trips it.
+    pub hold_ms: u32,
+    /// Finger travel before a pan/zoom gesture leaves the dead zone and starts to
+    /// pan, in millimetres (converted to px per panel via `px_per_mm` so the feel
+    /// is the same on any touchscreen). Below this — and below the zoom slop — a
+    /// contact stays a candidate tap.
+    pub dead_zone_mm: f64,
 }
 
 impl Default for TouchThresholds {
@@ -503,6 +522,10 @@ impl Default for TouchThresholds {
             swipe_distance_mm: 15.0,
             pinch_in_scale: 0.85,
             pinch_out_scale: 1.15,
+            tap_max_ms: 250,
+            double_tap_ms: 300,
+            hold_ms: 350,
+            dead_zone_mm: 2.0,
         }
     }
 }

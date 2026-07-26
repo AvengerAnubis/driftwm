@@ -384,8 +384,8 @@ fn held_hold_swipe_wins_over_swipe_grab() {
          \"3-finger-swipe\" = \"move-window\"\n",
     )
     .unwrap();
-    // The fingers dwell past HOLD_MS (350ms) before the drag activates → the
-    // hold-swipe grab (resize) wins over the swipe-slot grab (move).
+    // The fingers dwell past the default hold_time (350ms) before the drag
+    // activates → the hold-swipe grab (resize) wins over the swipe-slot grab (move).
     let seq = vec![
         down(0, 500.0, 500.0, false, 0),
         down(1, 550.0, 500.0, false, 10),
@@ -439,8 +439,8 @@ fn armed_held_uses_doubletap_hold_swipe_for_cluster() {
         up(1, 45),
         up(2, 50),
     ]);
-    // Armed drag that dwells past HOLD_MS (350ms) before activating → armed AND
-    // held → the doubletap-hold-swipe binding (cluster move).
+    // Armed drag that dwells past the default hold_time (350ms) before activating
+    // → armed AND held → the doubletap-hold-swipe binding (cluster move).
     h.run(&[
         down(0, 500.0, 500.0, false, 100),
         down(1, 550.0, 500.0, false, 110),
@@ -647,7 +647,8 @@ fn three_finger_tap_within_window_taps() {
 #[test]
 fn slow_tap_past_tap_window_does_not_tap() {
     let cfg = cfg_default();
-    // Same clean 3-finger tap but the lift lands well past TAP_MAX_MS (250ms).
+    // Same clean 3-finger tap but the lift lands well past the default tap_time
+    // (250ms).
     let seq = vec![
         down(0, 500.0, 500.0, false, 0),
         down(1, 550.0, 500.0, false, 10),
@@ -660,6 +661,109 @@ fn slow_tap_past_tap_window_does_not_tap() {
     assert!(
         !decs.iter().any(|d| matches!(d, Decision::Tap { .. })),
         "a tap past the window must not fire, got {decs:?}"
+    );
+}
+
+/// The same lift the default rejects, accepted once `tap_time` is widened — the
+/// configured value has to reach the recognizer, not just the `Config`.
+#[test]
+fn configured_tap_time_widens_the_tap_window() {
+    let cfg = Config::from_toml("[touch]\ntap_time = 500\n").unwrap();
+    let seq = vec![
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 550.0, 500.0, false, 10),
+        down(2, 600.0, 500.0, false, 20),
+        up(0, 400),
+        up(1, 410),
+        up(2, 420),
+    ];
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter().any(|d| matches!(d, Decision::Tap { .. })),
+        "a lift inside the widened window must tap, got {decs:?}"
+    );
+}
+
+/// `double_tap_time` is also the delay a single tap's action waits out, so the
+/// deferred-center outcome carries it verbatim.
+#[test]
+fn configured_double_tap_time_sets_the_deferred_center_delay() {
+    let cfg = Config::from_toml("[touch]\ndouble_tap_time = 120\n").unwrap();
+    let seq = vec![
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 550.0, 500.0, false, 10),
+        down(2, 600.0, 500.0, false, 20),
+        up(0, 40),
+        up(1, 50),
+        up(2, 60),
+    ];
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter().any(|d| matches!(
+            d,
+            Decision::Tap {
+                outcome: TapOutcome::DeferCenter { delay_ms: 120 },
+                ..
+            }
+        )),
+        "the deferred center must wait the configured window, got {decs:?}"
+    );
+}
+
+/// A dwell too short for the default `hold_time` commits as a hold once the key
+/// is lowered.
+#[test]
+fn configured_hold_time_commits_the_hold_grab_sooner() {
+    let cfg = Config::from_toml(
+        "[touch]\n\
+         hold_time = 100\n\
+         [touch.anywhere]\n\
+         \"3-finger-pinch\" = \"none\"\n\
+         \"3-finger-hold-swipe\" = \"resize-window\"\n\
+         \"3-finger-swipe\" = \"move-window\"\n",
+    )
+    .unwrap();
+    // 150ms of dwell: past the configured 100ms, far short of the 350ms default.
+    let seq = vec![
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 550.0, 500.0, false, 10),
+        down(2, 600.0, 500.0, false, 20),
+        motion(0, 500.0, 560.0, 150),
+        motion(1, 550.0, 560.0, 155),
+        motion(2, 600.0, 560.0, 160),
+    ];
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter().any(|d| matches!(
+            d,
+            Decision::StartWindowGrab {
+                action: ContinuousAction::ResizeWindow
+            }
+        )),
+        "the shortened dwell must select the hold-swipe grab, got {decs:?}"
+    );
+}
+
+/// A drag that pans under the default dead zone stays inert once `tap_travel`
+/// puts it back inside.
+#[test]
+fn configured_tap_travel_widens_the_dead_zone() {
+    let cfg = Config::from_toml("[touch]\ntap_travel = 30.0\n").unwrap();
+    // 60px of travel: past the default 2mm (8px here), inside the configured
+    // 30mm (120px).
+    let seq = vec![
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 600.0, 500.0, false, 10),
+        motion(0, 500.0, 530.0, 20),
+        motion(1, 600.0, 530.0, 25),
+        motion(0, 500.0, 560.0, 30),
+        motion(1, 600.0, 560.0, 35),
+    ];
+    let decs = run_all(&cfg, &seq);
+    assert_eq!(
+        count(&decs, is_pan),
+        0,
+        "travel inside the widened dead zone must not pan, got {decs:?}"
     );
 }
 

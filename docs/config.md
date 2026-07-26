@@ -979,6 +979,34 @@ Default: `1.15`
 
 scale above which pinch-out fires (1.0 = no pinch)
 
+### `tap_time`
+
+Default: `250`
+
+Tap and hold timings — how long a contact may linger before the recognizer stops reading it as a tap, and how long a drag must dwell before it counts as a hold. Raise them if gestures need a deliberate, unhurried touch; lower them if the panel feels sluggish to respond.
+
+double_tap_time is a latency you pay on every tap, not just double-taps: a single tap's action cannot fire until the window for a second tap has closed, so a bound tap action always waits this long before anything happens. Shorten it for a snappier single tap, at the price of a double-tap you must perform faster.
+
+ms a tap may last; lift later and no tap fires
+
+### `double_tap_time`
+
+Default: `300`
+
+ms window for a second tap to pair into a double-tap — and the delay a single tap's action waits out before it fires
+
+### `hold_time`
+
+Default: `350`
+
+ms of dwell before a drag commits as a hold gesture (hold-swipe, doubletap-hold-swipe) instead of a plain swipe
+
+### `tap_travel`
+
+Default: `2.0`
+
+mm a contact may drift and still count as a tap; past this it becomes a pan or drag
+
 Bindings: `"N-finger-<type>" = "action"`  (touch has no keyboard modifiers) Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" removes a binding in its context. A fully unbound gesture forwards to the app.
 
 Touch gesture types (1–5 fingers):

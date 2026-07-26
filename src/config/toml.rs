@@ -359,12 +359,18 @@ pub(super) struct GestureFileConfig {
 /// `[input.touch]` device settings (`TouchDeviceFileConfig`). Touch has no
 /// modifiers, so the three context maps carry no chords; the thresholds mirror
 /// `[gestures]`' names but are its own knobs, and `swipe_threshold` is in mm.
+/// The timings are signed so a negative floors to 0 with a warning like every
+/// other numeric key, instead of failing the whole file to deserialize.
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct TouchFileConfig {
     pub swipe_threshold: Option<f64>,
     pub pinch_in_threshold: Option<f64>,
     pub pinch_out_threshold: Option<f64>,
+    pub tap_time: Option<i32>,
+    pub double_tap_time: Option<i32>,
+    pub hold_time: Option<i32>,
+    pub tap_travel: Option<f64>,
     #[serde(rename = "on-window")]
     pub on_window: Option<HashMap<String, String>>,
     #[serde(rename = "on-canvas")]
