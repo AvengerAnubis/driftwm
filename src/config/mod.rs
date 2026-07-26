@@ -231,6 +231,7 @@ pub struct Config {
     pub mouse_device: MouseDeviceSettings,
     pub touch: TouchSettings,
     pub gesture_thresholds: GestureThresholds,
+    pub touch_thresholds: TouchThresholds,
     pub layout_independent: bool,
     pub keyboard_layout: KeyboardLayout,
     /// Restore each window's last-used keyboard layout when it regains focus.
@@ -821,6 +822,24 @@ impl Config {
             ),
         };
 
+        let touch_thresholds = TouchThresholds {
+            swipe_distance_mm: non_negative(
+                raw.touch.swipe_threshold.unwrap_or(15.0),
+                "touch.swipe_threshold",
+                &mut errors,
+            ),
+            pinch_in_scale: non_negative(
+                raw.touch.pinch_in_threshold.unwrap_or(0.85),
+                "touch.pinch_in_threshold",
+                &mut errors,
+            ),
+            pinch_out_scale: non_negative(
+                raw.touch.pinch_out_threshold.unwrap_or(1.15),
+                "touch.pinch_out_threshold",
+                &mut errors,
+            ),
+        };
+
         let keyboard_layout = {
             let k = &raw.input.keyboard;
             KeyboardLayout {
@@ -1094,6 +1113,7 @@ impl Config {
             mouse_device,
             touch,
             gesture_thresholds,
+            touch_thresholds,
             layout_independent: raw.input.keyboard.layout_independent.unwrap_or(true),
             keyboard_layout,
             remember_layout_per_window: raw

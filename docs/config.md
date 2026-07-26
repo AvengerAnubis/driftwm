@@ -959,6 +959,26 @@ Threshold actions: any action from the [keybindings] Actions list. center-neares
 
 ## `[touch]`
 
+### `swipe_threshold`
+
+Default: `15.0`
+
+Touch thresholds — independent of the [gestures] keys of the same name. A touchscreen is a display, so swipe travel is physical: swipe_threshold is in millimetres and scales with the panel's pixel density, where the [gestures] swipe_threshold is in px. The pinch scales are unitless ratios, same as their [gestures] counterparts, but tune independently — a finger on glass pinches differently from two on a touchpad.
+
+mm cumulative distance before directional swipe fires
+
+### `pinch_in_threshold`
+
+Default: `0.85`
+
+scale below which pinch-in fires (1.0 = no pinch)
+
+### `pinch_out_threshold`
+
+Default: `1.15`
+
+scale above which pinch-out fires (1.0 = no pinch)
+
 Bindings: `"N-finger-<type>" = "action"`  (touch has no keyboard modifiers) Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" removes a binding in its context. A fully unbound gesture forwards to the app.
 
 Touch gesture types (1–5 fingers):

@@ -86,13 +86,9 @@ impl<'a> Harness<'a> {
         let cfg = self.cfg;
         let holdback_active = self.holdback.is_some();
         let last_tap = self.last_tap;
-        let decs = self.core.process(
-            cfg,
-            &cfg.gesture_thresholds,
-            input,
-            last_tap,
-            holdback_active,
-        );
+        let decs = self
+            .core
+            .process(cfg, &cfg.touch_thresholds, input, last_tap, holdback_active);
         for d in &decs {
             match d {
                 Decision::Hold => self

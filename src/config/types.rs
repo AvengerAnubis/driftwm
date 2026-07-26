@@ -485,6 +485,28 @@ impl Default for GestureThresholds {
     }
 }
 
+/// Touch equivalents of [`GestureThresholds`], kept separate because a
+/// touchscreen is a display: swipe travel is measured in millimetres and scaled
+/// by the panel's `px_per_mm`, so a command gesture feels the same on a phone
+/// panel and a 15" tablet. A trackpad has no such physical anchor and measures
+/// its swipe in px, so the two knobs cannot share a value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TouchThresholds {
+    pub swipe_distance_mm: f64,
+    pub pinch_in_scale: f64,
+    pub pinch_out_scale: f64,
+}
+
+impl Default for TouchThresholds {
+    fn default() -> Self {
+        Self {
+            swipe_distance_mm: 15.0,
+            pinch_in_scale: 0.85,
+            pinch_out_scale: 1.15,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyboardLayout {
     pub layout: String,

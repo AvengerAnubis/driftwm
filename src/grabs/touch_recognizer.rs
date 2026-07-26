@@ -4,8 +4,8 @@ use smithay::backend::input::TouchSlot;
 use smithay::utils::{Logical, Point};
 
 use driftwm::config::{
-    Action, BindingContext, Config, ContinuousAction, GestureConfigEntry, GestureThresholds,
-    GestureTrigger, ThresholdAction,
+    Action, BindingContext, Config, ContinuousAction, GestureConfigEntry, GestureTrigger,
+    ThresholdAction, TouchThresholds,
 };
 
 use crate::input::gestures::direction_from_vector;
@@ -56,11 +56,6 @@ const PINCH_MIN_DELTA_MM: f64 = 3.0;
 /// in magnitude and only its *persistence* tells them apart. One frame over the
 /// floor can't fire zoom.
 const PINCH_CONFIRM_FRAMES: u32 = 2;
-/// Centroid travel for a 4-finger directional navigation swipe, in millimetres
-/// (converted to px per panel via `px_per_mm`). A muscle-memory command gesture
-/// wants consistent physical travel across panels; a real mm-scale threshold also
-/// keeps a pinch-in's small centroid drift from being misread as a swipe.
-const NAV_SWIPE_MM: f64 = 15.0;
 /// During 4-finger navigation, a swipe won't fire once pinch progress reaches
 /// this fraction. A natural pinch-in drags the thumb a long way toward the other
 /// fingers, drifting the centroid enough to read as a swipe, so the pinch has to
@@ -514,7 +509,7 @@ impl TouchRecognizer {
     pub fn process(
         &mut self,
         cfg: &Config,
-        thresholds: &GestureThresholds,
+        thresholds: &TouchThresholds,
         input: &TouchInput,
         last_three_finger_tap: Option<u32>,
         holdback_active: bool,
@@ -706,7 +701,7 @@ impl TouchRecognizer {
 
     fn motion(
         &mut self,
-        thresholds: &GestureThresholds,
+        thresholds: &TouchThresholds,
         slot: TouchSlot,
         screen: Point<f64, Logical>,
         time: u32,
@@ -863,7 +858,7 @@ impl TouchRecognizer {
 
     fn apply_navigate(
         &mut self,
-        thresholds: &GestureThresholds,
+        thresholds: &TouchThresholds,
         centroid: Point<f64, Logical>,
         out: &mut Vec<Decision>,
     ) {
@@ -880,7 +875,7 @@ impl TouchRecognizer {
 
         let th = thresholds;
         let swipe_dist = (self.nav_cumulative.x.powi(2) + self.nav_cumulative.y.powi(2)).sqrt();
-        let swipe_threshold = NAV_SWIPE_MM * self.px_per_mm;
+        let swipe_threshold = th.swipe_distance_mm * self.px_per_mm;
         let swipe_progress = swipe_dist / swipe_threshold;
 
         // Pinch progress as a fraction of the in/out margin: a pure swipe's natural

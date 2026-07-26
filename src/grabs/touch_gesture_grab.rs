@@ -503,7 +503,7 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
         };
         let decisions = self.core.process(
             &data.config,
-            &data.config.gesture_thresholds,
+            &data.config.touch_thresholds,
             &input,
             data.touch_state.last_three_finger_tap,
             data.touch_state.holdback.is_some(),
@@ -588,7 +588,7 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
         };
         let decisions = self.core.process(
             &data.config,
-            &data.config.gesture_thresholds,
+            &data.config.touch_thresholds,
             &input,
             data.touch_state.last_three_finger_tap,
             data.touch_state.holdback.is_some(),
@@ -641,7 +641,7 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
         };
         let decisions = self.core.process(
             &data.config,
-            &data.config.gesture_thresholds,
+            &data.config.touch_thresholds,
             &input,
             data.touch_state.last_three_finger_tap,
             data.touch_state.holdback.is_some(),

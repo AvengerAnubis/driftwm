@@ -181,6 +181,81 @@ fn toml_gesture_context_priority() {
     );
 }
 
+#[test]
+fn toml_touch_thresholds_default_to_the_recognizer_constants() {
+    let (config, warnings) = Config::from_toml_collect("").unwrap();
+    let th = &config.touch_thresholds;
+    assert_eq!(th.swipe_distance_mm, 15.0);
+    assert_eq!(th.pinch_in_scale, 0.85);
+    assert_eq!(th.pinch_out_scale, 1.15);
+    assert!(
+        warnings.is_empty(),
+        "defaults must not warn, got {warnings:?}"
+    );
+}
+
+#[test]
+fn toml_touch_thresholds_can_be_overridden() {
+    let toml = r#"
+        [touch]
+        swipe_threshold = 25.0
+        pinch_in_threshold = 0.7
+        pinch_out_threshold = 1.4
+    "#;
+    let (config, warnings) = Config::from_toml_collect(toml).unwrap();
+    let th = &config.touch_thresholds;
+    assert_eq!(th.swipe_distance_mm, 25.0);
+    assert_eq!(th.pinch_in_scale, 0.7);
+    assert_eq!(th.pinch_out_scale, 1.4);
+    assert!(
+        warnings.is_empty(),
+        "valid values must not warn, got {warnings:?}"
+    );
+}
+
+/// The whole point of the separate `[touch]` knobs: a trackpad tune must not
+/// silently retune the touchscreen (their swipe units differ), and vice versa.
+#[test]
+fn toml_touch_thresholds_are_independent_of_gesture_thresholds() {
+    let toml = r#"
+        [gestures]
+        swipe_threshold = 40.0
+        pinch_in_threshold = 0.5
+        pinch_out_threshold = 2.0
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    let th = &config.touch_thresholds;
+    assert_eq!(th.swipe_distance_mm, 15.0);
+    assert_eq!(th.pinch_in_scale, 0.85);
+    assert_eq!(th.pinch_out_scale, 1.15);
+
+    let toml = r#"
+        [touch]
+        swipe_threshold = 40.0
+        pinch_in_threshold = 0.5
+        pinch_out_threshold = 2.0
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    let gt = &config.gesture_thresholds;
+    assert_eq!(gt.swipe_distance, 12.0);
+    assert_eq!(gt.pinch_in_scale, 0.85);
+    assert_eq!(gt.pinch_out_scale, 1.15);
+}
+
+#[test]
+fn toml_touch_thresholds_reject_negatives_with_a_warning() {
+    let toml = r#"
+        [touch]
+        swipe_threshold = -5.0
+    "#;
+    let (config, warnings) = Config::from_toml_collect(toml).unwrap();
+    assert_eq!(config.touch_thresholds.swipe_distance_mm, 0.0);
+    assert!(
+        warnings.iter().any(|w| w.contains("touch.swipe_threshold")),
+        "a negative value should floor at 0 with a warning, got {warnings:?}"
+    );
+}
+
 // ── [bindings] disable_defaults ──────────────────────────────────────────
 
 #[test]
