@@ -17,6 +17,7 @@ mod real;
 mod server;
 
 mod auto_navigate_click;
+mod auto_placement;
 mod bookmarks;
 mod camera_animation;
 mod cli_docs;

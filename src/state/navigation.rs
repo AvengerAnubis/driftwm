@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::surface_tree::focus_belongs_to_window;
-use driftwm::canvas::{CanvasPos, canvas_to_screen};
+use driftwm::canvas::{CanvasPos, canvas_to_screen, closest_point_on_rect};
 use driftwm::window_ext::WindowExt;
 use smithay::{
     desktop::Window,
@@ -538,6 +538,19 @@ impl DriftWm {
         let size = w.geometry().size;
         let bar = self.window_ssd_bar(w) as f64;
         super::visual_frame_center(loc, size, bar)
+    }
+
+    /// Point of `w` nearest `origin`, on the bare content rect (client geometry,
+    /// stand-in body) so an SSD bar strip doesn't skew it. Shared by directional
+    /// navigation and auto placement's anchor fallback so the two searches can't
+    /// drift apart on the measurement.
+    pub fn element_closest_point(
+        &self,
+        origin: Point<f64, Logical>,
+        w: &super::StageWindow,
+    ) -> Point<f64, Logical> {
+        let loc = self.stage.position_of(w).unwrap_or_default();
+        closest_point_on_rect(origin, loc, w.geometry().size)
     }
 
     /// Nearest window (by canvas distance from `from_center`) that is at least

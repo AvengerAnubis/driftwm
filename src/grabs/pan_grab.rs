@@ -116,7 +116,7 @@ impl PointerGrab<DriftWm> for PanGrab {
             // access would deadlock there.
             if self.from_empty_canvas && !self.dragged {
                 let serial = SERIAL_COUNTER.next_serial();
-                data.set_window_focus(None, serial);
+                data.clear_focus_to_empty_canvas(serial);
             }
             data.set_panning(false);
             data.launch_momentum_on(&self.output);

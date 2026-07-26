@@ -46,10 +46,18 @@ impl DriftWm {
         Some((x.round() as i32, y.round() as i32))
     }
 
-    /// Spawn pos for `placement = "auto"`: snap-place adjacent to the focused
-    /// window's cluster. Returns content top-left (shifted down by `bar` so
-    /// the visual frame snaps to the neighbor). `None` on no eligible focus
-    /// or no valid placement; caller falls back to center.
+    /// Spawn pos for `placement = "auto"`: snap-place adjacent to a cluster
+    /// already in view. Returns content top-left (shifted down by `bar` so
+    /// the visual frame snaps to the neighbor).
+    ///
+    /// The anchor is the focus snapshotted at `new_toplevel` time while it is
+    /// *usable* — an eligible canvas element, visible enough that the user is
+    /// plausibly working on its cluster. When it isn't (panned away, on another
+    /// output, widget/pinned/fullscreen, or gone) the nearest element in view
+    /// stands in for it, so a new window still joins what you are looking at.
+    /// `None` — caller falls back to center — when the user deliberately cleared
+    /// focus by clicking empty canvas, when nothing in view qualifies, or when
+    /// no slot fits.
     ///
     /// `new_window` is excluded from anchor search and obstacle list. Without
     /// the skip we'd anchor the new window against itself, since by the time
@@ -62,27 +70,74 @@ impl DriftWm {
         bar: i32,
     ) -> Option<(i32, i32)> {
         // Anchor = keyboard focus at `new_toplevel` time, snapshotted before
-        // focus was reassigned to the new surface. `None` (or absent) means
-        // no anchor and caller falls back to center.
+        // focus was reassigned to the new surface. A missing entry means the
+        // anchor's surface died before placement — the same user situation as
+        // having had no focus at all, so both take the fallback below.
         let new_surface = new_window.wl_surface()?.into_owned();
-        let focused = self.auto_anchor_snapshot.get(&new_surface)?.as_ref()?;
-        let widget = focused
-            .wl_surface()
-            .and_then(|s| driftwm::config::applied_rule(&s))
-            .is_some_and(|r| r.widget);
-        let is_fs = self.is_window_fullscreen(focused);
-        if widget || is_fs || self.is_pinned(focused) {
+        let snapshot = self
+            .auto_anchor_snapshot
+            .get(&new_surface)
+            .and_then(|a| a.as_ref())
+            .filter(|a| {
+                self.is_canvas_window(*a)
+                    && self.window_visible_at_least(*a, AUTO_PLACE_CLUSTER_THRESHOLD)
+            });
+        if let Some(focused) = snapshot {
+            return self.place_adjacent_to(focused, new_window, new_size, bar);
+        }
+
+        // Clicking empty canvas is a deliberate blank slate: honor it and let
+        // the caller center. Any other unusable anchor falls back to view.
+        if self.suppress_auto_anchor {
             return None;
         }
 
-        // Only anchor when enough of the focused window is visible that the
-        // user is plausibly working on its cluster; otherwise they intend a
-        // fresh cluster and caller falls back to center.
-        if !self.window_visible_at_least(focused, AUTO_PLACE_CLUSTER_THRESHOLD) {
-            return None;
-        }
+        let anchor = self.nearest_auto_anchor(new_window)?;
+        self.place_adjacent_to(&anchor, new_window, new_size, bar)
+    }
 
-        self.place_adjacent_to(focused, new_window, new_size, bar)
+    /// The element auto placement anchors to when the focus snapshot can't
+    /// serve: the one nearest the viewport center among sufficiently visible
+    /// canvas elements, suspended stand-ins included.
+    fn nearest_auto_anchor(&self, placing: &Window) -> Option<StageWindow> {
+        let origin = self.viewport_center_canvas();
+        self.stage
+            .windows()
+            // Bottom→top reversed: `min_by` keeps the first minimum, so the
+            // top-most of overlapping elements wins ties — the one the user
+            // is looking at.
+            .rev()
+            .filter(|w| {
+                // `placing` is already on the stage at the viewport center, so
+                // without this skip it scores distance 0 and anchors itself;
+                // `place_adjacent_to` then skips it while building rects, finds
+                // no anchor, and the fallback silently no-ops.
+                *w != placing
+                    && self.is_canvas_window(*w)
+                    && !self.awaiting_placement(w)
+                    && self.window_visible_at_least(*w, AUTO_PLACE_CLUSTER_THRESHOLD)
+            })
+            .map(|w| {
+                // Deliberately without `CenterNearest`'s closest-== origin
+                // substitution (it exists there for a direction vector): using
+                // it here would score an element spanning the center by its
+                // distant center point, losing to a small one at the edge.
+                let closest = self.element_closest_point(origin, w);
+                let dist_sq = (closest.x - origin.x).powi(2) + (closest.y - origin.y).powi(2);
+                (w, dist_sq)
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(w, _)| w.clone())
+    }
+
+    /// True while `w` is still parked on the viewport-center seed `new_toplevel`
+    /// gave it (`pending_center`): a `size` window rule holds it there through a
+    /// client roundtrip with real, fully-visible geometry, so it would otherwise
+    /// score distance 0 and win the anchor with a rect it's about to leave.
+    /// Stand-ins have no surface, so they're always eligible.
+    fn awaiting_placement(&self, w: &StageWindow) -> bool {
+        w.wl_surface()
+            .is_some_and(|s| self.pending_center.contains(&*s))
     }
 
     /// Geometry-only placement of `placing` (content sized `new_size`, SSD

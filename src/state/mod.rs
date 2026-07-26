@@ -94,8 +94,9 @@ use driftwm::config::{Config, HotCorner};
 use driftwm::stage::StageElement;
 use driftwm::window_ext::WindowExt;
 
-/// Min visible fraction of the focused window for auto-placement to anchor a
-/// new window to its cluster. Lower than the navigation/activation thresholds:
+/// Min visible fraction an element needs before auto-placement will anchor a
+/// new window to its cluster — of the focused window, and of every candidate
+/// the fallback picker considers. Lower than the navigation/activation thresholds:
 /// even a small sliver of the cluster on-screen is a stronger signal than the
 /// alternative (dropping the new window in the middle of an unrelated region).
 const AUTO_PLACE_CLUSTER_THRESHOLD: f64 = 0.33;
@@ -640,6 +641,11 @@ pub struct DriftWm {
     /// no focus (e.g. clicked empty canvas); missing entry means the snapshot
     /// was already consumed.
     pub auto_anchor_snapshot: HashMap<WlSurface, Option<StageWindow>>,
+    /// Set only by a deliberate click on empty canvas, cleared by every focus
+    /// write. Lets auto placement tell "the user asked for a blank slate" (stay
+    /// centered) apart from "the anchor merely isn't usable" (fall back to the
+    /// nearest element in view).
+    pub suppress_auto_anchor: bool,
     /// After unfit, re-center around `target_center` once geometry actually
     /// shrinks from `pre_exit_size`. Waiting avoids firing while the client
     /// (Chromium) still reports the fit-era size.
@@ -1311,9 +1317,24 @@ impl DriftWm {
         serial: smithay::utils::Serial,
     ) {
         self.window_focus = target.map(FocusIntent::Surface);
+        // Unconditional, `None` included: only `clear_focus_to_empty_canvas` means
+        // "blank slate" — a flag surviving an incidental clear would silently kill
+        // the fallback for the rest of the session.
+        self.suppress_auto_anchor = false;
         // An explicit window focus supersedes any on-demand layer focus.
         self.on_demand_layer = None;
         self.update_keyboard_focus(serial);
+    }
+
+    /// Clear focus because the user clicked bare canvas — a deliberate blank
+    /// slate, distinct from the incidental focus loss `set_window_focus(None)`
+    /// also expresses. A named entry point keeps the two from re-merging:
+    /// without it, a dying surface or closing window would read as "nothing
+    /// anchored".
+    pub fn clear_focus_to_empty_canvas(&mut self, serial: smithay::utils::Serial) {
+        self.set_window_focus(None, serial);
+        // After, not before: the setter clears the flag.
+        self.suppress_auto_anchor = true;
     }
 
     /// Focus a suspended window: record the intent and clear seat keyboard
@@ -1323,6 +1344,7 @@ impl DriftWm {
     /// behavior.
     pub fn set_suspended_focus(&mut self, id: SuspendedId, serial: smithay::utils::Serial) {
         self.window_focus = Some(FocusIntent::Suspended(id));
+        self.suppress_auto_anchor = false;
         self.on_demand_layer = None;
         self.update_keyboard_focus(serial);
     }

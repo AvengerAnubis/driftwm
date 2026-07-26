@@ -31,7 +31,7 @@ Where new windows spawn when no window rule positions them:
 
 - `"center"` — viewport center; camera animates to the new window.
 - `"cursor"` — centered on the cursor (clamped to the active output's usable area); camera stays put unless zoomed out and zoom.reset_on_new_window is true.
-- `"auto"` — snap-place adjacent to the focused window's cluster: try focused's edges (clockwise from the one nearest the viewport center), then BFS to neighbors. Falls back to "center" when no focused window or no valid placement was found.
+- `"auto"` — snap-place adjacent to a cluster already in view: try the anchor's edges (clockwise from the one nearest the viewport center), then BFS to neighbors. The anchor is the focused window while it's visible enough, otherwise the nearest element in view (suspended stand-ins included). Falls back to "center" when nothing suitable is in view, when you clicked empty canvas to clear focus, or when no valid placement was found.
 
 ### `autostart`
 

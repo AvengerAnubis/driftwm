@@ -219,11 +219,9 @@ impl DriftWm {
                     .windows()
                     .filter(|w| self.is_canvas_window(*w))
                     .map(|w| {
-                        // Bare content size (client geometry, stand-in body) so
-                        // an SSD bar strip doesn't skew either's proximity metric.
-                        let loc = self.stage.position_of(w).unwrap_or_default();
-                        let size = w.geometry().size;
-                        let closest = canvas::closest_point_on_rect(origin, loc, size);
+                        let closest = self.element_closest_point(origin, w);
+                        // A directional search needs a direction vector, and a
+                        // point sitting on the origin has none.
                         let point = if closest == origin {
                             self.nav_center(w)
                         } else {
