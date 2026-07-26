@@ -21,8 +21,7 @@ use std::sync::Arc;
 ///
 /// With no subcommand, starts the compositor, auto-detecting the backend (udev
 /// on a TTY, winit when nested). The `msg` subcommand instead talks to an
-/// already-running instance over its IPC socket; see docs/ipc.md for the raw
-/// wire protocol.
+/// already-running instance over its IPC socket.
 #[derive(Parser)]
 #[command(
     name = "driftwm",
@@ -30,7 +29,7 @@ use std::sync::Arc;
     after_help = concat!("Documentation & source: ", env!("CARGO_PKG_REPOSITORY"))
 )]
 struct Cli {
-    /// Backend to use [default: udev on a TTY, winit if nested]
+    /// Backend to use (default: udev on a TTY, winit if nested)
     #[arg(long, value_name = "udev|winit")]
     backend: Option<String>,
     /// Use an alternate config file
@@ -52,10 +51,20 @@ enum Sub {
     /// Send a command to the running compositor over its IPC socket.
     ///
     /// Auto-targets the instance named by `WAYLAND_DISPLAY` (override with
-    /// `DRIFTWM_SOCKET`). A subcommand with no arguments reads state; with
-    /// arguments it writes. Add `--json` for the raw JSON reply. A command that
-    /// fails (bad value, no match, no focused window) prints an error to stderr
-    /// and exits non-zero, so scripts can branch on it.
+    /// `DRIFTWM_SOCKET`). `camera`, `zoom`, `focus`, `move`, `opacity`, and
+    /// `bookmark` read when given no arguments and write when given arguments.
+    /// The others don't follow that rule: `action` requires its arguments,
+    /// `close`/`suspend`/`relaunch` act on the focused window when given no
+    /// selector, and `layout`, `screenshot`, `state`, `subscribe`, and
+    /// `debug-counters` need no arguments at all.
+    ///
+    /// A window command selects its target by `app_id` substring
+    /// (case-insensitive) or by `--id <n>`, the stable id `state` prints.
+    /// Widgets match no `app_id` search — reach one by `--id`.
+    ///
+    /// Add `--json` for the raw JSON reply. A command that fails (bad value, no
+    /// match, no focused window) prints an error to stderr and exits non-zero,
+    /// so scripts can branch on it.
     Msg {
         /// Print the raw JSON reply
         #[arg(long, global = true)]

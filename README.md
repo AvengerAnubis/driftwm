@@ -39,6 +39,7 @@ flick carries the viewport smoothly until friction stops it.
 | `Mod+Ctrl` + arrow | Pan viewport      | —         |
 | 2-finger pinch     | Zoom              | on-canvas |
 | 3-finger pinch     | Zoom              | anywhere  |
+| Mouse wheel        | Zoom              | on-canvas |
 | `Mod` + scroll     | Zoom at cursor    | anywhere  |
 | `Mod+=` / `Mod+-`  | Zoom in / out     | —         |
 | `Mod+0` / `Mod+Z`  | Reset zoom to 1.0 | —         |
@@ -49,10 +50,11 @@ flick carries the viewport smoothly until friction stops it.
 
 https://github.com/user-attachments/assets/ab80b545-817d-4d9f-beea-d332b3bb3dfa
 
-Jump to the nearest window in any direction via cone search. MRU cycling
-(`Alt-Tab`) with hold-to-commit. Zoom-to-fit shows all windows at once.
-Configurable anchors act as navigation targets for directional jumps even
-with no window there — useful for areas with pinned widgets.
+Jump to the nearest window in any direction. MRU cycling (`Alt-Tab`) with
+hold-to-commit. Zoom-to-fit shows all windows at once. Configurable _anchors_
+act as navigation targets for directional jumps even with no window there —
+useful for areas with pinned widgets. _Bookmarks_: named canvas
+spots the camera jumps straight to.
 
 <details><summary><b>Navigation bindings</b></summary>
 
@@ -66,6 +68,7 @@ with no window there — useful for areas with pinned widgets.
 | 4-finger pinch out / `Mod+A` | Home toggle (origin and back)              |
 | 4-finger hold / `Mod+C`      | Center focused window                      |
 | `Mod+1-4`                    | Jump to bookmarked canvas position         |
+| `Mod+Shift+1-4`              | Save the current position as that bookmark |
 
 All 4-finger navigation gestures also work as `Mod` + 3-finger for smaller
 trackpads.
@@ -78,7 +81,7 @@ https://github.com/user-attachments/assets/6bfc3458-664f-4746-a176-18f40337d94d
 
 Move window with 3-finger doubletap-swipe or `Alt` + drag. Resize with `Alt` + 3-finger swipe. Snapping kicks in as edges approach each other. Drag past the viewport edge and the canvas auto-pans.
 
-**Snapped windows form a cluster.** Two benefits: neighbors stay visible at your view's edge for spatial context, and `Shift` + any move/resize/fit action acts on the whole cluster. Shuffle a layout in one drag, resize a row of panes proportionally, or scope an overview to just the cluster (`Mod+Shift+W`). No explicit grouping to manage.
+**Snapped windows form a cluster.** Neighbors stay visible at your view's edge for spatial context, and `Shift` + any move/resize/fit action acts on the whole cluster. Shuffle a layout in one drag, resize a row of panes proportionally, or scope an overview to just the cluster (`Mod+Shift+W`). No explicit grouping to manage.
 
 > [!TIP]
 > While dragging a window, keyboard shortcuts still work. Use `Mod+1-4`
@@ -86,8 +89,8 @@ Move window with 3-finger doubletap-swipe or `Alt` + drag. Resize with `Alt` + 3
 
 Fit-window (`Mod+M`) is the maximize analogue — centers the viewport, resets
 zoom to 1.0, and resizes the window to fill the screen. Toggle again to
-restore. Fullscreen (`Mod+F`) is a viewport mode, not a window state — any canvas
-action (launching an app, navigating) naturally exits it.
+restore. Fullscreen (`Mod+F`) fills the screen with the focused window until any
+canvas action — launching an app, navigating — exits it.
 
 <details><summary><b>Snapping &amp; window bindings</b></summary>
 
@@ -105,7 +108,7 @@ action (launching an app, navigating) naturally exits it.
 | `Alt` + 2-finger pinch in/out             | Fit window                    |
 | `Alt` + 3-finger pinch in/out             | Toggle fullscreen             |
 | `Mod` + MMB click / `Mod+F`               | Toggle fullscreen             |
-| `Mod+Shift` + arrow                       | Nudge window 20px             |
+| `Mod+Shift` + arrow                       | Nudge window (default 20px)   |
 
 </details>
 
@@ -122,6 +125,7 @@ trackpad.
 | Input                    | Action                      | Context   |
 | ------------------------ | --------------------------- | --------- |
 | 1-finger swipe           | Pan viewport                | on-canvas |
+| 2-finger swipe           | Pan viewport                | on-canvas |
 | 3-finger swipe           | Pan viewport                | anywhere  |
 | 2-finger pinch           | Zoom                        | on-canvas |
 | 3-finger pinch           | Zoom                        | anywhere  |
@@ -141,17 +145,15 @@ https://github.com/user-attachments/assets/b1581182-5e21-45c8-8559-99ab54bb5093
 https://github.com/user-attachments/assets/fb1cd5a1-242c-45d7-b302-952a15aaa24d
 
 The background is part of the canvas — it scrolls and zooms with the viewport,
-not stuck to the screen. This gives spatial awareness when panning.
+not stuck to the screen.
 
-Four modes:
+Five modes:
 
-- **`shader`** — procedural GLSL, animated or static, optionally sampling an image via `texture`. Default is a dot grid. See [docs/shaders.md](docs/shaders.md) to write your own. Bundled shaders live in `extras/wallpapers/{static,animated,textured}/`.
+- **`default`** — the built-in dot grid, what you get with no configuration.
+- **`shader`** — procedural GLSL, animated or static, optionally sampling an image via `texture`. See [docs/shaders.md](docs/shaders.md) to write your own. Bundled shaders live in `extras/wallpapers/{static,animated,textured}/`.
 - **`tile`** — PNG/JPG (single texture, tiled infinitely), or a tiled pyramidal TIFF for [gigapixel wallpapers](docs/gigapixel-wallpapers.md). Set `mirror_tile = true` to mirror-fold a non-seamless image so it tiles without seams (kaleidoscope look).
 - **`wallpaper`** — single image scaled to cover the viewport, aspect-preserving (does not scroll/zoom) — a classic desktop wallpaper.
 - **`none`** — no built-in background, so an external `wlr-layer-shell` wallpaper daemon (`swaybg`, `swww`, `mpvpaper` for live video) becomes the wallpaper instead.
-
-> [!NOTE]
-> GPU cost scales with what a shader reads: one that reads no viewport uniforms renders once (as cheap as `wallpaper`); reading `u_camera`/`u_zoom` redraws on pan/zoom; reading `u_time` redraws every frame. Tiles redraw on pan/zoom; `wallpaper` renders once.
 
 ```toml
 [background]
@@ -208,19 +210,20 @@ Multiple monitors are independent viewports on the same canvas. An outline on ea
 other monitors' viewports are. Cursor crosses between monitors freely; dragged
 windows teleport to the target viewport's canvas position.
 
+<details><summary><b>Multi-monitor bindings</b></summary>
+
 | Input             | Action                         |
 | ----------------- | ------------------------------ |
 | `Mod+Alt` + arrow | Send window to adjacent output |
+
+</details>
 
 ### Panels, docks & taskbars
 
 https://github.com/user-attachments/assets/31c235e6-baae-4843-bb43-aca749e41f04
 
-Layer shell surfaces (waybar, fuzzel, mako) work as expected. Foreign toplevel
-management means your dock/taskbar shows all windows — click one and the
-viewport pans to it and centers it. See [`extras/`](extras/) for a fuzzel
-spotlight script that searches open windows, suspended windows, and installed
-apps in one list — jump to a window, relaunch a stand-in, or launch an app.
+Layer shell surfaces (waybar, fuzzel, mako) work as expected. Docks and taskbars
+see every window — click one and the viewport pans to it and centers it.
 
 ### Window suspend & session restore
 
@@ -236,9 +239,11 @@ See [docs/session.md](docs/session.md).
 
 ### Everything else
 
-- New window placement: in viewport center (default), under cursor, or snapped adjacent to the focused window's cluster
+- New window placement: in viewport center (default), under cursor, or snapped adjacent to whatever is in view — the focused window while it stays visible enough, otherwise the nearest element on screen, suspended stand-ins included
 - Click-to-focus (default) or focus-follows-mouse (sloppy focus)
-- Session lock (swaylock), idle notify (swayidle/hypridle)
+- Hot corners: any keybinding action fires when the cursor reaches a screen corner, configured per monitor
+- Cursor edge-pan: push the pointer against a screen edge and the viewport pans, toggled with `Mod+E`
+- Session lock and idle notification
 - Screen capture: screencasting (OBS, Firefox, Discord) and screenshots, incl. built-in [canvas/DPI capture](docs/ipc.md#screenshots)
 - 40+ Wayland protocols
 - [IPC control](docs/ipc.md): script the compositor over a Unix socket with `driftwm msg` (full command/flag reference: [docs/cli.md](docs/cli.md))
@@ -305,30 +310,8 @@ Then, enable it in your configuration:
 }
 ```
 
-Alternatively, without flakes (by importing the flake's output directly):
-
-```nix
-let
-  driftwm-flake = builtins.getFlake "github:malbiruk/driftwm";
-in
-{
-  imports = [ driftwm-flake.nixosModules.default ];
-  programs.driftwm.enable = true;
-}
-```
-
-#### NixOS Module Options
-
-The NixOS module provides the following options under `programs.driftwm`:
-
-- `enable`: Whether to enable `driftwm` (defaults to `false`).
-- `package`: The package containing the `driftwm` compositor binary.
-
-By default, the module enables XWayland support via `xwayland-satellite` by defaulting `programs.xwayland.enable` to `true`. If you want to disable or explicitly enable it, configure:
-
-```nix
-programs.xwayland.enable = true; # or false to disable XWayland and xwayland-satellite
-```
+Non-flake setup and module options are at the [end of this
+section](#nixos-without-flakes).
 
 ### Build from source
 
@@ -369,14 +352,40 @@ sudo make install
 
 To uninstall, run `sudo make uninstall` from the repository.
 
+### Running
+
+driftwm auto-detects whether it's running nested (inside an existing Wayland
+session) or on real hardware (from a TTY). Just run `driftwm`. For display
+manager integration, select "driftwm" from the session menu.
+
+`mod` is Super by default. The terminal is `$TERMINAL`, else the first of foot,
+alacritty, ptyxis, kitty, wezterm, gnome-terminal, konsole; the launcher is
+`$LAUNCHER`, else the first of fuzzel, wofi, rofi, bemenu-run, wmenu-run,
+tofi-drun, mew-run. Both are overridable in config.
+
+| Shortcut           | Action        |
+| ------------------ | ------------- |
+| `mod+return`       | Open terminal |
+| `mod+d`            | Open launcher |
+| `mod+q`            | Close window  |
+| `mod+l`            | Lock screen   |
+| `mod+ctrl+shift+q` | Quit          |
+
+Feature-specific bindings (navigation, zoom, snap) are in their respective sections above.
+
+Nested sessions don't save or restore [state](docs/session.md#nested-sessions)
+unless you pass `--session-file <path>`.
+
+> [!TIP]
+> When launched by a display manager, driftwm runs as a systemd user service — view logs with `journalctl --user -u driftwm.service` (add `-f` to follow). Run directly and logs go to stderr.
+
 ### Optional runtime dependencies
 
-driftwm runs standalone — none of these are required — but each enables or
-improves a feature:
+Each of these enables or improves a feature:
 
 - `xwayland-satellite` (≥ 0.7) — X11 app support (see below).
 - `xdg-desktop-portal` + `xdg-desktop-portal-wlr` (≥ 0.8.0) or `xdg-desktop-portal-cosmic` — screencasting, and screenshot apps that go through the portal (e.g. Flameshot). wlr needs a dmenu-style picker in `$PATH` (`wmenu`/`wofi`/`rofi`/`bemenu`/`mew`/`fuzzel`) to choose what to share.
-- `grim` + `slurp` — screenshots (+ cropping to region). driftwm also has a built-in canvas/DPI capture: see [IPC › Screenshots](docs/ipc.md#screenshots).
+- `grim` + `slurp` — screenshots (+ cropping to region).
 - `adwaita-fonts` — renders SSD title bars in `Adwaita Sans` to match GTK apps; without it a generic sans-serif is substituted. Font, size, weight, and alignment are configurable under `[decorations]`.
 - A cursor theme — most desktops set one up already; on a bare install driftwm falls back to a basic built-in arrow.
 
@@ -393,32 +402,23 @@ If satellite isn't found at startup, driftwm logs a warning and continues withou
 X11 support. You can override the binary path or disable the integration in
 [`config.reference.toml`](config.reference.toml) under `[xwayland]`.
 
-### Running
+### NixOS without flakes
 
-driftwm auto-detects whether it's running nested (inside an existing Wayland
-session) or on real hardware (from a TTY). Just run `driftwm`. For display
-manager integration, select "driftwm" from the session menu.
+Import the flake's output directly:
 
-A nested session skips [session restore](docs/session.md#nested--dev-sessions)
-by default (`--session-file <path>` opts it in), so a dev instance can never
-clobber your real session file.
+```nix
+let
+  driftwm-flake = builtins.getFlake "github:malbiruk/driftwm";
+in
+{
+  imports = [ driftwm-flake.nixosModules.default ];
+  programs.driftwm.enable = true;
+}
+```
 
-> [!TIP]
-> When launched by a display manager, driftwm runs as a systemd user service — view logs with `journalctl --user -u driftwm.service` (add `-f` to follow). Run directly and logs go to stderr.
-
-## Quick start
-
-`mod` is Super by default. Terminal and launcher are auto-detected (foot/alacritty/kitty, fuzzel/wofi/bemenu); override in config.
-
-| Shortcut           | Action        |
-| ------------------ | ------------- |
-| `mod+return`       | Open terminal |
-| `mod+d`            | Open launcher |
-| `mod+q`            | Close window  |
-| `mod+l`            | Lock screen   |
-| `mod+ctrl+shift+q` | Quit          |
-
-Feature-specific bindings (navigation, zoom, snap) are in their respective sections above.
+`programs.driftwm.package` selects the package providing the compositor binary.
+XWayland via `xwayland-satellite` is on by default; set
+`programs.xwayland.enable = false;` to disable it.
 
 ## Configuration
 
@@ -438,10 +438,8 @@ Validate without starting: `driftwm --check-config`.
 autostart = ["waybar", "swaync", "swayosd-server"]
 ```
 
-Every option is documented in **[docs/config.md](docs/config.md)** (generated
-from [`config.reference.toml`](config.reference.toml)): input settings,
-scroll/momentum tuning, snap behavior, decorations, effects, per-output config,
-gesture bindings, mouse bindings, touch bindings, and window rules.
+Every option is documented in **[docs/config.md](docs/config.md)**, generated
+from [`config.reference.toml`](config.reference.toml).
 
 ## Example setup
 
@@ -455,7 +453,6 @@ Here are some tools that work well with it:
 - **swaylock** — Lock screen
 - **swayidle / hypridle** — Idle timeout (lock, suspend)
 - **swayosd** — Volume/brightness OSD
-- **grim + slurp** — Screenshots (or the built-in canvas/DPI capture: [IPC › Screenshots](docs/ipc.md#screenshots))
 - **wlr-randr / wdisplays** — Output configuration
 - **COSMIC Settings** — Wi-Fi, Bluetooth, sound (or **nm-applet** + **blueman** + **pavucontrol**)
 
@@ -463,8 +460,9 @@ Compositor-agnostic full Wayland shells like **noctalia**, **wayle**, and **dank
 
 The [`extras/`](extras/) directory contains a complete setup — driftwm config,
 GLSL shader wallpapers, Python widgets (clock, calendar, system stats, power
-menu), waybar with taskbar/tray, fuzzel spotlight script, and window rules
-tying it all together. Use it as a starting point or steal pieces.
+menu), waybar with taskbar/tray, a fuzzel spotlight script that lists open
+windows, suspended windows, and installed apps together, and window rules tying
+it all together. Use it as a starting point or steal pieces.
 
 ## Community
 
@@ -493,7 +491,7 @@ Ships worldwide from Tbilisi.
 
 Order via [Telegram](https://t.me/fiyefiyefiye), [Instagram](https://instagram.com/flwrs_in_ur_eyes), or email [2601074@gmail.com](mailto:2601074@gmail.com).
 
-Revenue goes to me as driftwm's primary maintainer. If you've contributed substantively and want a shirt, drop me a line.
+Revenue goes to me as driftwm's primary maintainer.
 
 ## License
 

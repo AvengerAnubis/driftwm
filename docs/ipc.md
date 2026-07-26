@@ -7,17 +7,24 @@ JSON, so any language can speak it directly.
 
 ## `driftwm msg`
 
-Run `driftwm msg <command>` from inside a driftwm session. Each command reads
-when given no arguments and writes when given arguments. Add `--json` to print
-the raw JSON reply instead of the human-readable form. A command that fails (bad
-value, no focused window, no match) prints an error to stderr and exits
-non-zero, so scripts can branch on it.
-
-The commands — `camera`, `zoom`, `focus`, `move`, `opacity`, `close`, `suspend`,
-`relaunch`, `layout`, `action`, `screenshot`, `state`, `subscribe`, and
+Run `driftwm msg <command>` from inside a driftwm session. The commands —
+`camera`, `zoom`, `focus`, `move`, `opacity`, `close`, `suspend`, `relaunch`,
+`layout`, `action`, `bookmark`, `screenshot`, `state`, `subscribe`, and
 `debug-counters` — with their arguments, flags, and JSON reply shapes are
 documented in the generated [CLI reference](cli.md); `driftwm msg <command> --help`
 prints the same for one command. The conventions they share follow below.
+
+`camera`, `zoom`, `focus`, `move`, `opacity`, and `bookmark` read when given no
+arguments and write when given arguments. The others don't follow that rule:
+`action` requires its arguments, `close`/`suspend`/`relaunch` act on the focused
+window when given no selector, and `layout`, `screenshot`, `state`, `subscribe`,
+and `debug-counters` need no arguments at all. A command that fails (bad value,
+no focused window, no match) prints an error to stderr and exits non-zero, so
+scripts can branch on it.
+
+Add `--json` to print the raw JSON reply. The default output is a human-readable
+rendering for a terminal, not a stable format — parse `--json`, or the
+[state file](#state-file), in scripts.
 
 ### Coordinates
 
@@ -30,60 +37,44 @@ refuses to reposition them.
 
 ### Suspended windows
 
-A [suspended window](session.md) — the compositor-drawn stand-in left behind
-by `suspend-window` or `suspend_on_close` — is a window like any other over
-IPC: it has an `id`, appears in the `windows` inventory (`state`, `subscribe`,
-and the state file all agree), and each entry carries `suspended: true` so a
-consumer can tell it apart from a live client. A focused stand-in follows the
-same convention as a focused client: it's `windows[0]` and `is_focused: true`.
+A [suspended window](session.md) — the compositor-drawn stand-in left behind by
+`suspend-window` or `suspend_on_close` — appears in the `windows` inventory with
+its own `id` and `suspended: true`. `focus`, `move`, and `close` (which
+dismisses the stand-in rather than asking a nonexistent client to close) take
+that id like any window's; `suspend <selector>` turns a live window into a
+stand-in, and `relaunch <selector>` starts its app again.
 
-`focus` and `move` work on a suspended window's id exactly as they would on a
-live one (raising/panning to it, or reading/setting its canvas position);
-`close` dismisses it instead of asking a (nonexistent) client to close.
-`suspend`/`relaunch` are the two commands specific to them:
+When a live client and a stand-in share an `app_id`, an app_id selector resolves
+to the **live client** — target the stand-in by its `id`. `relaunch` is the
+exception: it only ever acts on stand-ins, so an app_id selector there resolves
+straight to the matching one.
 
-- `suspend <selector>` suspends a window — the same as running the
-  `suspend-window` action against it, just addressable by id/app_id instead of
-  needing it focused first.
-- `relaunch <selector>` relaunches a suspended window — the same as pressing
-  `Enter` on it or clicking its centered name.
-
-A selector matches by app_id substring or `--id`, same as everywhere else.
-When a live client and a suspended stand-in share the same `app_id`, an
-app_id-substring selector resolves to the **live client** for commands that can
-act on either (`focus`, `move`, `close`, `suspend`) — target the stand-in by
-its `id` instead. `relaunch` is the exception: it only ever acts on a stand-in,
-so an app_id selector there resolves straight to the matching suspended window.
-
-> [!NOTE]
-> Between spawning a relaunch and its adoption (the relaunched app's first
-> *sized* commit, which is when it actually takes over its stand-in's slot), a
-> `state`/`subscribe` snapshot can show *two* entries for the app — the still-
-> suspended stand-in and the not-yet-adopted new window. Harmless — every
-> snapshot is complete state either way — but worth knowing if you're
-> counting windows by `app_id`.
+Between a `relaunch` and the new window's first *sized* commit (when it takes
+over the stand-in's slot), a snapshot lists both entries — count windows by
+`id`, not `app_id`.
 
 ### Screenshots
 
-`screenshot` is a **canvas capture**, not a screen grab: it re-renders the canvas
-at an arbitrary resolution rather than copying the framebuffer, so it reaches
-off-screen content but omits panels/layer-shells and blur — use `grim` for a
-literal screen grab. Targets, flags, examples, and caveats live in the
-[CLI reference](cli.md#driftwm-msg-screenshot) (`driftwm msg screenshot --help`).
+`screenshot` re-renders the canvas rather than copying the framebuffer, so it
+reaches off-screen content; its four targets, flags, and caveats are in the
+[CLI reference](cli.md#driftwm-msg-screenshot) and their wire forms in
+[Requests](#requests).
 
 ### Subscribing to changes
 
 `subscribe` turns the connection into a live feed instead of polling: one event
 per change (per rendered frame while something animates), each a whole-state
-snapshot. Nothing is pushed while nothing changes — render from the latest
-received snapshot rather than in lockstep with events. Mechanics are in the
+snapshot rather than a granular event type (window-opened, focus-changed, …) —
+diff consecutive snapshots if you need the delta. Nothing is pushed while
+nothing changes. Mechanics are in the
 [CLI reference](cli.md#driftwm-msg-subscribe); the wire-level event shape is
 under [Events](#events) below.
 
 A one-liner that prints the focused window's `app_id` whenever anything changes:
 
 ```bash
-driftwm msg --json subscribe | jq -r '.State.windows[0].app_id'
+driftwm msg --json subscribe \
+  | jq --unbuffered -r '.State.windows[] | select(.is_focused) | .app_id'
 ```
 
 A small daemon that dims whatever loses focus and restores full opacity to
@@ -95,9 +86,9 @@ prev=
 driftwm msg --json subscribe \
   | jq --unbuffered -r '.State.windows[] | select(.is_focused) | .id' \
   | while read -r id; do
-      [ "$id" = "$prev" ] && continue                      # same focus, skip repeats
-      [ -n "$prev" ] && driftwm msg opacity 0.7 --id "$prev" # dim the window we left
-      driftwm msg opacity 1 --id "$id"                     # full opacity on the new one
+      [ "$id" = "$prev" ] && continue   # same focus, skip repeats
+      [ -n "$prev" ] && driftwm msg opacity 0.7 --id "$prev"
+      driftwm msg opacity 1 --id "$id"
       prev=$id
   done
 ```
@@ -105,9 +96,8 @@ driftwm msg --json subscribe \
 ### Debug counters
 
 `debug-counters` reports the sizes of the compositor's internal per-window,
-per-surface, and per-client collections — a leak-diagnosis endpoint with
-**unstable keys** (internal field names that can change between releases). See
-the [CLI reference](cli.md#driftwm-msg-debug-counters).
+per-surface, and per-client collections; its keys are **unstable** internal
+field names. See the [CLI reference](cli.md#driftwm-msg-debug-counters).
 
 ## Wire protocol
 
@@ -118,13 +108,10 @@ automatically targets that session. Set `DRIFTWM_SOCKET` to point a client at an
 explicit path.
 
 > [!WARNING]
-> The IPC socket is a full control surface, not a read-only one: `action` can
-> run `exec`/`spawn` (launch programs), `quit`, and `reload-config`; `relaunch`
-> launches a suspended window's app the same way. It's safe
-> only because the socket is `0600` (your user only) — anything that can open it
-> could already run programs as you. So don't loosen the permissions or bridge it
-> over a network for "just reading state": that hands arbitrary code execution to
-> whoever reaches it.
+> The socket is a full control surface, not a read-only one: `action` can run
+> `exec`/`spawn`, `quit`, and `reload-config`, and `relaunch` launches a
+> suspended window's app. It is `0600` for that reason — don't loosen the
+> permissions or bridge it over a network.
 
 The protocol is one JSON **request** per line, answered by one JSON **reply**
 per line. A single connection may carry several requests; the connection stays
@@ -134,12 +121,6 @@ A reply is `{"Ok": <response>}` on success or `{"Err": "message"}` on failure.
 
 A window can be targeted by a **selector**: a JSON number is its stable `id`
 (from `state`), a JSON string is a case-insensitive `app_id` substring.
-
-> [!NOTE]
-> The `Move` request and the `Window` screenshot target changed shape in this
-> release: the old `{"Move":[x,y]}` tuple and bare `"Window"` string forms are
-> gone (replaced by the object forms below). The `Focused` reply also grew from
-> a bare app_id string to `{"id":…,"app_id":…}`.
 
 ### Requests
 
@@ -156,8 +137,8 @@ A window can be targeted by a **selector**: a JSON number is its stable `id`
 | layout            | `{"Layout":{"short":false}}`                                                        |
 | run action        | `{"Action":"switch-layout next"}`                                                   |
 | bookmark          | `{"Bookmark":{}}` (list) / `{"Bookmark":{"name":"home"}}` (get) / `{"Bookmark":{"name":"home","to":[0,0]}}` (set) / `{"Bookmark":{"name":"home","delete":true}}` (delete) |
-| screenshot        | `{"Screenshot":{"target":"Viewport","scale":1.0,"path":"/abs/shot.png"}}`           |
-| screenshot window | `{"Window":{}}` / `{"Window":{"window":5}}` (as the `target`)                       |
+| screenshot        | `{"Screenshot":{"target":"Viewport","scale":1.0,"path":"/abs/shot.png"}}` (all three fields required; `path` must be absolute) |
+| screenshot target | `"Viewport"` / `"All"` / `{"Window":{}}` / `{"Window":{"window":5}}` (selector optional) / `{"Region":{"x":0,"y":0,"w":640,"h":480,"from_screen":false}}` (all five required) |
 | state             | `"State"`                                                                           |
 | subscribe         | `"Subscribe"`                                                                       |
 | debug counters    | `"DebugCounters"` (reply keys are unstable — see [Debug counters](#debug-counters)) |
@@ -173,6 +154,7 @@ A window can be targeted by a **selector**: a JSON number is its stable `id`
 {"Ok":{"Opacity":0.85}}
 {"Ok":{"Bookmark":{"x":500.0,"y":300.0}}}   // bookmark get / set (Y-up)
 {"Ok":{"Bookmarks":{"home":[0.0,0.0]}}}     // bookmark list (sorted by name)
+{"Ok":{"Screenshot":{"path":"/abs/shot.png","width":1920,"height":1080}}}
 {"Ok":"Ok"}                          // action / close / suspend / relaunch / bookmark delete
 {"Ok":{"DebugCounters":{"decorations":2,"stage_entries":2}}}   // abridged
 {"Ok":{"State":{"camera":[-960.0,-600.0],"zoom":1.0,"layout":"English (US)",
@@ -184,10 +166,12 @@ A window can be targeted by a **selector**: a JSON number is its stable `id`
 ```
 
 The `windows` array is the same shape driftwm writes to its [state file](#state-file),
-focused window first. Each entry's `id` is a stable per-session window handle —
-pass it back as a selector to `focus`, `move`, `close`, `suspend`,
-`relaunch`, or `screenshot window`. `suspended` marks a compositor-drawn
-stand-in rather than a live client — see [Suspended windows](#suspended-windows).
+focused window first — but only while something is focused; with nothing focused
+no entry is promoted, so filter on `is_focused` instead of indexing `windows[0]`.
+Each entry's `id` is a stable per-session window handle — pass it back as a
+selector to `focus`, `move`, `close`, `suspend`, `relaunch`, or
+`screenshot window`. `suspended` marks a compositor-drawn stand-in rather than a
+live client — see [Suspended windows](#suspended-windows).
 The reply also carries `layout` (full XKB name) and `layout_short` (the
 configured code for the active group); `fullscreen` and `pinned` (screen-space
 windows, each carrying an `id` too — a `pinned` entry's `position`/`size` are in
@@ -202,8 +186,7 @@ bookmark nearest the viewport's usable center among those currently visible, or
 `null` when none is in view. Each `outputs` entry carries its own
 `active_bookmark` for that output's viewport. This is the same value the
 `ext-workspace-v1` protocol marks `active`, so a bar can highlight the current
-bookmark. It follows the camera, so it belongs to `state`/`subscribe` rather
-than the registry-only `bookmark` verb.
+bookmark.
 
 ### Events
 
@@ -229,20 +212,36 @@ echo '{"Camera":[500,300]}' | socat -t1 - UNIX-CONNECT:"$SOCK"
 ## State file
 
 For read-only polling (status bars, scripts), driftwm also writes a throttled
-(~10 Hz) snapshot to `$XDG_RUNTIME_DIR/driftwm/state` — `key=value` lines plus a
-`windows=` JSON array using the same window shape as `state`. Reading that file
-avoids a socket round-trip when you only need to observe; when you'd rather be
-pushed than poll, use [`subscribe`](#subscribing-to-changes) instead.
+(~10 Hz) snapshot to `$XDG_RUNTIME_DIR/driftwm/state` — one `key=value` per
+line. Reading that file avoids a socket round-trip when you only need to
+observe; when you'd rather be pushed than poll, use
+[`subscribe`](#subscribing-to-changes) instead.
 
-Layer-shell clients appear too: `layers=` lists the namespaces of screen-space
-layer surfaces (bars, OSKs, overlays — useful for finding the `app_id` a
-window rule should match), and `canvas_layers=` is a JSON array of
-canvas-positioned layers with their namespace, rule-coordinate `position`, and
-`size` (the position reflects the current size, so it can drift from the
-placing rule if the surface resized after mapping).
+| Key                                             | Value                                                          |
+| ----------------------------------------------- | -------------------------------------------------------------- |
+| `x`, `y`, `zoom`                                | The focused output's viewport                                  |
+| `layout`, `layout_short`                        | Full XKB name, and the configured code for the active group    |
+| `saved_x`, `saved_y`, `saved_zoom`              | The stored home-return viewport, when there is one             |
+| `windows`                                       | JSON array, entries shaped like `state`'s                      |
+| `layers`                                        | Comma-separated layer-shell namespaces                         |
+| `canvas_layers`                                 | JSON array of canvas-positioned layers                         |
+| `outputs.<name>.camera_x`, `.camera_y`, `.zoom` | That output's viewport                                         |
+| `outputs.<name>.fullscreen`                     | JSON object: `id`, `app_id`, `title`                           |
+| `outputs.<name>.pinned`                         | JSON array: `id`, `app_id`, `title`, `position`, `size`        |
 
-## Limitations
+A key with nothing to report is omitted, not written empty: no windows means no
+`windows=` line at all, no layer surfaces no `layers=` line, and an output with
+nothing fullscreen or pinned gets neither of its screen-space lines. Only `x`,
+`y`, `zoom`, `layout`, `layout_short`, and the per-output camera lines are
+always present.
 
-- `subscribe` events are whole-state snapshots, not granular event types
-  (window-opened, focus-changed, …) — diff consecutive snapshots if you need
-  the delta.
+Every published coordinate is a **center** with **Y-up**, matching `state` and
+window rules. `x=`/`y=`/`zoom=` are the focused output's viewport, and each
+output also reports its own under `outputs.<name>.camera_x`,
+`outputs.<name>.camera_y`, and `outputs.<name>.zoom` — the same convention as
+the `state` reply's per-output `camera` and `zoom`, rounded for the file.
+
+`layers=` namespaces are the `app_id` a window rule matches a layer surface by.
+A `canvas_layers` entry's `position` is derived from the surface's current size,
+so it can drift from the rule that placed it if the surface resized after
+mapping.

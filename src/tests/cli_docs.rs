@@ -28,6 +28,80 @@ JSON wire protocol behind `msg`, see [ipc.md](ipc.md).
 
 ";
 
+/// One runnable invocation per command section, keyed by its full path. They
+/// live here rather than in the doc comments so `--help` stays terminal-shaped.
+const EXAMPLES: &[(&str, &[&str])] = &[
+    ("driftwm", &["driftwm --backend winit --config ~/dev.toml"]),
+    (
+        "driftwm msg",
+        &["driftwm msg state", "driftwm msg --json focus --id 5"],
+    ),
+    (
+        "driftwm msg state",
+        &["driftwm msg --json state | jq '.Ok.State.windows'"],
+    ),
+    (
+        "driftwm msg subscribe",
+        &["driftwm msg --json subscribe | jq --unbuffered -r '.State.zoom'"],
+    ),
+    (
+        "driftwm msg focus",
+        &["driftwm msg focus firefox", "driftwm msg focus --id 5"],
+    ),
+    (
+        "driftwm msg move",
+        &["driftwm msg move", "driftwm msg move -400 200 --id 5"],
+    ),
+    ("driftwm msg close", &["driftwm msg close firefox"]),
+    ("driftwm msg opacity", &["driftwm msg opacity 0.85 --id 5"]),
+    ("driftwm msg suspend", &["driftwm msg suspend firefox"]),
+    ("driftwm msg relaunch", &["driftwm msg relaunch firefox"]),
+    (
+        "driftwm msg camera",
+        &["driftwm msg camera", "driftwm msg camera 500 300"],
+    ),
+    ("driftwm msg zoom", &["driftwm msg zoom 0.5"]),
+    (
+        "driftwm msg bookmark",
+        &[
+            "driftwm msg bookmark",
+            "driftwm msg bookmark inbox 500 300",
+            "driftwm msg bookmark inbox --delete",
+        ],
+    ),
+    ("driftwm msg layout", &["driftwm msg layout --short"]),
+    (
+        "driftwm msg action",
+        &[
+            "driftwm msg action switch-layout next",
+            "driftwm msg action toggle-fullscreen",
+        ],
+    ),
+    (
+        "driftwm msg screenshot",
+        &["driftwm msg screenshot --scale 2 -o ~/canvas.png"],
+    ),
+    (
+        "driftwm msg screenshot window",
+        &["driftwm msg screenshot window -o - | wl-copy"],
+    ),
+    (
+        "driftwm msg screenshot all",
+        &["driftwm msg screenshot all --scale 0.5"],
+    ),
+    (
+        "driftwm msg screenshot region",
+        &[
+            "driftwm msg screenshot region -1000 -500 2000 1000",
+            "driftwm msg screenshot region \"$(slurp)\" --from-screen",
+        ],
+    ),
+    (
+        "driftwm msg debug-counters",
+        &["driftwm msg debug-counters"],
+    ),
+];
+
 #[test]
 fn docs_cli_md_is_up_to_date() {
     let rendered = render();
@@ -44,8 +118,12 @@ fn docs_cli_md_is_up_to_date() {
 }
 
 fn render() -> String {
+    // clap only adds its auto-generated args when the command is built, and
+    // `--version` is one of them.
+    let mut cmd = crate::Cli::command();
+    cmd.build();
     let mut out = String::from(INTRO);
-    render_command(&mut out, &crate::Cli::command(), &[], &[]);
+    render_command(&mut out, &cmd, &[], &[]);
     format!("{}\n", out.trim_end())
 }
 
@@ -63,7 +141,7 @@ fn render_command(out: &mut String, cmd: &Command, path: &[String], shown_global
     out.push_str(&format!("{} `{}`\n\n", "#".repeat(level), title));
 
     out.push_str("```\n");
-    out.push_str(&usage_line(cmd, &title));
+    out.push_str(&usage_line(cmd, &title, shown_globals));
     out.push_str("\n```\n\n");
 
     if let Some(about) = cmd.get_long_about().or_else(|| cmd.get_about()) {
@@ -100,15 +178,59 @@ fn render_command(out: &mut String, cmd: &Command, path: &[String], shown_global
         out.push('\n');
     }
 
+    out.push_str("```bash\n");
+    for line in examples(&title) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str("```\n\n");
+
+    // Only a long subcommand list needs an index; a handful reads fine inline.
+    if subcommands(cmd).count() > 3 {
+        out.push_str(&subcommand_table(cmd, &full));
+    }
+
     for sub in subcommands(cmd) {
         render_command(out, sub, &full, &child_globals);
     }
 }
 
-/// A command's arguments, minus clap's auto-generated `--help` / `--version`.
+/// The example block for one section. Missing entries are a hard error so a new
+/// command can't ship without a runnable invocation.
+fn examples(title: &str) -> &'static [&'static str] {
+    EXAMPLES
+        .iter()
+        .find(|(name, _)| *name == title)
+        .map(|(_, lines)| *lines)
+        .unwrap_or_else(|| panic!("add a `{title}` entry to EXAMPLES in src/tests/cli_docs.rs"))
+}
+
+/// A verb | summary | link table over `cmd`'s subcommands, for jumping into a
+/// long list of sections.
+fn subcommand_table(cmd: &Command, path: &[String]) -> String {
+    let mut table = String::from("| Command | Description |\n| --- | --- |\n");
+    for sub in subcommands(cmd) {
+        let name = sub.get_name();
+        let anchor = path
+            .iter()
+            .map(String::as_str)
+            .chain([name])
+            .collect::<Vec<_>>()
+            .join("-")
+            .to_lowercase();
+        let about = sub
+            .get_about()
+            .map(|a| a.to_string().replace('\n', " "))
+            .unwrap_or_default();
+        table.push_str(&format!("| [`{name}`](#{anchor}) | {} |\n", about.trim()));
+    }
+    table.push('\n');
+    table
+}
+
+/// A command's arguments, minus clap's auto-generated `--help`.
 fn visible_args(cmd: &Command) -> impl Iterator<Item = &Arg> {
-    cmd.get_arguments()
-        .filter(|a| a.get_id() != "help" && a.get_id() != "version")
+    cmd.get_arguments().filter(|a| a.get_id() != "help")
 }
 
 /// A command's real subcommands, minus clap's auto-generated `help`.
@@ -117,10 +239,13 @@ fn subcommands(cmd: &Command) -> impl Iterator<Item = &Command> {
 }
 
 /// `driftwm msg move [OPTIONS] [X] [Y]` — the full path, an options marker, each
-/// positional's value token, and a subcommand slot.
-fn usage_line(cmd: &Command, title: &str) -> String {
+/// positional's value token, and a subcommand slot. Globals an ancestor already
+/// listed don't earn the marker, matching where they're documented.
+fn usage_line(cmd: &Command, title: &str, shown_globals: &[String]) -> String {
     let mut s = title.to_string();
-    if visible_args(cmd).any(|a| !a.is_positional()) {
+    let own_option =
+        |a: &Arg| !a.is_positional() && !shown_globals.iter().any(|g| g == a.get_id().as_str());
+    if visible_args(cmd).any(own_option) {
         s.push_str(" [OPTIONS]");
     }
     for arg in visible_args(cmd).filter(|a| a.is_positional()) {
@@ -183,6 +308,11 @@ fn takes_value(arg: &Arg) -> bool {
 }
 
 fn default_value(arg: &Arg) -> Option<String> {
+    // Building the command gives every flag an implicit `false`; only an arg
+    // that takes a value has a default worth printing.
+    if !takes_value(arg) {
+        return None;
+    }
     let defaults = arg.get_default_values();
     (!defaults.is_empty()).then(|| {
         defaults

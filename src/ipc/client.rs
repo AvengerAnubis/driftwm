@@ -14,192 +14,124 @@ use super::protocol::{
 /// omitted and write when given.
 #[derive(clap::Subcommand, Debug)]
 pub enum Msg {
-    /// Get the camera position, or set it (animated) with `<x> <y>` (viewport center, Y-up).
-    ///
-    /// With no arguments, prints the current camera position. With `<x> <y>`,
-    /// pans the viewport (animated) to center that canvas point; positive `y` is
-    /// up.
-    ///
-    /// Reply: `{"Ok":{"Camera":{"x":500.0,"y":300.0}}}`.
-    #[command(allow_negative_numbers = true)]
-    Camera { x: Option<f64>, y: Option<f64> },
-    /// Get the zoom level, or set it with `<level>` (clamped to the supported range).
-    ///
-    /// Setting is animated and clamped to the supported range (out to fit-all,
-    /// in to native resolution — no magnification).
-    ///
-    /// Reply: `{"Ok":{"Zoom":0.5}}`.
-    Zoom { level: Option<f64> },
-    /// Print the active keyboard layout (full XKB name, e.g. `English (US)`).
-    ///
-    /// With `--short`, prints the configured layout code for the active group
-    /// (e.g. `us`, `ru`) instead — what most status bars want.
-    ///
-    /// Reply: `{"Ok":{"Layout":"English (US)"}}` (or `"us"` with `--short`).
-    Layout {
-        /// Print the configured layout code instead (e.g. `us`, `ru`).
-        #[arg(long)]
-        short: bool,
-    },
     /// Dump camera, zoom, and the window inventory.
     ///
-    /// Prints camera, zoom, keyboard layout, and every window — each with a
-    /// stable `id` usable as a selector for `focus`/`move`/`close`/`screenshot
-    /// window` — plus fullscreen, pinned, layer-shell, and per-output details.
+    /// Also prints the keyboard layout, the fullscreen and pinned screen-space
+    /// inventories, layer-shell namespaces, and each output's viewport. Every
+    /// window entry carries the stable `id` other commands take as a selector.
     ///
     /// Reply: `{"Ok":{"State":{"camera":[..],"zoom":1.0,"windows":[..],"outputs":[..]}}}`.
     State,
-    /// Print internal collection sizes for leak diagnosis (unstable keys).
-    ///
-    /// An introspection endpoint, not a stable interface: the keys are internal
-    /// field names that can change between releases. Meant for leak diagnosis —
-    /// a window/surface/client-keyed count should return to its idle baseline
-    /// once the windows and clients that raised it are gone (output-keyed
-    /// counters follow output lifetimes instead and can persist across hotplug).
-    ///
-    /// Reply: `{"Ok":{"DebugCounters":{"decorations":2,"stage_entries":2}}}`.
-    DebugCounters,
     /// Stream state snapshots as they change (one JSON line per event with --json).
     ///
-    /// Turns the connection into a live feed: the server acks, then pushes one
-    /// event with the current state immediately and again on every change —
-    /// including camera/zoom, the window list, focus, window titles, keyboard
-    /// layout, a per-output viewport, the screen-space inventory (pinned and
-    /// fullscreen windows — dragging a pinned window pushes events), and
-    /// layer/canvas-layer changes. While something animates an event is pushed
-    /// per rendered frame (not throttled like the state file), so a pan or drag
-    /// streams at the compositor's frame rate. Runs until interrupted.
+    /// The server acks, pushes the current state immediately, then pushes a
+    /// fresh snapshot on any change to it. While something animates that is one
+    /// event per rendered frame (not throttled like the state file), so a pan or
+    /// drag streams at the compositor's frame rate. Runs until interrupted.
     ///
     /// Each event is `{"State":{..}}` — the whole snapshot, same shape as the
     /// `state` reply, and not wrapped in `Ok`/`Err`. A slow subscriber never
     /// blocks the compositor: it drops snapshots and catches up in full on the
     /// next change.
     Subscribe,
-    /// Print the focused window, or focus a window by app_id substring or `--id`
-    /// (the stable id shown in `state`).
+    /// Print the focused window, or focus one by `app_id` substring or `--id`.
     ///
-    /// With no argument, prints the focused window's `id` and `app_id`. Given an
-    /// `app_id` substring (case-insensitive) or `--id <n>`, focuses that window,
-    /// navigating to it only if it is off-screen.
+    /// Focusing pans the camera to the window unless it is already fully
+    /// visible. Widgets cannot be focused.
     ///
     /// Reply: `{"Ok":{"Focused":{"id":5,"app_id":"alacritty"}}}` (or `{"Ok":{"Focused":null}}`).
     Focus {
         app_id: Option<String>,
-        /// Focus the window with this stable id (from `state`).
+        /// Target this window id.
         #[arg(long, conflicts_with = "app_id")]
         id: Option<u64>,
     },
-    /// Get a window's position, or move it (center, Y-up) with `<x> <y>`. Targets
-    /// the focused window, or `--id` (the stable id shown in `state`).
+    /// Get a window's position, or move it to `<x> <y>` (center, Y-up).
     ///
-    /// Positions are a center point with `y` pointing up. Pinned and fullscreen
-    /// windows live in screen space, not on the canvas, so `move` refuses to
-    /// reposition them.
+    /// Pinned and fullscreen windows live in screen space, not on the canvas, so
+    /// `move` refuses to reposition them.
     ///
     /// Reply: `{"Ok":{"Position":{"x":100,"y":200}}}`.
     #[command(allow_negative_numbers = true)]
     Move {
         x: Option<i32>,
         y: Option<i32>,
-        /// Target the window with this stable id (from `state`).
+        /// Target this window id.
         #[arg(long)]
         id: Option<u64>,
     },
-    /// Get a window's opacity, or set it with `<value>` (0.0–1.0). Targets the
-    /// focused window, or `--id` (the stable id shown in `state`).
+    /// Close the focused window, or one by `app_id` substring or `--id`.
     ///
-    /// `0.0` is transparent, `1.0` opaque. Applies to any rendered window, pinned
-    /// and fullscreen included; the change takes effect next frame. The value is
-    /// runtime-only — seeded from an `opacity` window rule at map time, held for
-    /// the session, and never persisted (it resets when the window or compositor
-    /// restarts). Values outside `0.0`–`1.0` are rejected, not clamped; a window
-    /// no rule touched reads `1`.
-    ///
-    /// Reply: `{"Ok":{"Opacity":0.85}}`.
-    Opacity {
-        value: Option<f64>,
-        /// Target the window with this stable id (from `state`).
-        #[arg(long)]
-        id: Option<u64>,
-    },
-    /// Close the focused window, or a window by app_id substring or `--id`.
-    ///
-    /// Targets the focused window by default, or a window by `app_id` substring
-    /// (case-insensitive) or `--id <n>` (from `state`). Errors when nothing
-    /// matches.
+    /// Errors when nothing matches.
     ///
     /// Reply: `{"Ok":"Ok"}`.
     Close {
         app_id: Option<String>,
-        /// Close the window with this stable id (from `state`).
+        /// Target this window id.
         #[arg(long, conflicts_with = "app_id")]
         id: Option<u64>,
     },
-    /// Suspend the focused window, or a window by app_id substring or `--id`.
+    /// Get a window's opacity, or set it with `<value>` — `0` transparent, `1` opaque.
     ///
-    /// The same conversion as the `suspend-window` action, but addressable: it
-    /// leaves a compositor-drawn stand-in in the window's place (relaunch it with
-    /// `relaunch`, `Enter`, or a click) instead of asking the client to close.
-    /// Targets the focused window by default, or a window by `app_id` substring
-    /// (case-insensitive) or `--id <n>` (from `state`). When a live client and a
-    /// stand-in share an `app_id`, the substring resolves to the live client —
-    /// target the stand-in by `--id`.
+    /// Runtime-only: seeded from an `opacity` window rule, lost when the window
+    /// or the compositor restarts. Out-of-range values are rejected. Default
+    /// `1`.
+    ///
+    /// Reply: `{"Ok":{"Opacity":0.85}}`.
+    Opacity {
+        value: Option<f64>,
+        /// Target this window id.
+        #[arg(long)]
+        id: Option<u64>,
+    },
+    /// Suspend the focused window, or one by `app_id` substring or `--id`.
+    ///
+    /// The same conversion as the `suspend-window` action: the client goes away
+    /// and a compositor-drawn stand-in holds its place, to be brought back with
+    /// `relaunch`, `Enter`, or a click.
     ///
     /// Reply: `{"Ok":"Ok"}`.
     Suspend {
         app_id: Option<String>,
-        /// Suspend the window with this stable id (from `state`).
+        /// Target this window id.
         #[arg(long, conflicts_with = "app_id")]
         id: Option<u64>,
     },
-    /// Relaunch a suspended window: the focused stand-in, or one by app_id
+    /// Relaunch a suspended window: the focused stand-in, or one by `app_id`
     /// substring or `--id`.
     ///
-    /// Spawns the suspended window's app from its `.desktop` entry and adopts the
-    /// new window into the stand-in's slot on its first sized commit. Acts only
-    /// on suspended stand-ins, so an `app_id` substring resolves straight to the
-    /// matching stand-in (never a live client). Errors when nothing matches.
+    /// Spawns the app from its `.desktop` entry and adopts the new window into
+    /// the stand-in's slot on its first sized commit. Acts only on stand-ins, so
+    /// an `app_id` substring never resolves to a live client. Errors when
+    /// nothing matches.
     ///
     /// Reply: `{"Ok":"Ok"}`.
     Relaunch {
         app_id: Option<String>,
-        /// Relaunch the suspended window with this stable id (from `state`).
+        /// Target this window id.
         #[arg(long, conflicts_with = "app_id")]
         id: Option<u64>,
     },
-    /// Run a config action, e.g. `action close-window`, `action quit`, `action switch-layout next`.
+    /// Get the camera position, or pan the viewport to `<x> <y>` (canvas point, Y-up).
     ///
-    /// Runs any compositor action by the same string you would write in a config
-    /// keybinding, parsed with the exact config parser, so every keybindable
-    /// action is reachable. Replies `Ok` whenever the spec parses — even if it
-    /// had no effect (e.g. `close-window` with nothing focused); only an
-    /// unparseable spec errors.
+    /// Panning is animated, and takes both coordinates or neither.
     ///
-    /// The dedicated `msg` commands are the state you can read or set; every
-    /// one-shot operation (close a window, quit, zoom a step) lives here under
-    /// `action`. Window actions target the focused window, so to act on a
-    /// specific one, `focus` it first — or use the `--id` selector on
-    /// `focus`/`move`/`close`/`screenshot window` to target any window without
-    /// the focus-first dance.
-    ///
-    /// The socket is a full control surface: `action` can `exec`/`spawn`, `quit`,
-    /// and `reload-config`. It is safe only because the socket is `0600`.
-    ///
-    /// Reply: `{"Ok":"Ok"}`.
+    /// Reply: `{"Ok":{"Camera":{"x":500.0,"y":300.0}}}`.
     #[command(allow_negative_numbers = true)]
-    Action {
-        /// Action and arguments, exactly as written in config (e.g. `nudge-window up`).
-        #[arg(required = true, trailing_var_arg = true, num_args = 1..)]
-        spec: Vec<String>,
-    },
-    /// List bookmarks, get/set one by `<name>`, or delete with `--delete`.
+    Camera { x: Option<f64>, y: Option<f64> },
+    /// Get the zoom level, or set it with `<level>`.
     ///
-    /// With no arguments, lists every bookmark (`name: [x, y]`, Y-up, sorted).
-    /// Given a `<name>`, prints that bookmark's point; with `<name> <x> <y>`,
-    /// creates or overwrites it at that canvas point (Y-up, window-center
-    /// convention, same as `move`). `--delete <name>` removes one. Bookmarks
-    /// store a position only, never zoom — jump to one with the `go-to-bookmark`
-    /// action or a `mod+<n>` keybinding.
+    /// Setting is animated and clamped: out to fit-all, in to native resolution
+    /// (no magnification).
+    ///
+    /// Reply: `{"Ok":{"Zoom":0.5}}`.
+    Zoom { level: Option<f64> },
+    /// List bookmarks, get or set one by `<name>`, or delete with `--delete`.
+    ///
+    /// Coordinates are canvas points, Y-up and window-center, the same
+    /// convention as `move`; setting an existing name overwrites it. A bookmark
+    /// stores a position only, never zoom — jump to one with the
+    /// `go-to-bookmark` action or a `mod+<n>` keybinding.
     ///
     /// Reply: `{"Ok":{"Bookmark":{"x":500.0,"y":300.0}}}` (get/set), or
     /// `{"Ok":{"Bookmarks":{"home":[0.0,0.0]}}}` (list), or `{"Ok":"Ok"}` (delete).
@@ -216,14 +148,42 @@ pub enum Msg {
         #[arg(long, requires = "name", conflicts_with_all = ["x", "y"])]
         delete: bool,
     },
-    /// Capture a canvas PNG (custom DPI). With no subcommand, captures the active
-    /// output's current view of the canvas.
+    /// Print the active keyboard layout (full XKB name, e.g. `English (US)`).
+    ///
+    /// Reply: `{"Ok":{"Layout":"English (US)"}}` (or `"us"` with `--short`).
+    Layout {
+        /// Print the configured code for the active group instead (e.g. `us`, `ru`).
+        #[arg(long)]
+        short: bool,
+    },
+    /// Run a config action, e.g. `action close-window`, `action switch-layout next`.
+    ///
+    /// Takes the same string you would write in a config keybinding, parsed with
+    /// the config parser, so every keybindable action is reachable here. Replies
+    /// `Ok` whenever the spec parses — even when it had no effect (e.g.
+    /// `close-window` with nothing focused); only an unparseable spec errors.
+    ///
+    /// Window actions act on the focused window, so `focus` the target first, or
+    /// pass `--id` to a command that takes it.
+    ///
+    /// The socket is a full control surface: `action` can `exec`/`spawn`, `quit`,
+    /// and `reload-config`. It is safe only because the socket is `0600`.
+    ///
+    /// Reply: `{"Ok":"Ok"}`.
+    #[command(allow_negative_numbers = true)]
+    Action {
+        /// Action and arguments, exactly as written in config (e.g. `nudge-window up`).
+        #[arg(required = true, trailing_var_arg = true, num_args = 1..)]
+        spec: Vec<String>,
+    },
+    /// Capture a canvas PNG. With no subcommand, captures the active output's
+    /// current view of the canvas.
     ///
     /// A canvas capture, not a screen grab: it re-renders a virtual viewport onto
     /// the canvas, reaching off-screen content at any resolution. Windows get
     /// full chrome (title bar, border, shadow); panels/layer-shells and blur are
     /// not drawn (use `grim` for a literal grab). `-o -` streams the PNG to
-    /// stdout (e.g. `screenshot window -o - | wl-copy`).
+    /// stdout.
     ///
     /// Blur caveat: a scene capture (viewport/`all`/`region`) shows a translucent
     /// window over a sharp backdrop, never a blurred one; a `window` capture keeps
@@ -238,23 +198,33 @@ pub enum Msg {
         /// Pixels per canvas unit — higher captures more detail than the screen shows, independent of zoom.
         #[arg(long, default_value_t = 1.0, global = true)]
         scale: f64,
-        /// Output PNG path, or `-` for stdout [default: `./driftwm-screenshot-<time>.png`].
+        /// Output PNG path, or `-` for stdout (default: `./driftwm-screenshot-<time>.png`).
         #[arg(short, long, global = true)]
         output: Option<String>,
     },
+    /// Print internal collection sizes for leak diagnosis (unstable keys).
+    ///
+    /// Keys are internal field names and change between releases; don't script
+    /// against them. A window/surface/client-keyed count should return to its
+    /// idle baseline once the windows and clients that raised it are gone
+    /// (output-keyed counters follow output lifetimes instead and can persist
+    /// across hotplug).
+    ///
+    /// Reply: `{"Ok":{"DebugCounters":{"decorations":2,"stage_entries":2}}}`.
+    DebugCounters,
 }
 
 /// What `driftwm msg screenshot` captures.
 #[derive(clap::Subcommand, Debug)]
 pub enum ShotTarget {
-    /// The focused window, or a window by app_id substring or `--id`.
+    /// The focused window, or one by `app_id` substring or `--id`.
     ///
     /// Composed alone on transparency, so overlapping windows never appear;
     /// pinned and fullscreen windows capture like any other (a fullscreen window
     /// has no chrome). Reply shape is the shared `Screenshot` reply above.
     Window {
         app_id: Option<String>,
-        /// Capture the window with this stable id (from `state`).
+        /// Target this window id.
         #[arg(long, conflicts_with = "app_id")]
         id: Option<u64>,
     },

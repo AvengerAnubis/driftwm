@@ -3,17 +3,8 @@
 Window rules let you apply per-window overrides based on a window's identity.
 Rules are declared as `[[window_rules]]` sections in your config file.
 
-Most rule effects — position, size, opacity, decoration, borders, widget,
-pinned, output, … — are resolved **once, when a window maps**: reloading your
-config only affects windows opened afterwards, and a window that changes its
-title after mapping is **not** re-checked against `title` rules. A few things
-re-resolve live against the current config instead: `pass_keys` is evaluated per
-keypress (so a config reload — and a title change — takes effect immediately),
-layer-surface chrome is evaluated per frame (so a config reload takes effect
-immediately), `suspend_on_close` is evaluated when a window closes, and
-`restore_windows` when the session is saved or loaded — on load against a saved
-record, which carries an `app_id` but no title, so only the `app_id` criterion is
-consulted there (see [session restore](session.md#restore_windows)).
+Most rule effects are resolved once, when a window maps — see
+[When rules take effect](#when-rules-take-effect).
 
 ## How matching works
 
@@ -21,26 +12,33 @@ consulted there (see [session restore](session.md#restore_windows)).
 in config order and merged together:
 
 - **Scalar fields** (`decoration`, `opacity`, `position`, `size`,
-  `fullscreen`, `border_width`, `border_color`, `border_color_focused`,
-  `corner_radius`, `shadow`, `output`, `layer_order`, `suspend_on_close`,
-  `restore_windows`): last-wins — a later rule overrides an earlier one.
-- **Boolean flags** (`widget`, `pinned_to_screen`, `blur`): sticky-on — once
-  set by any matching rule, the flag stays set regardless of later rules.
+  `fullscreen`, `focus_on_open`, `border_width`, `border_color`,
+  `border_color_focused`, `corner_radius`, `shadow`, `output`, `layer_order`,
+  `suspend_on_close`, `restore_windows`): last-wins — a later rule overrides an
+  earlier one.
+- **Boolean flags** (`widget`, `pinned_to_screen`, `blur`,
+  `preserve_aspect_ratio`): sticky-on — once set by any matching rule, the flag
+  stays set regardless of later rules. There is no way to turn one back off:
+  writing `blur = false` or `widget = false` in a rule does nothing.
 - **`pass_keys`**: `All` is sticky-on; `Only` lists are unioned across
-  rules (see [pass_keys details](#pass_keys-details)).
+  rules (see [`pass_keys`](#pass_keys)).
 
 This lets you compose independent rules for the same window:
 
 ```toml
-# Rule 1: make kitty blur its background
+# All three rules below apply to the same kitty window and are merged:
+
 [[window_rules]]
 app_id = "kitty"
-blur   = true
+blur   = true        # sticky-on: cannot be unset by later rules
 
-# Rule 2: also make it semi-transparent (blur from Rule 1 is kept)
 [[window_rules]]
 app_id  = "kitty"
-opacity = 0.85
+opacity = 0.85       # blur from above is preserved
+
+[[window_rules]]
+title   = "*nvim*"   # title match narrows to nvim windows only
+opacity = 1.0        # override opacity for nvim (blur still applies)
 ```
 
 ## Match criteria
@@ -62,7 +60,7 @@ To get the app ids and titles of all current non-widget windows:
 
 ```sh
 driftwm msg --json state | \
-jq '.Ok.State.windows[] | select(.is_widget == false) | {app_id, title}'
+jq '.Ok.State.windows[] | select(.is_widget == false and .suspended != true) | {app_id, title}'
 ```
 
 ## Pattern syntax
@@ -77,7 +75,14 @@ All match fields support three syntaxes:
 
 Multiple `*` wildcards are allowed in glob patterns: `"*terminal*"`.
 
-Regex patterns use the `regex` crate (RE2-compatible, no backreferences).
+Regex patterns don't support backreferences or lookaround.
+
+```toml
+# Match any Steam game by regex
+[[window_rules]]
+app_id    = "/^steam_app_\\d+$/"
+pass_keys = true
+```
 
 ## Field reference
 
@@ -99,39 +104,6 @@ renders **above** normal windows (but below panels / Top & Overlay layer-shell
 surfaces). Use it for Picture-in-Picture, video-call toolbars, or any always-on
 floating overlay.
 
-- **Coordinates are output-relative.** When pinned, `position` is measured from
-  the **output center** (still center-anchored and Y-up): `[0, 0]` centers the
-  window on the monitor, `+Y` is up. Drop `position` to center it.
-- **Movable and resizable** like a normal window — drag the title bar (or
-  `Mod`-drag) to move, drag a border to resize. Dragging across monitors
-  reassigns it to that output. Combine with `widget = true` to make it
-  **immovable**.
-- **Fullscreen round-trips.** A fullscreen request (or `Mod+F`) temporarily
-  unpins the window to fill the screen; exiting fullscreen re-pins it in place.
-  Any canvas pan/zoom exits fullscreen, just like a normal window.
-- **Off the canvas.** Pinned windows are excluded from navigation, alt-tab,
-  snapping, fit/center actions, and canvas screenshots
-  (`driftwm msg screenshot`). They remain focusable and closable; SSD windows
-  show a small dot in the title bar.
-- **Toggle at runtime** with the `toggle-pin-to-screen` action (bound to `Mod+T`
-  by default), which pins/unpins the focused window in place.
-
-#### Finding a pinned window's position and size
-
-`driftwm msg state` already reports a pinned window's `position`/`size` in rule
-coordinates, so the flow is: pin the window live, place it, and copy the numbers
-straight into a rule:
-
-1. Open the window (e.g. start Picture-in-Picture), click it to focus, and press
-   `Mod+T` to pin it. It's now in screen space — drag it anywhere with the mouse
-   and resize to taste.
-2. Run `driftwm msg state` and read the `pinned` section: each entry lists its
-   output, `app_id`, `title`, `position`, and `size`. Those `position`/`size`
-   values are already output-relative rule coordinates.
-3. Write the rule with those `position`/`size` values plus
-   `pinned_to_screen = true` (and `decoration = "none"` for a chrome-free PiP
-   surface).
-
 ```toml
 [[window_rules]]
 title            = "Picture-in-Picture"
@@ -141,11 +113,23 @@ size             = [570, 320]
 decoration       = "none"
 ```
 
-Pinned windows stay absent from the canvas `windows=` inventory and from canvas
-screenshots (`driftwm msg screenshot`) — like layer-shell panels, they live in
-screen space, not on the canvas. They appear in their own per-output `pinned`
-section of `driftwm msg state` instead, which is where the copy-ready numbers
-come from.
+- **Coordinates are output-relative.** When pinned, `position` is measured from
+  the **output center** (still center-anchored and Y-up): `[0, 0]` centers the
+  window on the monitor, `+Y` is up. Drop `position` to center it.
+- **Off the canvas.** Pinned windows are excluded from navigation, alt-tab,
+  snapping, fit/center actions, and canvas screenshots
+  (`driftwm msg screenshot`). They remain focusable and closable; SSD windows
+  show a small dot in the title bar.
+- **Fullscreen round-trips.** A fullscreen request (or `Mod+F`) temporarily
+  unpins the window to fill the screen; exiting fullscreen re-pins it in place.
+  Any canvas pan/zoom exits fullscreen, just like a normal window.
+- **Dragging it across monitors** reassigns it to that output. Combine with
+  `widget = true` to make it immovable.
+
+To find the numbers for a rule, pin the window live with `toggle-pin-to-screen`
+(`Mod+T`), drag and resize it into place, then copy `position`/`size` from its
+entry in the per-output `pinned` section of `driftwm msg state` — those are
+already output-relative rule coordinates.
 
 ### Output selection
 
@@ -192,27 +176,18 @@ shadow        = true
 border_width  = 2
 ```
 
-### `pass_keys` details
+### `pass_keys`
 
-`pass_keys` controls which compositor keybindings are forwarded to the focused
-window instead of being handled by the compositor:
+`pass_keys` forwards compositor keybindings to the focused window instead of
+handling them — useful for games and remote-desktop clients. Key combo syntax is
+the same as in `[keybindings]`: `mod+key`, `ctrl+shift+key`, etc.
 
-| Value                 | Behaviour                                                                         |
-| --------------------- | --------------------------------------------------------------------------------- |
-| `false` (or omit)     | Compositor handles all keybindings normally (default)                             |
-| `true`                | **All** keys forwarded — no compositor shortcuts fire while this window has focus |
-| `["mod+q", "ctrl+q"]` | **Only** the listed combos are forwarded; all other shortcuts stay active         |
+VT switching (`Ctrl+Alt+F1`–`F12`) **always stays in the compositor**, so
+`pass_keys = true` can never lock you out of your TTYs.
 
-VT switching (`Ctrl+Alt+F1`–`F12`) **always stays in the compositor** regardless
-of `pass_keys`.
-
-Key combo syntax is the same as in `[keybindings]`: `mod+key`, `ctrl+shift+key`, etc.
-
-When multiple rules match the same window:
-
-- `true` is sticky-on: if **any** rule sets `pass_keys = true`, the result is `true`.
-- `["combo", …]` lists are **unioned** across all matching rules.
-- `true` overrides a list: if one rule says `true` and another says `["mod+q"]`, the result is `true`.
+When multiple rules match the same window, `["combo", …]` lists are **unioned**,
+and `true` beats a list: if one rule says `true` and another says `["mod+q"]`,
+the result is `true`.
 
 ## Examples
 
@@ -284,14 +259,6 @@ app_id    = "factorio"
 pass_keys = ["ctrl+q", "ctrl+s"]
 ```
 
-### Match any Steam game by regex
-
-```toml
-[[window_rules]]
-app_id    = "/^steam_app_\\d+$/"
-pass_keys = true
-```
-
 ### Initial size and position for a floating panel
 
 ```toml
@@ -302,31 +269,11 @@ position = [960, 0]
 widget   = true
 ```
 
-### Composing rules (multi-rule merge)
-
-```toml
-# All three rules below apply to the same kitty window and are merged:
-
-[[window_rules]]
-app_id = "kitty"
-blur   = true        # sticky-on: cannot be unset by later rules
-
-[[window_rules]]
-app_id  = "kitty"
-opacity = 0.85       # blur from above is preserved
-
-[[window_rules]]
-title   = "*nvim*"   # title match narrows to nvim windows only
-opacity = 1.0        # override opacity for nvim (blur still applies)
-```
-
 ### Widget with a custom border and shadow
 
-`decoration = "minimal"` gives you a titlebar-less window that still participates
-in compositor chrome — borders, corner clipping, and shadow all apply. Use it
-when you want a widget that isn't fully bare. `decoration = "none"` is the
-opposite: a bare client surface where the compositor adds (and ignores) all
-chrome overrides.
+`decoration = "minimal"` is the mode for a widget that should keep borders,
+corner clipping, and shadow but lose its titlebar — `decoration = "none"`
+ignores those overrides entirely.
 
 ```toml
 [[window_rules]]
@@ -358,11 +305,9 @@ preserve_aspect_ratio = true
 decoration            = "none"
 ```
 
-`preserve_aspect_ratio = true` locks the window's proportions during interactive
-resizes (mouse-border drag, resize gestures, touch) — the ratio is captured at
-the start of each resize, so a video overlay or image viewer won't distort when
-you drag a corner. It affects interactive resizes only; the `size` rule,
-fit/fullscreen, and client-driven sizes are left alone.
+This applies to interactive resizes only — a mouse-border drag, a resize
+gesture, a touch resize. The `size` rule, fit/fullscreen, and client-driven
+sizes are left alone.
 
 ### Overlay that opens without taking focus
 
@@ -373,16 +318,10 @@ pinned_to_screen = true
 focus_on_open    = false
 ```
 
-`focus_on_open = false` maps the window without focusing it or moving the camera
-to it — pairs well with `pinned_to_screen` for an unobtrusive overlay that
-shouldn't grab your keyboard or pull the viewport. The window still takes focus
-later through normal interaction: hover it (with focus-follows-mouse) or click
-it.
+### Suppress a stray window titled "winit window"
 
-### Suppress iced/libcosmic utility popups
-
-Some apps (cosmic-term, etc.) open small utility windows that share the main
-app_id but have a generic title:
+Some iced/libcosmic apps (cosmic-term, etc.) open small utility windows that
+share the main app_id but have a generic title:
 
 ```toml
 [[window_rules]]
@@ -392,15 +331,31 @@ widget = true
 
 ### On-screen keyboard above other overlays
 
-Overlay layer-shell clients that share a wlr-layer (an on-screen keyboard, a touch
-visualizer) otherwise stack by launch order; a higher `layer_order` keeps this one
-on top (see [Layer-shell surfaces](#layer-shell-surfaces)):
+Layer-shell clients on the same wlr-layer stack by launch order. `layer_order`
+overrides that; higher is on top (see
+[Layer-shell surfaces](#layer-shell-surfaces)):
 
 ```toml
 [[window_rules]]
 app_id      = "wvkbd"
 layer_order = 10
 ```
+
+## When rules take effect
+
+Most rule effects — position, size, opacity, decoration, borders, widget,
+pinned, output, … — are resolved **once, when a window maps**: reloading your
+config only affects windows opened afterwards, and a window that changes its
+title after mapping is **not** re-checked against `title` rules.
+
+A few things re-resolve live against the current config instead: `pass_keys` is
+evaluated per keypress (so a config reload — and a title change — takes effect
+immediately), layer-surface chrome is evaluated per frame (likewise),
+`suspend_on_close` is evaluated when a window closes, and `restore_windows` when
+the session is saved or loaded. On load, `restore_windows` is matched against a
+saved record, which carries an `app_id` but no title, so only the `app_id`
+criterion is consulted there (see
+[session restore](session.md#restore_windows)).
 
 ## Debugging
 

@@ -65,13 +65,13 @@
 # restore_windows = false
 
 # # Restore each output's camera position and zoom from the saved session on
-# # the next launch. Off by default, so a fresh start centers every output.
+# # the next launch; without it a fresh start centers every output.
 # # Read at launch: a mid-session change applies on the next launch.
 # restore_camera = false
 
 # # Restore the bookmark registry from the saved session on the next launch,
-# # overlaying saved bookmarks on the [navigation.bookmarks] config seeds. Off
-# # by default, so runtime set-bookmark / `msg bookmark` edits don't survive a
+# # overlaying saved bookmarks on the [navigation.bookmarks] config seeds;
+# # without it runtime set-bookmark / `msg bookmark` edits don't survive a
 # # restart. Read at launch: a mid-session change applies on the next launch.
 # restore_bookmarks = false
 
@@ -113,6 +113,7 @@
 # left_handed = false         # swap left/right mouse buttons (skipped on devices without left-handed support)
 
 [input.touch]
+# # Touchscreen hardware. Gesture thresholds and bindings live in [touch].
 # enable = true               # enable touchscreen support
 # map_to_output = "none"      # pin touch to an output by connector name;
                               # "none" (default) auto-detects the touchscreen by
@@ -127,11 +128,11 @@
 # inactive_opacity = 0.5      # cursor opacity on non-active outputs (0.0–1.0)
 
 [navigation]
-# trackpad_speed = 1.5        # trackpad (scroll/gestures) pan multiplier
-# mouse_speed = 1.0           # mouse (drag) pan multiplier (1.0 = direct)
-# touch_speed = 1.0           # touchscreen gesture pan speed multiplier
+# trackpad_speed = 1.5        # trackpad (scroll/gestures) pan multiplier (1.0 = direct, 0 = off)
+# mouse_speed = 1.0           # mouse (drag) pan multiplier (1.0 = direct, 0 = off)
+# touch_speed = 1.0           # touchscreen gesture pan multiplier (1.0 = direct, 0 = off)
 # drift = 0.5                 # momentum coast: 0 = off, 0.5 = default, 1 = floatiest
-# camera_speed = 0.3          # camera lerp factor (higher = faster)
+# camera_speed = 0.3          # camera lerp factor, 0-1 (higher = faster, 1 = instant)
 # auto_navigate_on_close = true  # on close, pan to the newly focused window if off-screen
                               # false = camera stays put; focus only moves to a visible window
 # auto_navigate_on_click = false  # completed click on a partially off-screen window also pans it in
@@ -151,7 +152,7 @@
 # # runtime registry at startup — set-bookmark and the IPC verb update it live.
 # # An explicitly empty table (just the header, no keys) disables the default
 # # seeds. Runtime edits persist across restarts only with the [session]
-# # restore_bookmarks flag. Bookmarks store a position only, never zoom.
+# # restore_bookmarks flag. A bookmark stores a canvas position, not a zoom level.
 # "1" = [-1750, 1750]
 # "2" = [1750, 1750]
 # "3" = [1750, -1750]
@@ -163,8 +164,7 @@
 # speed_max = 10.0            # px/frame at viewport edge
 # cursor_pan = false          # pan when the bare cursor touches a screen edge
                               # (not just while dragging). Toggle: "toggle-cursor-pan".
-# cursor_zone = 20.0          # cursor edge-pan activation zone (px) — kept small
-                              # so it doesn't trigger by accident.
+# cursor_zone = 20.0          # cursor edge-pan activation zone (px).
                               # Pans at a constant speed_max within the zone (steady,
                               # push-speed independent); speed_min is unused here.
 # latency_ms = 120            # delay before pan starts at an edge bordering
@@ -173,9 +173,9 @@
 
 [zoom]
 # step = 1.1                  # multiplier per keypress (1.1 = 10% per press)
-# trackpad_speed = 1.0        # trackpad pinch-zoom speed multiplier
-# mouse_speed = 1.0           # mouse-wheel zoom speed multiplier
-# touch_speed = 1.0           # touchscreen gesture zoom speed multiplier
+# trackpad_speed = 1.0        # trackpad pinch-zoom multiplier (1.0 = direct, 0 = off)
+# mouse_speed = 1.0           # mouse-wheel zoom multiplier (1.0 = direct, 0 = off)
+# touch_speed = 1.0           # touchscreen gesture zoom multiplier (1.0 = direct, 0 = off)
 # fit_padding = 80.0          # viewport px padding for zoom-to-fit (screen space)
 # reset_on_new_window = true  # animate zoom to 1.0 when a new window is mapped
                               # (false = keep current zoom, pan only)
@@ -198,51 +198,44 @@
 # centers = false              # also align centers (midpoints line up along the moved axis)
 
 [decorations]
-# bg_color = "#303030"           # title bar background (default: dark gray)
-# fg_color = "#FFFFFF"           # title text + close button × color (default: white)
+# bg_color = "#303030"           # title bar background
+# fg_color = "#FFFFFF"           # title text + close button × color
 # corner_radius = 10             # clip window corners to this radius
 # shadow = true                  # drop shadow under window chrome
 
 # # SSD title bar text. The font is resolved via fontconfig — install the
 # # `adwaita-fonts` package for the default look; otherwise a generic sans is
 # # substituted.
-# title_bar_height = 25          # SSD title bar height in px (default: 25)
+# title_bar_height = 25          # SSD title bar height in px
 # font = "Adwaita Sans"          # title text font family
-# font_size = 11                 # title text size in points (default: 11)
+# font_size = 11                 # title text size in points
 # font_weight = "medium"         # thin/extralight/light/regular/medium/
-                                 # semibold/bold/extrabold/black (default: medium)
-# title_align = "center"         # "left" or "center" (default: center). "center"
-                                 # centers short titles and left-aligns +
-                                 # ellipsizes long ones
+                                 # semibold/bold/extrabold/black
+# title_align = "center"         # "left" or "center". "center" centers short
+                                 # titles and left-aligns + ellipsizes long ones
 
 # # Decoration mode for windows without a rule:
 # #   "client"  — CSD: client draws its own titlebar (default)
 # #   "minimal" — SSD: no titlebar; shadow, corners, and border still apply via [decorations] + per-window rules
 # #   "none"    — bare client surface: compositor adds zero chrome; per-window border/corner/shadow rules are ignored
-# # "server" (driftwm titlebar) is intentionally not allowed as a global default: many toolkits (GTK, Electron)
-# # ignore xdg-decoration and keep drawing CSD, producing a misaligned double titlebar. Use it per-app via
-# # [[window_rules]] instead.
+# # "server" (driftwm titlebar) is available per-window via [[window_rules]], not as a global default:
+# # many toolkits (GTK, Electron) ignore xdg-decoration and draw CSD anyway, giving a double titlebar.
 # default_mode = "client"
 
 # # Borders apply to "client", "server", and "minimal" modes. "none" mode has
 # # no border unless one is set per-app in [[window_rules]].
 # border_width = 0               # px; 0 disables the border
-# border_color = "#303030"       # unfocused border (default: dark gray)
+# border_color = "#303030"       # unfocused border
 # border_color_focused = "#303030"  # focused border. Same default as above —
                                     # set this to a different color to get a
                                     # focus indicator.
 
 [effects]
-# blur_radius = 2                # number of Kawase down+up passes (default: 2)
-# blur_strength = 1.1            # per-pass texel spread (default: 1.1)
-# animate_blur_fps = 20          # refresh rate of blur under an animated wallpaper (0-144, default
-                                 # 20; 0 = off, freezing the frost so it stops re-sampling the
-                                 # wallpaper). The background is blurred once into a shared full-output
-                                 # texture and each window slices its rect from it, so cost stays flat
-                                 # as windows are added; a window stacked over other windows falls back
-                                 # to an exact per-window blur at the same cadence. Animated wallpapers
-                                 # evolve slowly, so well below the output rate still looks continuous
-                                 # through frosted glass. Camera moves force a refresh.
+# blur_radius = 2                # number of Kawase down+up passes
+# blur_strength = 1.1            # per-pass texel spread
+# animate_blur_fps = 20          # refresh rate (0-144) of blur under an animated wallpaper; 0 = off,
+                                 # freezing the frost so it stops re-sampling the wallpaper. Camera
+                                 # moves force a refresh regardless.
 # animation_speed = 0.5          # window open/close/move/resize lerp factor (higher = faster; 1 = instant)
 # animation_scale = 0.95         # open/close grow/shrink amplitude (1 = fade only)
 
@@ -277,13 +270,9 @@
 # # only; gigapixel pyramidal TIFFs aren't mirrored (pre-mirror the source).
 # mirror_tile = false
 
-# # Bake a heavy static shader to a texture once, then pan that — so it pans as
-# # cheaply as an image instead of recomputing every frame.
-# # ONLY correct for shaders that slide rigidly with the camera: u_camera used
-# # once, at full scale, as the only camera term. In GLSL:
-# #     vec2 canvas = v_coords * size + u_camera;   // pan shifts the image 1:1
-# # Parallax (u_camera * factor) renders WRONG; animated (u_time) and
-# # zoom-dependent (u_zoom) shaders are never cached and render live.
+# # Bake a heavy static shader to a texture once and pan that, instead of
+# # recomputing it every frame. Only for shaders that slide rigidly with the
+# # camera; animated (u_time) and zoom-dependent (u_zoom) ones always render live.
 # cache_shader = false
 # # Honor a shader's output alpha so transparent pixels reveal whatever sits
 # # below the background — e.g. a wlr-layer-shell Background surface from an
@@ -298,8 +287,8 @@
 # # blurrier).
 # cache_budget_mb = 128
 
-# # Frame-rate cap for animated (`u_time`) shader backgrounds. 0 = every output
-# # frame (default). Slow-moving shaders look identical well below the refresh
+# # Frame-rate cap (0-1000) for animated (`u_time`) shader backgrounds. 0 = every
+# # output frame. Slow-moving shaders look identical well below the refresh
 # # rate; between ticks the compositor reuses the composited result instead of
 # # re-evaluating the shader, so this directly scales the background's GPU cost.
 # animate_fps = 0
@@ -340,7 +329,7 @@
 # #   zoom-in                 — step zoom in
 # #   zoom-out                — step zoom out
 # #   zoom-reset              — zoom to 1.0
-# #   go-to-bookmark <name>   — jump the camera to a saved bookmark (position only, zoom untouched)
+# #   go-to-bookmark <name>   — jump the camera to a saved bookmark
 # #   set-bookmark <name>     — save the current camera center as a bookmark (create or overwrite)
 # #   move-to-bookmark <name> — move the focused window's center to a bookmark point
 # #   zoom-to-fit             — fit all windows in viewport
@@ -487,7 +476,10 @@
 # "mod+wheel-scroll" = "zoom"
 
 [gestures]
-# # Gesture thresholds — tune for your touchpad size.
+# # Trackpad gesture thresholds — tune for your touchpad size.
+# # These three keys also exist under [touch] for the touchscreen, where
+# # swipe_threshold is measured in millimetres — the values are not
+# # interchangeable between the two sections.
 # swipe_threshold = 12.0        # px cumulative distance before directional swipe fires
 # pinch_in_threshold = 0.85     # scale below which pinch-in fires (1.0 = no pinch)
 # pinch_out_threshold = 1.15    # scale above which pinch-out fires (1.0 = no pinch)
@@ -552,32 +544,24 @@
 # "mod+3-finger-hold" = "center-window"
 
 [touch]
-# # Touch thresholds — independent of the [gestures] keys of the same name.
-# # A touchscreen is a display, so swipe travel is physical: swipe_threshold is
-# # in millimetres and scales with the panel's pixel density, where the
-# # [gestures] swipe_threshold is in px. The pinch scales are unitless ratios,
-# # same as their [gestures] counterparts, but tune independently — a finger on
-# # glass pinches differently from two on a touchpad.
+# # Touchscreen gesture thresholds. Touchscreen hardware (enable, output
+# # mapping) is configured under [input.touch] instead.
 # #
-# # swipe_threshold has to be positive. The 4+ finger tier measures a swipe's
-# # travel as a fraction of it and compares that against the pinch scales, so 0
-# # would not hair-trigger the swipe — it would read as infinite swipe progress
-# # and put pinch-in/out out of reach. A value of 0 or less falls back to 15.0
-# # with a warning.
+# # These three keys share their names with [gestures], but the values are not
+# # interchangeable: swipe_threshold is in millimetres here and in px there. A
+# # touchscreen is a display, so swipe travel is physical — the millimetre value
+# # is converted to px through the panel's pixel density.
+# #
+# # swipe_threshold must be positive; 0 or less falls back to the default with a
+# # warning.
 # swipe_threshold = 15.0        # mm cumulative distance before directional swipe fires
 # pinch_in_threshold = 0.85     # scale below which pinch-in fires (1.0 = no pinch)
 # pinch_out_threshold = 1.15    # scale above which pinch-out fires (1.0 = no pinch)
 
-# # Tap and hold timings — how long a contact may linger before the recognizer
-# # stops reading it as a tap, and how long a drag must dwell before it counts as
-# # a hold. Raise them if gestures need a deliberate, unhurried touch; lower them
-# # if the panel feels sluggish to respond.
-# #
-# # double_tap_time is a latency you pay on every tap, not just double-taps: a
-# # single tap's action cannot fire until the window for a second tap has closed,
-# # so a bound tap action always waits this long before anything happens. Shorten
-# # it for a snappier single tap, at the price of a double-tap you must perform
-# # faster.
+# # Tap and hold timings. Raise them if gestures need a deliberate, unhurried
+# # touch; lower them if the panel feels sluggish to respond. Every single tap
+# # waits out double_tap_time before firing — lower it for snappier taps, at the
+# # cost of needing faster double-taps.
 # tap_time = 250                # ms a tap may last; lift later and no tap fires
 # double_tap_time = 300         # ms window for a second tap to pair into a
                                 # double-tap — and the delay a single tap's
@@ -586,10 +570,7 @@
                                 # gesture (hold-swipe, doubletap-hold-swipe)
                                 # instead of a plain swipe
 # tap_travel = 2.0              # mm a contact may drift and still count as a
-                                # tap; past this it becomes a pan or drag. Applies
-                                # where taps and drags compete for the same finger
-                                # count — a tier bound only to a drag gesture
-                                # leaves on the first motion regardless
+                                # tap; past this it becomes a pan or drag
 
 # # Bindings: `"N-finger-<type>" = "action"`  (touch has no keyboard modifiers)
 # # Context-aware: on-window, on-canvas, anywhere.
@@ -630,8 +611,9 @@
 # "4-finger-swipe" = "center-nearest"         # threshold (direction from drag)
 # "4-finger-pinch-in" = "zoom-to-fit"         # threshold
 # "4-finger-pinch-out" = "home-toggle"        # threshold
-# # 5-finger navigation mirrors 4-finger by default, so a stray 5th contact
-# # doesn't abort a navigation gesture.
+# "5-finger-swipe" = "center-nearest"         # threshold (direction from drag)
+# "5-finger-pinch-in" = "zoom-to-fit"         # threshold
+# "5-finger-pinch-out" = "home-toggle"        # threshold
 # "3-finger-tap" = "center-window"
 
 [xwayland]
@@ -639,7 +621,7 @@
 # # startup, exports DISPLAY=:N, and X11 apps connect transparently. If the
 # # binary isn't found, X11 support is disabled with a warning; everything
 # # else still runs.
-# enabled = true                  # default: true
+# enabled = true                  # spawn xwayland-satellite at startup
 # path    = "xwayland-satellite"  # path to xwayland-satellite binary ($PATH lookup works)
 
 [backend]
@@ -776,17 +758,14 @@
 # #                (true / false). Escape hatch for terminals and scratchpads that
 # #                should always really close (or always suspend). (default: inherit)
 # #   restore_windows — override [session].restore_windows for matched windows
-# #                (true / false). false keeps an app out of the graceful-shutdown
-# #                save, so it doesn't come back as a suspended window on the next
-# #                launch. true saves and restores one app while the section key
-# #                stays off. Independent of suspend_on_close, which only governs
-# #                closes: set both to false for an app that should never leave a
+# #                (true / false). false keeps an app out of the shutdown save, so
+# #                it doesn't come back as a suspended window on the next launch;
+# #                true restores one app while the section key stays off. Key the
+# #                rule on app_id, since a rule matching on title alone governs
+# #                saving only. Independent of suspend_on_close, which governs
+# #                closes: set both false for an app that should never leave a
 # #                stand-in behind. A window you suspended explicitly still comes
-# #                back. Key the rule on app_id: saved records carry no title, so
-# #                a title criterion narrows what gets saved, while on the way
-# #                back the rule answers for every saved window of that app_id. A
-# #                rule matching on title alone can't be keyed to a saved record,
-# #                so it governs saving only. (default: inherit)
+# #                back. (default: inherit)
 # #   preserve_aspect_ratio — true: keep the window's aspect ratio during
 # #                interactive resizes; the ratio is taken at the start of each
 # #                resize. (default: false)

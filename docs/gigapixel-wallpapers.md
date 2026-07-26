@@ -1,22 +1,13 @@
 # Gigapixel wallpapers
 
-driftwm's canvas is infinite: windows float on an unbounded plane that you pan
-across and zoom out from. That leaves room for a background far larger than one
-screen — a gigapixel image can act as the canvas itself, something you pan over
-and zoom out to take in, rather than a fixed screen-sized wallpaper.
-
-## Why a tiled pyramidal TIFF
-
-An ordinary PNG/JPG background is uploaded to the GPU as a single texture, which
-maxes out around 8K–16K pixels per side. Anything larger won't fit — and that
-doesn't take a literal gigapixel; a whole-world map or a large panorama is
-already over the line.
-
-Instead it needs to be **tiled** (cut into small squares) and **pyramidal**
-(stored at several progressively smaller copies). driftwm loads only the tiles in
-view, and as you zoom out it switches to a smaller copy — so it never has to hold
-the whole image at full resolution. A tiled pyramidal TIFF packs all of that into
-one file.
+driftwm's canvas is infinite, so the background can be far larger than one
+screen — a gigapixel image becomes the canvas itself, something you pan over and
+zoom out to take in. It has to be a **tiled pyramidal TIFF**, because an ordinary
+PNG/JPG is uploaded as a single GPU texture and maxes out around 8K–16K pixels
+per side. Tiled (cut into small squares) and pyramidal (stored at several
+progressively smaller copies) lets driftwm load only the tiles in view and switch
+to a smaller copy as you zoom out, so it never holds the whole image at full
+resolution.
 
 ## Converting an image
 
@@ -35,7 +26,9 @@ path = "~/Pictures/output.tif"
 ```
 
 `--compression=deflate` is lossless — preferable for a wallpaper you'll zoom
-right into. `--compression=jpeg` is smaller but lossy.
+right into. `--compression=jpeg` is smaller but lossy, and needs `--rgbjpeg`
+alongside it: without that flag libvips stores the tiles as YCbCr, which driftwm
+can't decode.
 
 ### Alternative: GDAL
 
@@ -47,14 +40,39 @@ gdal_translate -of GTiff -co TILED=YES -co COMPRESS=DEFLATE input.tif output.tif
 gdaladdo -r average output.tif 2 4 8 16 32
 ```
 
+## Requirements
+
+A file that misses any of these falls back to the dot grid, with the reason on
+the error bar:
+
+- **RGB8 or RGBA8 pixels.** 16-bit, grayscale, CMYK, and YCbCr sources are
+  rejected — convert to 8-bit RGB before tiling.
+- **`type = "tile"`.** TIFF isn't supported in `wallpaper` mode, which reads
+  PNG/JPEG only.
+- **Tiled, not stripped**, which is what `--tile` / `-co TILED=YES` above
+  produces.
+
+`mirror_tile` is a no-op on pyramidal TIFFs — pre-mirror the source if you want
+that look.
+
+## What to expect
+
+- **The first frames are blank.** Tiles load lazily, so roughly the first 5–10
+  frames after startup or a config reload render nothing while the visible set
+  fills in. That's normal, not a failure.
+- **The image is centered on canvas (0, 0)** and repeats outward from there.
+  `home-toggle` (`Mod+A` by default) brings you back to its center.
+- **`[background] cache_budget_mb` governs sharpness.** It caps how much of the
+  image is held on the GPU (128 MB by default, LRU-evicted). Too low and revisited
+  areas stay blurry while the finer tiles reload; raise it on a large or HiDPI
+  display, lower it on a memory-constrained machine.
+
 ## Where to find images
 
-You just need a real **downloadable file** — a large JPEG, PNG, or TIFF past ~16K
-on a side. Skip zoom viewers that only stream tiles: Google Arts & Culture, the
-Rijksmuseum *Night Watch* viewer, and most of GigaPan don't hand you the whole
-image. Beyond that it's down to taste — the canvas tiles infinitely, but on
-something this large the repeat is far off-screen, so a non-seamless edge rarely
-matters.
+You need a single downloadable file — a large JPEG, PNG, or TIFF past ~16K on a
+side — not a zoom viewer that only streams tiles. Beyond that it's down to taste:
+the canvas tiles infinitely, but on something this large the repeat is far
+off-screen, so a non-seamless edge rarely matters.
 
 Some sources:
 
@@ -67,10 +85,8 @@ Some sources:
   a big pool of maps, panoramas, and scans in the 16K–40K range, each with its
   license on its own page (many public domain or CC). If a download only gives you a
   thumbnail, see [downloading very large files](https://commons.wikimedia.org/wiki/Commons:Very_high-resolution_file_downloads).
-  Skip the *Google Art Project* subcategory — tile sets, not single files.
 - **Astronomy** — ESA/Hubble's [Andromeda mosaic](https://esahubble.org/images/heic2501a/)
   is 42208 × 9870 px under CC BY 4.0 (credit "ESA/Hubble"); NASA imagery is public
-  domain. Many sky panoramas are only published small or viewer-only, so
-  downloadable giant ones are fewer.
+  domain.
 
 Then run your pick through the conversion step above.

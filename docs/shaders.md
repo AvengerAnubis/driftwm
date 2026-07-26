@@ -6,6 +6,42 @@ write your own to replace the default dot grid.
 > [!TIP]
 > Looking for ready-made shaders, or want to share your own? Browse the [Gallery](https://github.com/malbiruk/driftwm/discussions/143).
 
+## Your first shader
+
+A background shader returns a color for every pixel of the output. The smallest
+one paints a flat color:
+
+```glsl
+precision mediump float;
+
+const vec3 BG = vec3(0.07, 0.07, 0.09);
+
+void main() {
+    gl_FragColor = vec4(BG, 1.0);
+}
+```
+
+Save it as `~/shaders/my_bg.glsl` and point the config at it:
+
+```toml
+[background]
+type = "shader"
+path = "~/shaders/my_bg.glsl"
+```
+
+driftwm watches the config file, so saving it applies the background. The shader
+is re-read from disk on every config reload, so after editing the `.glsl` itself,
+trigger one:
+
+```bash
+touch ~/.config/driftwm/config.toml
+```
+
+> [!NOTE]
+> Shaders are GLSL ES 1.0 — smithay prepends `#version 100`, so don't add a
+> version directive of your own. Open with `precision mediump float;`, or
+> `highp` for noise.
+
 ## How it works
 
 The shader runs once per pixel every frame the viewport changes. It receives
@@ -29,9 +65,7 @@ The result covers the entire output behind all windows.
 | `u_zoom`   | `float` | Canvas→screen scale (1.0 = unzoomed, >1 zoomed in, <1 zoomed out) |
 | `u_time`   | `float` | Seconds since compositor start                                    |
 
-All three are optional — declare only the ones your shader uses. driftwm
-detects each at compile time and skips pushing uniforms the shader doesn't
-consume, so an unreferenced uniform costs nothing per frame.
+All three are optional — declare only the ones your shader uses.
 
 `v_coords * size` gives screen-local pixel coordinates (top-left = 0,0).
 Adding `u_camera` converts to canvas coordinates — this is how the background
@@ -53,24 +87,7 @@ The alpha component (the `1.0` above) is ignored by default — backgrounds are
 composited opaque. To make a shader output its own transparency, set
 `transparent_shader = true` (see [Transparent backgrounds](#transparent-backgrounds)).
 
-## Examples
-
-### Solid color (cheapest)
-
-No camera, no zoom, no time — uniforms are pushed once at init and never again.
-Equivalent in cost to `type = "wallpaper"` with a 1×1 image:
-
-```glsl
-precision mediump float;
-
-const vec3 BG = vec3(0.07, 0.07, 0.09);
-
-void main() {
-    gl_FragColor = vec4(BG, 1.0);
-}
-```
-
-### Hue shift across the canvas
+## Example: hue shift across the canvas
 
 Uses `u_camera` so the gradient scrolls with the viewport:
 
@@ -94,28 +111,30 @@ void main() {
 
 ## Tips
 
-- **GLSL ES 1.0**: smithay auto-prepends `#version 100`. Don't add your own
-  version directive. Use `precision mediump float;` or `highp` for noise.
 - **Canvas coords**: The standard pattern is
   `vec2 canvas = (v_coords * size + u_camera) * scale;` where `scale`
   controls the feature size (smaller = larger features).
 - **Float precision**: `u_camera` can be large (thousands of pixels from
   origin). If your shader uses `mod()` or `fract()` on canvas coords,
   reduce first: `mod(u_camera, period)` instead of `mod(canvas, period)`.
-  See `dot_grid.glsl` for an example. Noise-based shaders using
-  `floor()`/`fract()` internally are naturally resilient since the hash
+  See `extras/wallpapers/dot_grid.glsl` for an example. Noise-based shaders
+  using `floor()`/`fract()` internally are naturally resilient since the hash
   functions wrap.
 - **Animated shaders**: `u_time` gives seconds since compositor start, enabling
   time-driven animations. driftwm re-renders every frame when a shader uses
-  `u_time` — declare it in your shader and it will animate continuously.
+  `u_time`, unless `animate_fps` caps the rate.
 - **Zoom-aware shaders**: declare `uniform float u_zoom;` to react to viewport
   zoom. Common pattern: divide canvas-pixel sizes by `u_zoom` to keep features
   the same screen size at any zoom level (e.g. `DOT_RADIUS / u_zoom`).
 - **Colors as constants**: Define colors, spacing, and other tunables as
   GLSL `const` values at the top of your shader. This keeps everything in
   one file — no config round-trip needed.
-- **Shipped examples**: See `extras/wallpapers/` for dot grid, compass grid,
-  noise clouds, dark sea, blue drift, and animated squares.
+- **Shipped examples**: `extras/wallpapers/` holds `dot_grid.glsl` alongside
+  `static/` (`blue_drift`, `compass_grid`, `dark_sea`, `pink_cloud`),
+  `animated/` (`acid_lava`, `dense_clouds`, `fast_smoke`), and `textured/`
+  (`mirrored_parallax`, `ripple`). `make install` copies them to
+  `$(PREFIX)/share/driftwm/wallpapers/` — `/usr/local/share/driftwm/wallpapers/`
+  by default, `/usr/share/driftwm/wallpapers/` from a distro package.
 
 ## Sampling an image (textured shaders)
 
@@ -129,8 +148,7 @@ path = "~/shaders/scroll_image.glsl"
 texture = "~/Pictures/tile.png"
 ```
 
-Textured shaders are a slightly different contract from the procedural shaders
-above — they're compiled as _texture_ shaders, so the input set differs:
+Adding a `texture` compiles the shader as a _texture_ shader, whose input set is:
 
 | Name             | Type        | Provided by | Description                                     |
 | ---------------- | ----------- | ----------- | ----------------------------------------------- |
@@ -142,20 +160,16 @@ above — they're compiled as _texture_ shaders, so the input set differs:
 | `u_zoom`         | `float`     | driftwm     | Canvas→screen scale                             |
 | `u_time`         | `float`     | driftwm     | Seconds since compositor start                  |
 
-Notes that differ from procedural shaders:
+Notes on the texture path:
 
-- **No built-in `size`** — texture shaders don't get smithay's `size`. Use
-  `u_output_size` instead (same value: viewport pixels).
-- **No `textureSize()`** — GLSL ES 1.0 lacks it, so the image's resolution
-  arrives as `u_texture_size`. You need it to turn canvas pixels into texel UVs.
-- **`alpha` is optional** — backgrounds are opaque by default, so you don't need
-  to declare or multiply by an `alpha` uniform unless you set
-  `transparent_shader = true` (see [Transparent backgrounds](#transparent-backgrounds)).
-- **`cache_shader` is ignored** — the shader-bake cache can't sample a runtime
-  texture, so textured shaders always render live.
+| Name            | Note                                                                                                                      |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `size`          | Not provided — use `u_output_size`, which carries the same value (viewport pixels).                                       |
+| `textureSize()` | Not in GLSL ES 1.0 — the image's resolution arrives as `u_texture_size`. You need it to turn canvas pixels into texel UVs. |
+| `alpha`         | Always `1.0` for backgrounds. Transparency comes from the shader's own output alpha plus `transparent_shader = true`.      |
+| `cache_shader`  | No effect — the shader-bake cache can't sample a runtime texture, so textured shaders always render live.                  |
 
-The headline pattern — sample the image at the canvas position so it scrolls
-with the viewport:
+Tile the image at the canvas position so it scrolls with the viewport:
 
 ```glsl
 precision highp float;
@@ -172,16 +186,19 @@ void main() {
 }
 ```
 
-For a showcase of what textured mode uniquely enables — a procedural effect
-_on_ your image, not just sampling it — see
-`extras/wallpapers/textured/ripple.glsl`, which animates a watery distortion
-over the tiled image.
+See `extras/wallpapers/textured/ripple.glsl`, which animates a watery
+distortion over the tiled image.
 
 ## Configuring the background
 
-`[background]` accepts a `type` and a `path`. Four types are supported:
+`[background]` accepts a `type` and, for the source-bearing types, a `path`.
+Five types are supported:
 
 ```toml
+# Built-in dot grid — the default when [background] is absent (no path).
+[background]
+type = "default"
+
 # Procedural GLSL shader — scrolls with the canvas
 [background]
 type = "shader"
@@ -208,18 +225,44 @@ type = "none"
 ```
 
 The `wallpaper` mode scales the image to cover the output while preserving its
-aspect ratio, centering and cropping any overflow. For
-a crop-free result, match the image's aspect ratio to your monitor.
+aspect ratio, centering and cropping any overflow.
+
+Other `[background]` keys, described in full in the
+[config reference](config.md#background):
+
+| Key                  | Effect                                                                                                         |
+| -------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `mirror_tile`        | `tile` mode: mirror-fold the image so a non-seamless edge always meets a reflection.                            |
+| `cache_shader`       | Bake a static camera-only shader to textures and pan those. No effect with `transparent_shader` or a `texture`. |
+| `transparent_shader` | Honor a shader's output alpha (see below).                                                                     |
+| `cache_budget_mb`    | Memory ceiling (MB) for the bake and gigapixel-TIFF chunk caches. Default 128.                                  |
+| `animate_fps`        | Frame-rate cap for `u_time` shaders. Default 0 = every output frame.                                            |
+
+### When `cache_shader` is safe
+
+Baking renders the shader once into a texture and pans that texture, so a heavy
+static shader ends up costing about what an image costs. It is only correct for
+a shader that slides rigidly with the camera — `u_camera` used once, at full
+scale, as the only camera term:
+
+```glsl
+vec2 canvas = v_coords * size + u_camera;   // pan shifts the image 1:1
+```
+
+Parallax (`u_camera * factor`) bakes wrong: the texture pans 1:1 no matter what
+factor the shader applied. Shaders reading `u_time` or `u_zoom` are never baked
+and always render live, so the flag costs nothing there.
 
 ## Transparent backgrounds
 
-By default driftwm composites the background as fully opaque — a fast path that
-lets it skip blending and skip redrawing anything beneath it. But the background
-sits _above_ any `wlr-layer-shell` **Background**-layer surface, so making it
-see-through lets an external wallpaper engine (e.g. a QuickShell or `swaybg`
-setup) show through _while keeping the built-in background on top_ — for a full
-external wallpaper with no built-in background, use `type = "none"` below. Two
-ways to opt in, depending on background type:
+By default driftwm composites the background as fully opaque, a fast path that
+skips blending and skips redrawing anything beneath it. The background sits
+_above_ any `wlr-layer-shell` **Background**-layer surface, so making it
+see-through lets an external wallpaper engine (a QuickShell or `swaybg` setup,
+say) show through while the built-in background stays on top — to drop the
+built-in background entirely instead, use `type = "none"` (below).
+
+Two ways to opt in, depending on background type:
 
 **Images (`tile` / `wallpaper`)** — automatic. If the PNG carries an alpha
 channel with any transparent pixels, driftwm honors it: transparent areas blend
@@ -233,9 +276,8 @@ type = "tile"
 path = "~/Pictures/dots.png"
 ```
 
-**Shaders (`type = "shader"`)** — opt in with `transparent_shader = true`. A
-shader is un-inspectable, so driftwm can't autodetect transparency the way it
-does for images; the flag tells it to honor the shader's output alpha:
+**Shaders (`type = "shader"`)** — not autodetected; opt in with
+`transparent_shader = true` to honor the shader's output alpha:
 
 ```toml
 [background]
@@ -257,14 +299,8 @@ Notes:
 - **Premultiplied alpha** — compositing is premultiplied, so output
   `vec4(rgb * a, a)`. Mixing two valid premultiplied colors (as `dot_grid` does)
   stays valid; a raw `vec4(rgb, 0.5)` would fringe too bright.
-- **`cache_shader` is disabled** while `transparent_shader = true` — the
-  shader-bake cache stores opaque canvas tiles and can't carry transparency, so
-  the shader is forced onto the live render path (re-evaluated each frame).
-- **Cost** — a transparent background gives up the opaque fast path: it blends
-  every frame and redraws whatever sits below it. Free when the whole scene is
-  static (no damage = no repaint), but a live engine underneath keeps repainting
-  through it, and it removes the pan-cache optimization — so only turn it on when
-  you actually have something to show through.
+- **Cost** — transparency costs a blend every frame plus a repaint of whatever
+  sits below, so turn it on only when something is actually behind.
 
 ## External wallpaper engines (`type = "none"`)
 
@@ -282,24 +318,28 @@ way. With nothing on the Background layer, you'll see the clear color (black).
 Notes:
 
 - **`path` is ignored** for this type.
-- **Not feh.** feh is X11 (it paints the X root window), which has no equivalent
-  under a Wayland compositor — use a layer-shell daemon like the ones above.
 - A live video wallpaper damages the whole screen every frame, so it repaints
   continuously (the same cost profile as an animated shader).
 
 ## Reloading after edits
 
-The config is automatically reloaded when the file changes. The shader is
-re-read from disk on every reload, so touch the config to pick up shader
-edits:
+driftwm reloads the config automatically when the file changes, and re-reads the
+shader from disk on every reload. Bind the reload action to pick up shader edits
+without editing the config:
+
+```toml
+[keybindings]
+"mod+shift+c" = "reload-config"
+```
+
+Without a keybinding, touching the config file has the same effect:
 
 ```bash
 touch ~/.config/driftwm/config.toml
 ```
 
-To bind this to a key, add to your config:
-
-```toml
-[keybindings]
-"mod+shift+c" = "spawn touch ~/.config/driftwm/config.toml"
-```
+If the shader can't be read or fails to compile, driftwm falls back to the
+built-in dot grid and reports the reason on the error bar
+(`background shader: compile error: …`). A dot grid after an edit means the
+shader was rejected, not that the config was ignored. The error clears on the
+next reload that succeeds.
