@@ -227,9 +227,9 @@ fn suspended_chrome_beats_bare_but_not_modifier_move_binding() {
 }
 
 /// Occlusion for the gesture/action paths: `element_under` / `element_under_raw`
-/// (which back the swipe and touch move/resize gestures) find no client through
-/// an opaque stand-in, and `FocusCenter` centers the stand-in itself, not the
-/// hidden client beneath it.
+/// (which back the swipe and touch resize gestures — move goes through the
+/// stand-in-aware pick) find no client through an opaque stand-in, and
+/// `FocusCenter` centers the stand-in itself, not the hidden client beneath it.
 #[test]
 fn suspended_body_occludes_gesture_hit_tests_and_focus_center() {
     let mut f = Fixture::with_config(config_ssd());
@@ -252,15 +252,15 @@ fn suspended_body_occludes_gesture_hit_tests_and_focus_center() {
         f.state().surface_under(over, None).is_some(),
         "the client beneath is genuinely hittable there"
     );
-    // But the client-only hit-tests (gesture move/resize) find nothing — the
-    // opaque stand-in occludes it.
+    // But the client-only hit-tests (gesture resize) find nothing — the opaque
+    // stand-in occludes it.
     assert!(
         f.state().element_under(over).is_none(),
         "element_under does not reach the client through the stand-in"
     );
     assert!(
         f.state().element_under_raw(over).is_none(),
-        "element_under_raw (touch gestures) does not either"
+        "element_under_raw (touch gesture resize) does not either"
     );
 
     // FocusCenter over the stand-in centers the stand-in: the focus intent lands

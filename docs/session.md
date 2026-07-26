@@ -200,8 +200,11 @@ stand-in by, in order:
 - **An app that reports a different `app_id` on relaunch** than it was
   suspended under only adopts via the activation token — the identity
   fallback won't recognize it as the same app.
-- **Touch on a stand-in is tap-only**: focus, raise, relaunch, close. Dragging
-  a stand-in to move it needs a pointer, unlike a live window's title bar.
+- **A stand-in can't be resized by touch or by a trackpad gesture.** Moving one
+  works everywhere a live window does — pointer, trackpad move gesture, touch
+  move gesture, and dragging its title bar with a finger — but a resize gesture
+  over a stand-in finds nothing and pans the canvas instead. Resizing a stand-in
+  needs a pointer: its resize border, or a held-modifier drag.
 
 ## Nested sessions
 

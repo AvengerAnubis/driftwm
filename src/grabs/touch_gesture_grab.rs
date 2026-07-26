@@ -21,9 +21,8 @@ use driftwm::config::ContinuousAction;
 use driftwm::window_ext::WindowExt;
 
 use crate::input::touch::HeldTouchEvent;
-use crate::state::{DriftWm, FocusTarget, StageWindow, output_state};
+use crate::state::{DriftWm, FocusTarget, output_state};
 
-use super::MoveGrab;
 use super::touch_recognizer::{Decision, TapOutcome, TouchInput, TouchKind, TouchRecognizer};
 
 /// Logical pixels per millimetre for `output`, used to convert physical gesture
@@ -214,30 +213,6 @@ impl TouchGestureGrab {
             return true;
         }
 
-        let Some((window, loc)) = data
-            .element_under_raw(event.location)
-            .map(|(w, l)| (w.clone(), l))
-        else {
-            return false;
-        };
-        if !data.is_canvas_window(&window) {
-            return false;
-        }
-        let serial = SERIAL_COUNTER.next_serial();
-        data.raise_and_focus(&window, serial);
-        // Moving re-anchors the window, invalidating any fill restore point.
-        data.stage.clear_fill(&window);
-        let initial = data.stage.position_of(&window).unwrap_or(loc);
-        let members = if cluster {
-            data.cluster_snapshot_for_drag(&StageWindow::Client(window.clone()), initial)
-        } else {
-            Vec::new()
-        };
-        // Members ride along with the primary, so their fill restore points go
-        // stale too.
-        for (member, _) in &members {
-            data.stage.clear_fill(member);
-        }
         let start = TouchGrabStartData {
             focus: None,
             slot: event.slot,
@@ -246,8 +221,11 @@ impl TouchGestureGrab {
         // All current fingers are already down; seed the count so the move grab
         // stays alive until every one of them lifts.
         let slots = self.core.finger_count();
-        data.arm_interactive_move(&window);
-        let grab = MoveGrab::new_touch(start, window, initial, self.output.clone(), slots, members);
+        let Some(grab) =
+            data.build_touch_move_grab(event.location, start, self.output.clone(), slots, cluster)
+        else {
+            return false;
+        };
         handle.set_grab(self, data, seq, grab);
         true
     }

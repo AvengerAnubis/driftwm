@@ -1,6 +1,6 @@
 //! Swipe gesture handlers — pan/move/resize/threshold swipes.
 //!
-//! Includes the swipe-specific setup helpers (`start_gesture_move`,
+//! Includes the swipe-specific setup helpers (`try_start_gesture_move`,
 //! `start_gesture_resize`) and threshold-action execution, since they're
 //! only reached through swipe and DoubletapSwipe begin paths.
 
@@ -32,6 +32,13 @@ use crate::input::pointer::{edges_from_position, resize_cursor};
 use crate::state::{ClusterMember, DriftWm, FocusTarget, StageWindow};
 
 use super::{GestureState, direction_from_vector};
+
+/// What a move gesture landed on. Pinned is always a live client — see
+/// `MoveGrab::apply_pinned_move`.
+enum GestureMoveTarget {
+    Pinned(Window),
+    Canvas(StageWindow),
+}
 
 impl DriftWm {
     pub fn on_gesture_swipe_begin<I: InputBackend>(&mut self, event: I::GestureSwipeBeginEvent) {
@@ -70,9 +77,9 @@ impl DriftWm {
                             self.exit_fullscreen();
                             pos = pointer.current_location();
                         }
-                        if let Some((window, _)) = self.window_under(pos) {
-                            let cluster = matches!(action, ContinuousAction::MoveSnappedWindows);
-                            return self.start_gesture_move(window, pos, cluster);
+                        let cluster = matches!(action, ContinuousAction::MoveSnappedWindows);
+                        if self.try_start_gesture_move(pos, cluster) {
+                            return;
                         }
                         // Not over a moveable window — flush and fall through
                         self.flush_middle_click(pending.press_time, pending.release_time);
@@ -128,12 +135,11 @@ impl DriftWm {
                         self.gesture_state = Some(GestureState::SwipePan);
                     }
                     ContinuousAction::MoveWindow | ContinuousAction::MoveSnappedWindows => {
-                        if let Some((window, _)) = self.window_under(pos) {
-                            let cluster = matches!(action, ContinuousAction::MoveSnappedWindows);
-                            return self.start_gesture_move(window, pos, cluster);
+                        let cluster = matches!(action, ContinuousAction::MoveSnappedWindows);
+                        if !self.try_start_gesture_move(pos, cluster) {
+                            // Not over a moveable element — fall back to pan
+                            self.gesture_state = Some(GestureState::SwipePan);
                         }
-                        // Not over a window — fall back to pan
-                        self.gesture_state = Some(GestureState::SwipePan);
                     }
                     ContinuousAction::ResizeWindow | ContinuousAction::ResizeWindowSnapped => {
                         if let Some((window, _)) = self.window_under(pos).filter(|(w, _)| {
@@ -419,76 +425,77 @@ impl DriftWm {
         self.gesture_output = None;
     }
 
-    /// Enter Swipe3Move state: focus + raise the window, set a MoveGrab
-    /// on the pointer so gesture updates just warp the cursor and the grab
-    /// handles window positioning (identical to Alt+click drag). Pinned windows
-    /// get the screen-space pinned grab; widgets fall through to Swipe3Pan.
-    fn start_gesture_move(&mut self, window: Window, pos: Point<f64, Logical>, cluster: bool) {
-        if window
-            .wl_surface()
-            .as_ref()
-            .and_then(|s| driftwm::config::applied_rule(s))
-            .is_some_and(|r| r.widget)
-        {
-            self.gesture_state = Some(GestureState::SwipePan);
-            return;
-        }
-        let serial = SERIAL_COUNTER.next_serial();
-        self.raise_with_children(&StageWindow::Client(window.clone()));
-        let Some(surface) = window.wl_surface().map(|s| s.into_owned()) else {
-            return;
+    /// Enter SwipeMove state: focus + raise whatever is under `pos` — a client
+    /// window or a suspended stand-in — and set a MoveGrab on the pointer so
+    /// gesture updates just warp the cursor and the grab handles positioning
+    /// (identical to Alt+click drag). Pinned windows get the screen-space pinned
+    /// grab. Returns `false` when nothing draggable is there, so the caller can
+    /// fall back to pan.
+    pub(crate) fn try_start_gesture_move(
+        &mut self,
+        pos: Point<f64, Logical>,
+        cluster: bool,
+    ) -> bool {
+        let Some(target) = self.move_target_under(pos) else {
+            return false;
         };
-        self.set_window_focus(Some(FocusTarget(surface)), serial);
-        self.enforce_below_windows();
+        let serial = SERIAL_COUNTER.next_serial();
+        let element = match target {
+            // Screen-pinned windows move in screen space via the same grab as
+            // Alt+drag; the SwipeMove warp drives it.
+            GestureMoveTarget::Pinned(window) => {
+                self.raise_and_focus(&window, serial);
+                let pointer = self.seat.get_pointer().unwrap();
+                self.start_pinned_move(&pointer, &window, pos, 0, serial);
+                self.gesture_state = Some(GestureState::SwipeMove);
+                return true;
+            }
+            GestureMoveTarget::Canvas(element) => element,
+        };
+        // Every bail comes before the raise + focus: a gesture that falls back
+        // to pan must not leave a z-order and focus change behind.
+        let Some(initial_window_location) = self.stage.position_of(&element) else {
+            return false;
+        };
+        let Some(output) = self.active_output() else {
+            return false;
+        };
+        self.raise_and_focus_element(&element, serial);
 
-        // Screen-pinned windows move in screen space via the same grab as
-        // Alt+drag; the SwipeMove warp drives it.
-        if self.is_pinned(&window) {
-            let pointer = self.seat.get_pointer().unwrap();
-            self.start_pinned_move(&pointer, &window, pos, 0, serial);
-            self.gesture_state = Some(GestureState::SwipeMove);
-            return;
-        }
-
-        let initial_window_location = self.stage.position_of(&window).unwrap_or_default();
         let members = if cluster {
-            self.cluster_snapshot_for_drag(
-                &StageWindow::Client(window.clone()),
-                initial_window_location,
-            )
+            self.cluster_snapshot_for_drag(&element, initial_window_location)
         } else {
             Vec::new()
         };
-        let pointer = self.seat.get_pointer().unwrap();
-        let Some(output) = self.active_output() else {
-            return;
-        };
-        // Moving re-anchors the window, invalidating any fill restore point —
+        // Moving re-anchors the element, invalidating any fill restore point —
         // for the primary and every member dragged along.
-        self.stage.clear_fill(&window);
+        self.stage.clear_fill(&element);
         for (member, _) in &members {
             self.stage.clear_fill(member);
         }
-        self.arm_interactive_move(&window);
+        let grab_target = ClusterMember::from_element(&element);
+        self.arm_interactive_move(&grab_target);
         let grab = MoveGrab::new(
             GrabStartData {
                 focus: None,
                 button: 0, // no physical button — gesture-initiated
                 location: pos,
             },
-            window,
+            grab_target,
             initial_window_location,
             output,
             members,
         );
+        let pointer = self.seat.get_pointer().unwrap();
         pointer.set_grab(self, grab, serial, Focus::Clear);
 
         self.gesture_state = Some(GestureState::SwipeMove);
+        true
     }
 
     /// Set up a ResizeGrab on the pointer so gesture updates just warp
-    /// the cursor and the grab handles the resize (mirrors `start_gesture_move`
-    /// / Alt+RMB drag).
+    /// the cursor and the grab handles the resize (mirrors
+    /// `try_start_gesture_move` / Alt+RMB drag).
     ///
     /// `want_cluster = true` opts into snapped-neighbor propagation.
     fn start_gesture_resize(
@@ -615,14 +622,24 @@ impl DriftWm {
         }
     }
 
-    /// Return the window under `pos` for move/resize gestures. Pinned windows
+    /// What a move gesture at `pos` landed on. Pinned windows render above the
+    /// canvas and hit-test in screen space, so they take priority; everything
+    /// else goes through the stand-in-aware `draggable_element_under`.
+    fn move_target_under(&self, pos: Point<f64, Logical>) -> Option<GestureMoveTarget> {
+        let screen_pos = canvas_to_screen(CanvasPos(pos), self.camera(), self.zoom()).0;
+        if let Some(window) = self.pinned_element_under(screen_pos) {
+            return Some(GestureMoveTarget::Pinned(window));
+        }
+        self.draggable_element_under(pos)
+            .map(GestureMoveTarget::Canvas)
+    }
+
+    /// Return the window under `pos` for resize gestures. Pinned windows
     /// render above the canvas and hit-test in screen space, so they take
     /// priority and can't be found by the canvas-space `element_under`.
     fn window_under(&self, pos: Point<f64, Logical>) -> Option<(Window, Point<i32, Logical>)> {
         let screen_pos = canvas_to_screen(CanvasPos(pos), self.camera(), self.zoom()).0;
-        if let Some((focus, _)) = self.pinned_window_under(screen_pos, pos)
-            && let Some(window) = self.window_for_surface(&focus.0)
-        {
+        if let Some(window) = self.pinned_element_under(screen_pos) {
             let loc = self.stage.position_of(&window).unwrap_or_default();
             return Some((window, loc));
         }

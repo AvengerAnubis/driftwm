@@ -1,11 +1,14 @@
 use std::any::Any;
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use crate::decorations::DecorationHit;
 use crate::grabs::{MoveGrab, ResizeGrab, ResizeState, TouchGestureGrab};
 use crate::input::DecoTarget;
-use crate::state::{DriftWm, FocusTarget, SessionLock, StageWindow, output_state};
+use crate::state::{
+    ClusterMember, DriftWm, FocusTarget, SessionLock, StageWindow, SuspendedWindow, output_state,
+};
 use driftwm::canvas::{CanvasPos, ScreenPos, canvas_to_screen, screen_to_canvas};
 use driftwm::window_ext::WindowExt;
 use smithay::{
@@ -482,7 +485,13 @@ impl DriftWm {
         // Fresh interaction. The first finger hit-tests SSD decorations.
         match self.decoration_under(canvas_pos) {
             Some((DecoTarget::Client(window), DecorationHit::TitleBar)) => {
-                self.start_touch_move(&window, slot, canvas_pos, serial, output);
+                self.start_touch_move(
+                    &StageWindow::Client(window),
+                    slot,
+                    canvas_pos,
+                    serial,
+                    output,
+                );
                 return;
             }
             Some((DecoTarget::Client(window), DecorationHit::CloseButton)) => {
@@ -496,24 +505,15 @@ impl DriftWm {
                 return;
             }
             // Suspended windows are opaque: a tap focuses + raises, the label
-            // relaunches, the close button dismisses. Touch move/resize of a
-            // suspended window is not wired in pass 1 — those taps focus + raise.
-            // But an Overlay/Top layer or pinned window renders above the
-            // stand-in; dispatch its tap only when the stand-in is the real
-            // cascade winner (`pointer_focus_under` returns None over it),
-            // matching the pointer path's layers > pinned > suspended ordering.
+            // relaunches, the close button dismisses, the bar drags. But an
+            // Overlay/Top layer or pinned window renders above the stand-in;
+            // dispatch its tap only when the stand-in is the real cascade winner
+            // (`pointer_focus_under` returns None over it), matching the pointer
+            // path's layers > pinned > suspended ordering.
             Some((DecoTarget::Suspended(s), hit))
                 if self.pointer_focus_under(screen_pos, canvas_pos).is_none() =>
             {
-                let id = s.id;
-                match hit {
-                    DecorationHit::CloseButton => self.dismiss_suspended(id),
-                    DecorationHit::Label => {
-                        self.focus_and_raise_suspended(id);
-                        self.relaunch_suspended(id);
-                    }
-                    _ => self.focus_and_raise_suspended(id),
-                }
+                self.touch_suspended_hit(&s, hit, slot, canvas_pos, serial, output);
                 return;
             }
             // Resize borders aren't touch-draggable (8px ≪ a fingertip); fall
@@ -623,20 +623,68 @@ impl DriftWm {
         self.seat.get_touch().unwrap().set_grab(self, grab, serial);
     }
 
+    /// Build a canvas move grab over the element under `at` — stand-in-aware,
+    /// so a touch drag moves a stand-in as readily as a live window. `None`
+    /// (keep panning) when nothing draggable is there.
+    pub(crate) fn build_touch_move_grab(
+        &mut self,
+        at: Point<f64, Logical>,
+        touch_start: TouchGrabStartData<DriftWm>,
+        output: Output,
+        slots: usize,
+        cluster: bool,
+    ) -> Option<MoveGrab> {
+        let element = self.draggable_element_under(at)?;
+        self.build_touch_move_grab_for(&element, touch_start, output, slots, cluster)
+    }
+
+    /// [`Self::build_touch_move_grab`] for an already-resolved element — the
+    /// title-bar drag knows its target from the decoration hit. Takes the side
+    /// effects a move implies (raise + focus, fill invalidation, the
+    /// interactive-move arm); callers only install the grab.
+    fn build_touch_move_grab_for(
+        &mut self,
+        element: &StageWindow,
+        touch_start: TouchGrabStartData<DriftWm>,
+        output: Output,
+        slots: usize,
+        cluster: bool,
+    ) -> Option<MoveGrab> {
+        let initial = self.stage.position_of(element)?;
+        let serial = SERIAL_COUNTER.next_serial();
+        self.raise_and_focus_element(element, serial);
+        // Moving re-anchors the element, invalidating any fill restore point.
+        self.stage.clear_fill(element);
+        let members = if cluster {
+            self.cluster_snapshot_for_drag(element, initial)
+        } else {
+            Vec::new()
+        };
+        // Members ride along with the primary, so their fill restore points go
+        // stale too.
+        for (member, _) in &members {
+            self.stage.clear_fill(member);
+        }
+        let target = ClusterMember::from_element(element);
+        self.arm_interactive_move(&target);
+        Some(MoveGrab::new_touch(
+            touch_start,
+            target,
+            initial,
+            output,
+            slots,
+            members,
+        ))
+    }
+
     fn start_touch_move(
         &mut self,
-        window: &Window,
+        element: &StageWindow,
         slot: TouchSlot,
         location: Point<f64, Logical>,
         serial: smithay::utils::Serial,
         output: Output,
     ) {
-        let Some(initial) = self.stage.position_of(window) else {
-            return;
-        };
-        self.raise_and_focus(window, serial);
-        // Moving re-anchors the window, invalidating any fill restore point.
-        self.stage.clear_fill(window);
         let start = TouchGrabStartData {
             focus: None,
             slot,
@@ -644,9 +692,44 @@ impl DriftWm {
         };
         // One finger down (the titlebar press); the grab intercepts its motion
         // and up directly, so no `down` forward is needed.
-        self.arm_interactive_move(window);
-        let grab = MoveGrab::new_touch(start, window.clone(), initial, output, 1, Vec::new());
+        let Some(grab) = self.build_touch_move_grab_for(element, start, output, 1, false) else {
+            return;
+        };
         self.seat.get_touch().unwrap().set_grab(self, grab, serial);
+    }
+
+    /// Dispatch a first-finger tap on a stand-in's chrome: close dismisses, the
+    /// label relaunches, the bar drags, and the body focuses + raises — the
+    /// touch counterpart of `try_suspended_button`'s bare-press tail.
+    pub(crate) fn touch_suspended_hit(
+        &mut self,
+        s: &Rc<SuspendedWindow>,
+        hit: DecorationHit,
+        slot: TouchSlot,
+        canvas_pos: Point<f64, Logical>,
+        serial: smithay::utils::Serial,
+        output: Output,
+    ) {
+        let id = s.id;
+        match hit {
+            DecorationHit::CloseButton => self.dismiss_suspended(id),
+            DecorationHit::Label => {
+                self.focus_and_raise_suspended(id);
+                self.relaunch_suspended(id);
+            }
+            DecorationHit::TitleBar => {
+                self.start_touch_move(
+                    &StageWindow::Suspended(s.clone()),
+                    slot,
+                    canvas_pos,
+                    serial,
+                    output,
+                );
+            }
+            // Resize borders aren't touch-draggable (8px ≪ a fingertip), so the
+            // body and the border alike are focus-only.
+            _ => self.focus_and_raise_suspended(id),
+        }
     }
 
     pub fn on_touch_motion<I: InputBackend>(&mut self, event: I::TouchMotionEvent) {
