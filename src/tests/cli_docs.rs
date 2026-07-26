@@ -102,6 +102,29 @@ const EXAMPLES: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// Every example is checked against the real command tree. Renaming a command
+/// or adding one already fails at `examples()`, but retyping or renaming a
+/// *flag* would otherwise leave a stale invocation rendered into the docs.
+#[test]
+fn cli_doc_examples_still_parse() {
+    for (section, lines) in EXAMPLES {
+        for line in *lines {
+            // A shell expansion is what clap would really see, not the token
+            // standing in for it, so there is nothing to check statically.
+            if line.contains("$(") {
+                continue;
+            }
+            // Examples may pipe into other tools; only our side is ours to parse.
+            let invocation = line.split('|').next().unwrap_or(line);
+            if let Err(err) =
+                crate::Cli::command().try_get_matches_from(invocation.split_whitespace())
+            {
+                panic!("`{line}` under `{section}` no longer parses: {err}");
+            }
+        }
+    }
+}
+
 #[test]
 fn docs_cli_md_is_up_to_date() {
     let rendered = render();
