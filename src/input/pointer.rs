@@ -13,7 +13,7 @@ use smithay::{
         calloop::timer::{TimeoutAction, Timer},
         wayland_protocols::xdg::shell::server::xdg_toplevel,
     },
-    utils::{Point, SERIAL_COUNTER, Size},
+    utils::{Point, SERIAL_COUNTER},
     wayland::compositor::with_states,
 };
 
@@ -22,7 +22,7 @@ use smithay::wayland::seat::WaylandFocus;
 use std::rc::Rc;
 
 use crate::decorations::DecorationHit;
-use crate::grabs::{MIN_SUSPENDED_SIZE, MoveGrab, NavigateGrab, PanGrab, ResizeGrab, ResizeState};
+use crate::grabs::{MoveGrab, NavigateGrab, PanGrab, ResizeGrab, ResizeState};
 use crate::input::DecoTarget;
 use crate::state::{
     CLICK_NAVIGATE_SLOP, ClusterMember, ClusterResizeSnapshot, DriftWm, FocusTarget,
@@ -946,13 +946,7 @@ impl DriftWm {
             output,
             last_clamped_location: pos,
             snap: driftwm::layout::snap::SnapState::default(),
-            // A stand-in has no client-declared min/max; fold its usable-chrome
-            // floor into the shared constraints so the apply head clamps it just
-            // like a client minimum.
-            constraints: crate::grabs::SizeConstraints {
-                min: Size::from((MIN_SUSPENDED_SIZE, MIN_SUSPENDED_SIZE)),
-                max: Size::from((0, 0)),
-            },
+            constraints: crate::grabs::SizeConstraints::for_suspended(),
             cluster_resize,
             pinned_initial_screen_pos: None,
             touch_start: None,

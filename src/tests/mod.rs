@@ -29,6 +29,7 @@ mod ext_workspace;
 mod focus_timing;
 mod fullscreen_handoff;
 mod gesture_move;
+mod gesture_resize;
 mod hot_corners;
 mod hotplug;
 mod hover_focus;

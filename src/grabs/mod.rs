@@ -124,8 +124,9 @@ pub use move_grab::MoveGrab;
 pub use navigate_grab::NavigateGrab;
 pub use pan_grab::PanGrab;
 pub use resize_grab::{
-    MIN_SUSPENDED_SIZE, ResizeGrab, ResizeState, SizeConstraints, has_bottom, has_left, has_right,
-    has_top, locked_ratio_for,
+    ResizeGrab, ResizeState, SizeConstraints, has_bottom, has_left, has_right, has_top,
+    locked_ratio_for,
 };
 pub use screen_space_click::ScreenSpaceClickGrab;
 pub use touch_gesture_grab::TouchGestureGrab;
+pub(crate) use touch_gesture_grab::edge_from_origin;

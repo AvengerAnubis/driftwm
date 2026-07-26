@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::decorations::DecorationHit;
-use crate::grabs::{MoveGrab, ResizeGrab, ResizeState, TouchGestureGrab};
+use crate::grabs::{MoveGrab, ResizeGrab, ResizeState, TouchGestureGrab, edge_from_origin};
 use crate::input::DecoTarget;
 use crate::state::{
     ClusterMember, DriftWm, FocusTarget, SessionLock, StageWindow, SuspendedWindow, output_state,
@@ -317,33 +317,86 @@ impl DriftWm {
         self.touch_state.replaying_holdback = false;
     }
 
-    /// Set up a touch resize grab on `window` for `edges`: clear fit state, mark
-    /// the surface/toplevel resizing (for commit-time top/left repositioning),
-    /// and build the grab. `snapped` extends the resize to the window's
-    /// snap-cluster; a screen-pinned window resizes in screen space instead
-    /// (single-window, anchored to its pin site).
+    /// Build a canvas resize grab over the element under `origin` — stand-in-aware,
+    /// so a touch hold-drag resizes a stand-in as readily as a live window. The
+    /// edge comes from where the fingers landed within it. Raises and focuses only
+    /// once the grab is built, so a failed build leaves no stray focus or z-order
+    /// change. `None` (keep panning) when nothing resizable is there.
+    pub(crate) fn build_touch_gesture_resize_grab(
+        &mut self,
+        origin: Point<f64, Logical>,
+        touch_start: TouchGrabStartData<DriftWm>,
+        output: Output,
+        slots: usize,
+        snapped: bool,
+    ) -> Option<ResizeGrab> {
+        let element = self.draggable_element_under(origin)?;
+        let loc = self.stage.position_of(&element)?;
+        let edges = edge_from_origin(origin, loc, element.geometry().size);
+        let grab =
+            self.build_touch_resize_grab(&element, edges, touch_start, output, slots, snapped)?;
+        let serial = SERIAL_COUNTER.next_serial();
+        self.raise_and_focus_element(&element, serial);
+        Some(grab)
+    }
+
+    /// Set up a touch resize grab on `element` for `edges`. A client resize is a
+    /// protocol negotiation: clear fit state, then mark the surface/toplevel
+    /// resizing so the commit-time top/left reposition runs. A stand-in owns its
+    /// size outright — nothing to configure, nothing to ack — so it gets no
+    /// surface write and carries its own chrome floor instead of client-declared
+    /// constraints. `snapped` extends the resize to the element's snap-cluster; a
+    /// screen-pinned window resizes in screen space instead (single-window,
+    /// anchored to its pin site, client-only).
     pub(crate) fn build_touch_resize_grab(
         &mut self,
-        window: &Window,
+        element: &StageWindow,
         edges: xdg_toplevel::ResizeEdge,
         touch_start: TouchGrabStartData<DriftWm>,
         output: Output,
         slots: usize,
         snapped: bool,
     ) -> Option<ResizeGrab> {
-        let initial_window_location = self.stage.position_of(window)?;
-        let initial_window_size = window.geometry().size;
-        let wl_surface = window.wl_surface().map(|s| s.into_owned())?;
+        let initial_window_location = self.stage.position_of(element)?;
+        let initial_window_size = element.geometry().size;
 
-        let pinned_site = self.stage.pin_of(window).cloned();
+        let (window, wl_surface) = match element {
+            StageWindow::Client(w) => {
+                let surface = w.wl_surface().map(|s| s.into_owned())?;
+                (w.clone(), surface)
+            }
+            StageWindow::Suspended(s) => {
+                let cluster_resize = if snapped {
+                    self.cluster_snapshot_for_resize(element, edges)
+                } else {
+                    crate::state::ClusterResizeSnapshot::empty()
+                };
+                self.arm_interactive_move(&s.id);
+                return Some(ResizeGrab::new_touch(
+                    touch_start,
+                    s.id,
+                    edges,
+                    initial_window_location,
+                    initial_window_size,
+                    output,
+                    crate::grabs::SizeConstraints::for_suspended(),
+                    slots,
+                    cluster_resize,
+                    None,
+                    None,
+                ));
+            }
+        };
+
+        let pinned_site = self.stage.pin_of(&window).cloned();
         let pinned_initial_screen_pos = pinned_site.as_ref().map(|s| s.screen_pos);
         let output = pinned_site
             .as_ref()
             .and_then(|s| self.output_by_name(&s.output))
             .unwrap_or(output);
 
-        self.stage.clear_fit(window);
-        self.stage.clear_fill(window);
+        self.stage.clear_fit(&window);
+        self.stage.clear_fill(&window);
 
         with_states(&wl_surface, |states| {
             states
@@ -367,14 +420,15 @@ impl DriftWm {
 
         // Pinned resize is screen-space and single-window — no snap or cluster.
         let cluster_resize = if snapped && pinned_site.is_none() {
-            self.cluster_snapshot_for_resize(&StageWindow::Client(window.clone()), edges)
+            self.cluster_snapshot_for_resize(element, edges)
         } else {
             crate::state::ClusterResizeSnapshot::empty()
         };
-        let constraints = crate::grabs::SizeConstraints::for_window(window);
+        let constraints = crate::grabs::SizeConstraints::for_window(&window);
+        let locked_ratio = crate::grabs::locked_ratio_for(&window, initial_window_size);
         Some(ResizeGrab::new_touch(
             touch_start,
-            window.clone(),
+            window,
             edges,
             initial_window_location,
             initial_window_size,
@@ -383,6 +437,7 @@ impl DriftWm {
             slots,
             cluster_resize,
             pinned_initial_screen_pos,
+            locked_ratio,
         ))
     }
 

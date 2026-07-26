@@ -1187,16 +1187,20 @@ impl DriftWm {
             .then_some(PickTarget::Client(window))
     }
 
-    /// The stage element a move gesture at `canvas_pos` may drag — a client
-    /// window or a suspended stand-in. Shared by the trackpad and touch move
-    /// paths. Screen-pinned windows are *not* resolved here; they hit-test in
-    /// screen space and each caller checks `pinned_element_under` first.
+    /// The stage element a move or resize gesture at `canvas_pos` may drag — a
+    /// client window or a suspended stand-in. Shared by the trackpad and touch
+    /// paths of both. Screen-pinned windows are *not* resolved here; they
+    /// hit-test in screen space and each caller checks `pinned_element_under`
+    /// first.
     ///
-    /// Both channels are topmost-first and both stop dead at the first element
-    /// covering the point, so nothing below an occluder is ever reachable. The
-    /// canvas gate is likewise a stop, not a skip: a widget on top makes the
-    /// gesture find nothing, rather than reaching through it to the window
-    /// underneath.
+    /// Each channel is topmost-first and stops at the first element it finds
+    /// covering the point, so nothing below an occluder *on that channel* is
+    /// reachable. The two are sequential rather than interleaved, though: the
+    /// surface channel is exhausted before the decoration one is consulted at
+    /// all, so a point on window A's SSD title bar that also lies over window
+    /// B's content resolves to B even when A is on top. The canvas gate is a
+    /// stop, not a skip: a widget on top makes the gesture find nothing, rather
+    /// than reaching through it to the window underneath.
     pub(crate) fn draggable_element_under(
         &self,
         canvas_pos: Point<f64, smithay::utils::Logical>,
