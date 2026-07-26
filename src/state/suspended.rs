@@ -12,6 +12,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use smithay::desktop::Window;
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{IsAlive, Logical, Point, Rectangle, SERIAL_COUNTER, Size};
@@ -435,6 +436,12 @@ impl DriftWm {
             self.drop_resize_crossfade(id);
         }
 
+        // The adopt places the window in the stand-in's slot, so a recenter still
+        // owed from a fullscreen/fit/fill exit it hasn't acked must not fire: the
+        // adopt configure's resize would complete the settle and re-map the window
+        // to the pre-exit center, out of the slot the hold below is drawing it in.
+        self.pending_recenter.remove(&root.id());
+
         // Compound replace: the fresh entry must leave before the suspended
         // entry is replaced, or the same window would sit in two z-slots and
         // trip the duplicate-window invariant.
@@ -459,6 +466,12 @@ impl DriftWm {
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|state| {
                 state.size = Some(adopt_size);
+                // The window's own entry left with the `remove` above, taking any
+                // fit state with it, and the inherited one never had any — so a
+                // Maximized left set here is one the client can never shed: its
+                // restore button would dispatch an unmaximize_request that
+                // `unfit_window` silently drops.
+                state.states.unset(xdg_toplevel::State::Maximized);
             });
         }
 

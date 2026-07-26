@@ -2,8 +2,9 @@
 //! a toolkit acks one configure while the compositor already believes another.
 
 use driftwm::config::{Action, Config, DecorationMode};
+use smithay::input::pointer::MotionEvent;
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{Point, Size};
+use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
 
 use crate::state::StageWindow;
 
@@ -30,6 +31,37 @@ fn map_settled(
     f.double_roundtrip(id);
     f.client(id).window(&surface).format_recent_configures();
     surface
+}
+
+/// Camera at the canvas origin, zoom 1: canvas == screen.
+fn origin_view(f: &mut Fixture) {
+    f.state().with_output_state(|os| {
+        os.zoom = 1.0;
+        os.camera = Point::from((0.0, 0.0));
+    });
+}
+
+fn pt(x: f64, y: f64) -> Point<f64, Logical> {
+    Point::from((x, y))
+}
+
+/// Deliver one pointer motion at canvas-space `loc` to the active grab.
+fn motion(f: &mut Fixture, loc: Point<f64, Logical>) {
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let event = MotionEvent {
+        location: loc,
+        serial: SERIAL_COUNTER.next_serial(),
+        time: 0,
+    };
+    pointer.motion(f.state(), None, &event);
+}
+
+/// End the gesture the way `on_gesture_swipe_end` does — there's no button to
+/// release on a gesture.
+fn end_swipe(f: &mut Fixture) {
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let serial = SERIAL_COUNTER.next_serial();
+    pointer.unset_grab(f.state(), serial, 0);
 }
 
 /// A window snapped only to a suspended stand-in reflows when it grows into it,
@@ -221,6 +253,163 @@ fn fit_round_trip_restores_exact_size() {
         "fit exit must restore the exact pre-fit size, got:\n{configures}"
     );
     assert!(!f.state().stage.is_fit(&window));
+}
+
+/// A fit toggled off again before the client ever acks the enter-fit configure
+/// makes the exit configure re-send the size the client already has — no
+/// commit with a changed size ever follows to complete the exit's recenter, so
+/// the entry must not be left owed forever. Left stranded, a later drag (which
+/// never touches `pending_recenter`) followed by a resize (whose changed-size
+/// commit does trip the stale entry) would teleport the window back toward the
+/// fit's center, discarding the drag.
+#[test]
+fn fast_fit_unfit_does_not_teleport_window_on_next_resize() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let surface = map_settled(&mut f, id, "a", (800, 600));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((400, 300)), false);
+
+    // Fit, then unfit before any ack lands: the exit configure re-sends the
+    // 800×600 the client already has.
+    f.state().toggle_fit_window(&window);
+    f.state().toggle_fit_window(&window);
+    assert!(!f.state().stage.is_fit(&window));
+    f.double_roundtrip(id);
+
+    // The client draws the same size back, as a cell-quantized terminal or a
+    // fixed-size dialog would — a genuine equal-size settle, not a straggler.
+    adopt_last_configure(&mut f, id, &surface);
+
+    // The user drags the window elsewhere.
+    let pos = f.state().stage.position_of(&window).unwrap();
+    let center = pt(pos.x as f64 + 400.0, pos.y as f64 + 300.0);
+    assert!(f.state().try_start_gesture_move(center, false));
+    motion(&mut f, center + pt(100.0, 30.0));
+    end_swipe(&mut f);
+    let dragged_to = f.state().stage.position_of(&window).unwrap();
+    assert_eq!(
+        dragged_to,
+        pos + Point::from((100, 30)),
+        "precondition: the drag landed at its natural destination"
+    );
+
+    // The user then resizes it from its right edge.
+    let grab_at = pt(dragged_to.x as f64 + 700.0, dragged_to.y as f64 + 300.0);
+    assert!(f.state().try_start_gesture_resize(grab_at, false));
+    motion(&mut f, grab_at + pt(100.0, 0.0));
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    end_swipe(&mut f);
+
+    assert_eq!(
+        f.state().stage.position_of(&window),
+        Some(dragged_to),
+        "the resize must not teleport the window back toward the unfit's center"
+    );
+}
+
+/// `enter_fullscreen` deliberately preserves fit membership, so a window fit
+/// then fullscreened stays fit underneath. Exiting fullscreen without an ack
+/// leaves a `pending_recenter` owed (the fullscreen-sized commit differs from
+/// the fit-era `saved_size` it restores to); an unfit dispatched right after,
+/// before that recenter ever settles, must drop it — not just skip inserting
+/// its own. A window mapped at exactly the output's logical size makes the
+/// fit's saved (pre-fit) size and the still-fullscreen-sized current geometry
+/// coincide, so the unfit hits the equal-size branch that settles in place
+/// without ever registering a differing-size commit to complete on. Left
+/// untouched, the fullscreen exit's stale entry survives (a drag doesn't
+/// touch `pending_recenter` either) and fires on the next differing-size
+/// commit — a resize — recentering the window back toward the fullscreen's
+/// pre-exit center and discarding the drag in between.
+#[test]
+fn unfit_after_fullscreen_exit_drops_the_stale_recenter_so_the_next_resize_does_not_teleport() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    // Fullscreen below moves the camera, which seeds a per-output blur
+    // generation that only clears on output disconnect, so it can never
+    // return to the pre-output baseline.
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    // Mapped at exactly the output's logical size — what makes the fit's
+    // saved (pre-fit) size and the fullscreen-sized geometry coincide later.
+    let surface = map_settled(&mut f, id, "a", (1920, 1080));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((0, 0)), false);
+
+    // Fit, and adopt the fit size as a real client would — enter_fullscreen
+    // below reads the fit-era geometry as its own return size.
+    f.state().toggle_fit_window(&window);
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    assert!(f.state().stage.is_fit(&window), "precondition: fit");
+
+    // Fullscreen, and adopt the viewport size.
+    let cw = f.client(id).window(&surface);
+    cw.set_fullscreen(None);
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    assert!(
+        f.state().stage.is_fullscreen(&window),
+        "precondition: fullscreen"
+    );
+
+    // Exit fullscreen but never ack the restore configure: a recenter is left
+    // owed, and fit membership survives underneath.
+    let cw = f.client(id).window(&surface);
+    cw.unset_fullscreen();
+    f.double_roundtrip(id);
+    let root = super::server_surface(&window);
+    assert!(
+        f.state().pending_recenter.contains_key(&root.id()),
+        "precondition: the fullscreen exit left a recenter owed"
+    );
+    assert!(
+        f.state().stage.is_fit(&window),
+        "precondition: fit membership survives fullscreen"
+    );
+
+    // Unfit before that recenter ever settles: the fit's saved (pre-fit) size
+    // and the window's current (still fullscreen-sized) geometry are both
+    // 1920×1080, so this hits the equal-size branch.
+    f.state().toggle_fit_window(&window);
+    assert!(!f.state().stage.is_fit(&window));
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+
+    // The user drags the window elsewhere.
+    let pos = f.state().stage.position_of(&window).unwrap();
+    let center = pt(pos.x as f64 + 960.0, pos.y as f64 + 540.0);
+    assert!(f.state().try_start_gesture_move(center, false));
+    motion(&mut f, center + pt(100.0, 30.0));
+    end_swipe(&mut f);
+    let dragged_to = f.state().stage.position_of(&window).unwrap();
+    assert_eq!(
+        dragged_to,
+        pos + Point::from((100, 30)),
+        "precondition: the drag landed at its natural destination"
+    );
+
+    // The user then resizes it from its right edge.
+    let grab_at = pt(dragged_to.x as f64 + 1900.0, dragged_to.y as f64 + 540.0);
+    assert!(f.state().try_start_gesture_resize(grab_at, false));
+    motion(&mut f, grab_at + pt(100.0, 0.0));
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    end_swipe(&mut f);
+
+    assert_eq!(
+        f.state().stage.position_of(&window),
+        Some(dragged_to),
+        "the resize must not teleport the window back toward the fullscreen exit's stale center"
+    );
 }
 
 #[test]

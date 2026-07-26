@@ -21,7 +21,7 @@ use crate::state::{StageWindow, SuspendedId};
 
 use super::client::ClientId;
 use super::real::TempDir;
-use super::{Fixture, map_window, server_surface, window_by_app_id};
+use super::{Fixture, client_sees_maximized, map_window, server_surface, window_by_app_id};
 
 /// The live client window with `app_id`, if any. Unlike `window_by_app_id`, it
 /// skips a same-named suspended stand-in instead of stopping at it.
@@ -547,6 +547,134 @@ fn already_open_adopt_focuses_and_activates_the_window() {
 
     settle_resize(&mut f, cid, &existing, (400, 300));
     client_close(&mut f, cid, &existing);
+}
+
+/// An already-fit window that forwards a relaunch token is adopted the same as
+/// any other already-open window (fit is not one of the exclusions) — but the
+/// adopt configure must clear the client's `Maximized`, or its restore button
+/// is left permanently dead: the adopted window inherits the stand-in's
+/// fit-less stage entry, so the `unmaximize_request` that button dispatches
+/// finds `unfit_window` early-returning at a `None` `fit_saved_size`. Same bug
+/// class as the four resize arms in `resize_parity.rs` / `gesture_resize.rs`;
+/// this is the fifth arm.
+#[test]
+fn adopt_of_an_already_fit_window_clears_the_client_maximized_state() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let cid = f.add_client();
+    let existing = map_window(&mut f, cid, "myapp", (300, 200));
+    let win = window_by_app_id(&mut f, "myapp").unwrap();
+
+    f.state().toggle_fit_window(&win);
+    f.double_roundtrip(cid);
+    assert!(
+        client_sees_maximized(&mut f, cid, &existing),
+        "precondition: the fit told the client it is maximized"
+    );
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (800, 500), (400, 300));
+    f.state().relaunch_suspended(sid);
+    // Past the fallback window, so identity matching can't fire — only the
+    // token path adopts the already-fit window.
+    f.state().expire_relaunch_fallback_for_test(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+
+    present_token(&mut f, cid, &existing, token);
+
+    let adopted = window_by_app_id(&mut f, "myapp").expect("adopted");
+    assert_eq!(
+        f.state().stage.position_of(&adopted),
+        Some(Point::from((800, 500))),
+        "precondition: adopt seated the window at the stand-in's slot"
+    );
+    assert!(
+        !client_sees_maximized(&mut f, cid, &existing),
+        "the adopt configure told the client it is no longer maximized"
+    );
+
+    settle_resize(&mut f, cid, &existing, (400, 300));
+    client_close(&mut f, cid, &existing);
+}
+
+/// A window mid fit-exit settle — the client has not yet acked the restore
+/// configure, so a `pending_recenter` is still owed — that then forwards a
+/// live relaunch token must not have that stale recenter fire once it settles
+/// into the stand-in's slot: the recenter's `target_center` is the window's
+/// OLD pre-fit position, so completing it would re-map the freshly adopted
+/// window right back out of the slot the adopt just seated it in.
+#[test]
+fn adopt_drops_an_owed_fit_exit_recenter_so_it_cannot_pull_the_window_out_of_the_slot() {
+    use smithay::reexports::wayland_server::Resource;
+
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let cid = f.add_client();
+    let surface = map_window(&mut f, cid, "myapp", (300, 200));
+    let win = window_by_app_id(&mut f, "myapp").unwrap();
+
+    // Fit, then adopt the fit size as a real client would.
+    f.state().toggle_fit_window(&win);
+    f.double_roundtrip(cid);
+    let (fw, fh) = f
+        .client(cid)
+        .window(&surface)
+        .configures_received
+        .last()
+        .unwrap()
+        .1
+        .size;
+    let cw = f.client(cid).window(&surface);
+    cw.set_size(fw as u16, fh as u16);
+    cw.attach_new_buffer();
+    cw.ack_last_and_commit();
+    f.double_roundtrip(cid);
+    assert!(f.state().stage.is_fit(&win), "precondition: fit");
+
+    // Unfit: a different-size exit, so a real pending_recenter is left owed —
+    // the client never acks this restore configure.
+    f.state().toggle_fit_window(&win);
+    let root = server_surface(&win);
+    assert!(
+        f.state().pending_recenter.contains_key(&root.id()),
+        "precondition: an unfit-exit recenter is owed"
+    );
+
+    // Before that recenter ever settles, a relaunch token lands on this same
+    // live window (the app forwards it, single-instance style) and adopts it
+    // into a stand-in's slot elsewhere on the canvas.
+    let sid = insert_suspended(&mut f, 1, "myapp", (1400, 900), (400, 300));
+    f.state().relaunch_suspended(sid);
+    f.state().expire_relaunch_fallback_for_test(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+    present_token(&mut f, cid, &surface, token);
+
+    let adopted = window_by_app_id(&mut f, "myapp").expect("adopted");
+    assert_eq!(
+        f.state().stage.position_of(&adopted),
+        Some(Point::from((1400, 900))),
+        "precondition: adopt seated the window at the stand-in's slot"
+    );
+
+    // The client acks the adopt configure at the stand-in's body size — a size
+    // change from the still-outstanding fit-exit's pre_exit_size, exactly the
+    // commit that would fire a surviving recenter.
+    settle_resize(&mut f, cid, &surface, (400, 300));
+
+    assert_eq!(
+        f.state().stage.position_of(&adopted),
+        Some(Point::from((1400, 900))),
+        "the adopt configure's own settle must not re-map the window out of the stand-in's slot"
+    );
+
+    client_close(&mut f, cid, &surface);
 }
 
 /// Two stand-ins of the same app are both relaunched; the first spawn's window
