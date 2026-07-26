@@ -4,8 +4,10 @@
 //! entry fails inside the cycle that introduced it, not at some distant Drop.
 //! Process-wide fd and RSS plateaus catch leaks that don't touch a counter.
 //!
-//! `#[ignore]`d out of the default lane: the fd/RSS assertions are
-//! process-wide and noise-sensitive. Run with `cargo test -- --include-ignored`.
+//! `#[ignore]`d out of the default lane: the fd/RSS plateaus are read from
+//! `/proc/self`, so a neighbouring test holding a socket open lands inside the
+//! measurement. Run it with the process to itself:
+//! `cargo test --bin driftwm -- --include-ignored --test-threads=1 soak`.
 
 use std::collections::BTreeMap;
 

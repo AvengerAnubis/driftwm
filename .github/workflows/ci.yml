@@ -51,7 +51,13 @@ jobs:
         run: cargo test --no-run
 
       - name: Run tests
-        run: cargo test -- --include-ignored
+        run: cargo test -- --include-ignored --skip soak
+
+      # The soak's fd and RSS plateaus are read from /proc/self, so a
+      # neighbouring test holding a socket open lands inside its measurement.
+      # It only means anything with the process to itself.
+      - name: Run soak
+        run: cargo test --bin driftwm -- --include-ignored --test-threads=1 soak
 
   clippy:
     name: clippy
