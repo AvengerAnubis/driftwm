@@ -4,6 +4,10 @@ The B1–B14 perf push shipped (see `git log`). What's left, in priority order.
 Line numbers predate the push — re-verify on pickup. Profiling tooling:
 [profiling.md](profiling.md).
 
+Non-perf items live at the bottom under
+[Correctness backlog](#correctness-backlog) and
+[Structural backlog](#structural-backlog).
+
 ## Blur (B5 + S1 + edge-fade + fullscreen cull)
 
 The only substantive perf work left; deferred behind touchscreen + session
@@ -93,3 +97,102 @@ fullscreen window.
   presentation time (`niri/src/niri.rs:4601-4604` — small judder source vs
   driftwm's `Instant::now()`); on-demand VRR by window visibility
   (`niri/src/niri.rs:4720-4749` — gaming pass).
+
+## Correctness backlog
+
+Surfaced by a four-lens seam review before the post-v0.15.0 release, targeting
+feature pairs that were each reviewed on their own branch but never together.
+All four seam hypotheses came back refuted; these are what the sweep found on
+the way past. The three missed-checklist bugs it also found were fixed at the
+time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
+
+- **`unfill_window` strands a fullscreen exit's owed recenter** — the identical
+  hole just closed in `unfit_window`. `src/state/fill.rs`'s equal-size branch
+  skips the `pending_recenter` insert but never drops one already owed, and
+  `enter_fullscreen` preserves fill membership the same way it preserves fit, so
+  filled → fullscreen → exit → unfill-before-ack survives with a stale entry.
+  Symptom matches the fit case: the reflow is gated forever, and a later
+  drag-then-resize teleports the window back. Fix is the one line
+  `self.pending_recenter.remove(&wl_surface.id());` in that branch, mirroring
+  `unfit_window`. Left out of the release only because doing it properly wants
+  its own test, and the fit-side chain was the one with a demonstrated repro.
+- **Gesture move/resize drags the window *behind* an SSD title bar.**
+  `draggable_element_under` (`src/input/mod.rs`) consults its two channels
+  sequentially: `element_under_raw` is exhausted before `decoration_under` is
+  tried at all. A 25px SSD title bar and 8px CSD resize margin lie outside
+  `window_bbox_with_popups`, so on that band the topmost window is invisible to
+  the surface channel and a lower window's content wins. Pointer clicks and
+  pick-mode clicks both resolve correctly, so this is gesture-only — and within
+  touch, a one-finger title-bar drag moves the right window while a hold-drag at
+  the same pixel moves the wrong one. Pre-existing (the old `window_under` had
+  it) and documented in the function's doc comment. Fix: interleave, folding the
+  chrome test into the `element_under_skipping` loop the way the stand-in arm
+  already is. `pointer_context` (`src/input/pointer.rs`) is a hand-assembled
+  picker that already gets this union right and is the model to follow.
+  _Deferred from the release: it changes hit-testing on every gesture move and
+  resize, and wants its own test pass._
+- **A stand-in is adopted out from under a live grab.**
+  `element_under_interactive_grab`'s contract is that nothing may reposition an
+  element under a grab, but the activation path only asks about
+  `StageWindow::Client`, and the first-commit path asks nothing. Relaunch a
+  stand-in, drag it while the app starts (1-3 s), and the adopt destroys it
+  mid-drag: the grab degrades to a pass-through and the user drags air until
+  button-up. A *client* under a grab defers to the 30 s TTL; a stand-in does
+  not. No corruption — both grabs anticipate the vanish and `interactive_move`
+  stays balanced — but the asymmetry is a behaviour decision, not a missed line.
+- **A grab does not drop an animation entry that already exists.**
+  `start_geometry_entry` (`src/state/animation.rs`) refuses to *create* an entry
+  for an element under an interactive grab, but no grab-install path clears one.
+  Fit a window, then within `MAX_START_HOLD` (300 ms) grab a stand-in the fit
+  push displaced: the stand-in's entry is still parked on `waits_for`, so it
+  draws at `visual.loc` and sits motionless under the finger, then rubber-bands
+  over a full leg when the wait releases. Fix: `cancel_window_animation` at grab
+  install, symmetric with the existing arm.
+- **A pinned window's canvas ghost is a gesture dead zone at zoom > 1.**
+  `sync_pinned_locs` keeps a pinned window's stage position in sync but leaves
+  its canvas *size* unscaled, so at zoom 2 the stage rect covers twice the
+  screen area the window occupies. In the outer band `pinned_element_under`
+  (screen space) says no, `element_under_raw` returns the pinned window, and the
+  `is_canvas_window` stop returns `None` — a gesture over a genuinely visible
+  normal window pans instead of moving it. `element_under` has the same hole, so
+  Alt+drag agrees; consistent and pre-existing.
+- **Zero-net-change resize strands `ResizeState::WaitingForLastCommit`.**
+  Grab start sets `Resizing` in *pending* state only, so a resize that ends
+  where it began leaves `send_pending_configure` with nothing to send and the
+  client with no reason to commit (`src/grabs/resize_grab.rs`). Until its next
+  repaint the window reads as under an interactive grab, which silently skips
+  its next geometry animation and makes relaunch adoption bail. Self-clears.
+- **Adopt and dismiss read the stage position, not the in-flight visual.**
+  Both take `stage.position_of` — the destination — ignoring
+  `geometry_visual_rect`, while `animate_element_move_from` is careful to seed
+  from the entry's current visual. Adopting or dismissing a stand-in that a
+  neighbouring resize pushed within the last few hundred ms teleports the
+  departing chrome to the end of the slide in one frame: a pop inside the
+  crossfade that exists to prevent exactly that. Cosmetic, narrow window.
+
+## Structural backlog
+
+Not bugs. Measured against niri (93,951 Rust lines to driftwm's 97,581, but
+81,832 non-test to driftwm's 63,516 — driftwm carries ~29% less production code
+and a 0.54 test ratio to niri's 0.15), size is not the problem. Duplication is.
+
+- **One invariant, N hand-maintained copies.** The
+  *clear fit → clear fill → seed `ResizeState` → set `Resizing` → unset
+  `Maximized`* sequence exists at five independent sites (`input/pointer.rs`,
+  `handlers/xdg_shell.rs`, `input/gestures/swipe.rs`, `input/touch.rs`,
+  `state/suspended.rs`), and the "drop an owed `pending_recenter` before
+  establishing a placement" step at seven (`state/fit.rs`, `state/fill.rs`,
+  `state/fullscreen.rs`, `state/suspended.rs`, `input/actions.rs` ×3). Both have
+  now been caught mid-drift — a sweep found four of the five `Maximized` arms
+  and missed adoption, which left clients permanently stuck maximized. This is
+  the codebase's most productive bug class by a wide margin. Fix: make the
+  sequence a single constructor the arms call, so a new arm cannot forget a step.
+- **`state/animation.rs` (1,833) and `state/window_animation.rs` sit side by
+  side** with near-identical names and no way to tell from the names which owns
+  what. The recurring defect in this codebase is one name carrying two meanings;
+  this is that shape. Check whether the split is a real seam or an artifact of
+  two branches landing, and rename or merge accordingly.
+- **`state/mod.rs` is 3,059 lines**, the largest file in the tree. The
+  directory around it is fine — 22 files, 642 avg, better subdivided than niri's
+  `src/layout/` at 15 files and 1,661 avg — so this is one file to split, not a
+  directory to reorganize.
