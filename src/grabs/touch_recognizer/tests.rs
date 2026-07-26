@@ -767,6 +767,104 @@ fn configured_tap_travel_widens_the_dead_zone() {
     );
 }
 
+/// Four fingers planted on one row, then walked through each frame's positions in
+/// slot order — the shape the one-shot navigate tier arbitrates on.
+fn four_finger_nav(start: [f64; 4], frames: &[[f64; 4]]) -> Vec<TouchInput> {
+    let mut seq: Vec<TouchInput> = start
+        .iter()
+        .enumerate()
+        .map(|(i, x)| down(i as u32, *x, 500.0, false, i as u32 * 5))
+        .collect();
+    let mut t = 20;
+    for frame in frames {
+        for (i, x) in frame.iter().enumerate() {
+            seq.push(motion(i as u32, *x, 500.0, t));
+            t += 2;
+        }
+    }
+    seq
+}
+
+/// The `[touch]` pinch keys default to the very `[gestures]` values they used to
+/// borrow, so only a non-default one proves the recognizer reads touch's own.
+#[test]
+fn configured_pinch_out_threshold_fires_a_spread_the_default_rejects() {
+    // A spread to scale 1.10, symmetric about the centroid so no swipe competes:
+    // past a configured 1.05, short of the 1.15 default.
+    let seq = four_finger_nav(
+        [200.0, 400.0, 700.0, 900.0],
+        &[[172.0, 388.0, 712.0, 928.0], [165.0, 385.0, 715.0, 935.0]],
+    );
+    let decs = run_all(&cfg_default(), &seq);
+    assert_eq!(
+        count(&decs, is_fire),
+        0,
+        "the default 1.15 must reject a 1.10 spread, got {decs:?}"
+    );
+
+    let cfg = Config::from_toml("[touch]\npinch_out_threshold = 1.05\n").unwrap();
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter()
+            .any(|d| matches!(d, Decision::FireThreshold(Action::HomeToggle))),
+        "the lowered threshold must fire the 4-finger pinch-out, got {decs:?}"
+    );
+}
+
+#[test]
+fn configured_pinch_in_threshold_fires_a_contraction_the_default_rejects() {
+    // The mirror image: a contraction to scale 0.90 — past a configured 0.95,
+    // short of the 0.85 default.
+    let seq = four_finger_nav(
+        [200.0, 400.0, 700.0, 900.0],
+        &[[228.0, 412.0, 688.0, 872.0], [235.0, 415.0, 685.0, 865.0]],
+    );
+    let decs = run_all(&cfg_default(), &seq);
+    assert_eq!(
+        count(&decs, is_fire),
+        0,
+        "the default 0.85 must reject a 0.90 contraction, got {decs:?}"
+    );
+
+    let cfg = Config::from_toml("[touch]\npinch_in_threshold = 0.95\n").unwrap();
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter()
+            .any(|d| matches!(d, Decision::FireThreshold(Action::ZoomToFit))),
+        "the raised threshold must fire the 4-finger pinch-in, got {decs:?}"
+    );
+}
+
+#[test]
+fn configured_swipe_threshold_makes_a_firing_swipe_inert() {
+    // 120px of centroid travel at a constant spread: past the default 15mm (60px
+    // here), nowhere near the configured 100mm (400px).
+    let seq = four_finger_nav(
+        [400.0, 500.0, 600.0, 700.0],
+        &[
+            [360.0, 460.0, 560.0, 660.0],
+            [320.0, 420.0, 520.0, 620.0],
+            [280.0, 380.0, 480.0, 580.0],
+        ],
+    );
+    let decs = run_all(&cfg_default(), &seq);
+    assert!(
+        decs.iter().any(|d| matches!(
+            d,
+            Decision::FireThreshold(Action::CenterNearest(Direction::Right))
+        )),
+        "the default threshold must fire the swipe, got {decs:?}"
+    );
+
+    let cfg = Config::from_toml("[touch]\nswipe_threshold = 100.0\n").unwrap();
+    let decs = run_all(&cfg, &seq);
+    assert_eq!(
+        count(&decs, is_fire),
+        0,
+        "travel short of the raised threshold must fire nothing, got {decs:?}"
+    );
+}
+
 #[test]
 fn holdback_then_claim_discards_and_cancels() {
     let cfg = cfg_default();
