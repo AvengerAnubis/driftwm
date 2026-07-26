@@ -307,7 +307,7 @@
 # # here removes ALL of that category's defaults, leaving only your own entries.
 # # Categories: "keys", "mouse", "gestures", "touch".
 # disable_defaults = []
-# # Example: bring your own keyboard scheme, keep mouse + gesture defaults
+# # Example: bring your own keyboard scheme, keep mouse + gesture + touch defaults
 # # disable_defaults = ["keys"]
 
 [keybindings]

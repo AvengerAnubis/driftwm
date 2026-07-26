@@ -668,7 +668,7 @@ Default: `[]`
 
 Opt out of built-in default bindings by category, for a clean slate. Normally your [keybindings]/[mouse]/[gestures]/[touch] entries merge with the built-ins (use `= "none"` to drop a single default). Listing a category here removes ALL of that category's defaults, leaving only your own entries. Categories: "keys", "mouse", "gestures", "touch".
 
-**Example: bring your own keyboard scheme, keep mouse + gesture defaults**
+**Example: bring your own keyboard scheme, keep mouse + gesture + touch defaults**
 
 ```toml
 disable_defaults = ["keys"]
