@@ -822,6 +822,9 @@ impl Config {
             ),
         };
 
+        // Read the defaults back off the `Default` impl so the seven literals live
+        // in exactly one place; two copies would drift with nothing guarding them.
+        let fallback = TouchThresholds::default();
         let touch_thresholds = TouchThresholds {
             // The 4+ finger tier rates swipe travel as a fraction of this and
             // compares it against the pinch scales, so a zero budget isn't a hair
@@ -829,36 +832,42 @@ impl Config {
             swipe_distance_mm: positive_or_default(
                 raw.touch.swipe_threshold,
                 "touch.swipe_threshold",
-                15.0,
+                fallback.swipe_distance_mm,
                 &mut errors,
             ),
             pinch_in_scale: non_negative(
-                raw.touch.pinch_in_threshold.unwrap_or(0.85),
+                raw.touch
+                    .pinch_in_threshold
+                    .unwrap_or(fallback.pinch_in_scale),
                 "touch.pinch_in_threshold",
                 &mut errors,
             ),
             pinch_out_scale: non_negative(
-                raw.touch.pinch_out_threshold.unwrap_or(1.15),
+                raw.touch
+                    .pinch_out_threshold
+                    .unwrap_or(fallback.pinch_out_scale),
                 "touch.pinch_out_threshold",
                 &mut errors,
             ),
             tap_max_ms: non_negative(
-                raw.touch.tap_time.unwrap_or(250),
+                raw.touch.tap_time.unwrap_or(fallback.tap_max_ms as i32),
                 "touch.tap_time",
                 &mut errors,
             ) as u32,
             double_tap_ms: non_negative(
-                raw.touch.double_tap_time.unwrap_or(300),
+                raw.touch
+                    .double_tap_time
+                    .unwrap_or(fallback.double_tap_ms as i32),
                 "touch.double_tap_time",
                 &mut errors,
             ) as u32,
             hold_ms: non_negative(
-                raw.touch.hold_time.unwrap_or(350),
+                raw.touch.hold_time.unwrap_or(fallback.hold_ms as i32),
                 "touch.hold_time",
                 &mut errors,
             ) as u32,
             dead_zone_mm: non_negative(
-                raw.touch.tap_travel.unwrap_or(2.0),
+                raw.touch.tap_travel.unwrap_or(fallback.dead_zone_mm),
                 "touch.tap_travel",
                 &mut errors,
             ),

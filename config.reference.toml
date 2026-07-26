@@ -582,7 +582,10 @@
                                 # gesture (hold-swipe, doubletap-hold-swipe)
                                 # instead of a plain swipe
 # tap_travel = 2.0              # mm a contact may drift and still count as a
-                                # tap; past this it becomes a pan or drag
+                                # tap; past this it becomes a pan or drag. Applies
+                                # where taps and drags compete for the same finger
+                                # count — a tier bound only to a drag gesture
+                                # leaves on the first motion regardless
 
 # # Bindings: `"N-finger-<type>" = "action"`  (touch has no keyboard modifiers)
 # # Context-aware: on-window, on-canvas, anywhere.

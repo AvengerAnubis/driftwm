@@ -357,10 +357,13 @@ pub(super) struct GestureFileConfig {
 
 /// Touch gesture *bindings* and thresholds (`[touch]`) — distinct from
 /// `[input.touch]` device settings (`TouchDeviceFileConfig`). Touch has no
-/// modifiers, so the three context maps carry no chords; the thresholds mirror
-/// `[gestures]`' names but are its own knobs, and `swipe_threshold` is in mm.
-/// The timings are signed so a negative floors to 0 with a warning like every
-/// other numeric key, instead of failing the whole file to deserialize.
+/// modifiers, so the three context maps carry no chords. The three scale and
+/// distance thresholds mirror `[gestures]`' names but are its own knobs, and
+/// `swipe_threshold` is in mm; the four timings have no `[gestures]` counterpart
+/// at all, since libinput recognizes the trackpad's gestures for us and only
+/// touch arrives as raw down/motion/up. The timings are signed so a *negative*
+/// floors to 0 with a warning like every other numeric key rather than failing
+/// the whole file; a fractional or out-of-range value still fails to deserialize.
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct TouchFileConfig {

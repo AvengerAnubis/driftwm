@@ -1007,7 +1007,7 @@ ms of dwell before a drag commits as a hold gesture (hold-swipe, doubletap-hold-
 
 Default: `2.0`
 
-mm a contact may drift and still count as a tap; past this it becomes a pan or drag
+mm a contact may drift and still count as a tap; past this it becomes a pan or drag. Applies where taps and drags compete for the same finger count — a tier bound only to a drag gesture leaves on the first motion regardless
 
 Bindings: `"N-finger-<type>" = "action"`  (touch has no keyboard modifiers) Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" removes a binding in its context. A fully unbound gesture forwards to the app.
 

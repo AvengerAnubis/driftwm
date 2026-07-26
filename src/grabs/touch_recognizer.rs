@@ -247,8 +247,9 @@ pub enum TapOutcome {
 
 /// The clock-free, compositor-free multi-finger touch-gesture classifier. It sees
 /// only screen-space positions, event times, and the resolved `[touch]` config,
-/// and emits [`Decision`]s the adapter carries out. Every constant, comparison,
-/// latch and ordering is preserved from the original in-grab recognizer.
+/// and emits [`Decision`]s the adapter carries out. Its comparisons, latches and
+/// ordering are preserved from the original in-grab recognizer; the seven values
+/// it used to hardcode now arrive as `[touch]` config.
 pub struct TouchRecognizer {
     /// Screen positions of the currently-down slots.
     points: HashMap<TouchSlot, Point<f64, Logical>>,
