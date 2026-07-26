@@ -91,6 +91,28 @@ pub(super) fn unit_range_or_default(
     }
 }
 
+/// Validate a value the code goes on to *divide by*: reject `<= 0`/NaN back to
+/// `default` with a warning. Flooring at zero would be wrong here — zero isn't a
+/// hair trigger, it makes the ratio the value feeds infinite (or NaN at rest),
+/// and nothing measured against that ratio can ever win.
+pub(super) fn positive_or_default(
+    value: Option<f64>,
+    field: &str,
+    default: f64,
+    errors: &mut Warnings,
+) -> f64 {
+    match value {
+        Some(v) if v <= 0.0 || v.is_nan() => {
+            collect_warn(
+                errors,
+                format!("config: {field} {v} must be positive, using {default}"),
+            );
+            default
+        }
+        other => other.unwrap_or(default),
+    }
+}
+
 /// Floor a value at zero, warning when it was negative (or NaN). For knobs with
 /// a natural lower bound but no upper limit (speeds, steps, distances, sizes).
 pub(super) fn non_negative<T>(value: T, field: &str, errors: &mut Warnings) -> T

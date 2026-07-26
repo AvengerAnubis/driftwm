@@ -865,6 +865,25 @@ fn configured_swipe_threshold_makes_a_firing_swipe_inert() {
     );
 }
 
+/// Swipe progress is a *ratio* of `swipe_threshold`, and the pinch has to out-rank
+/// it to fire, so a zero threshold once left the whole navigate tier inert. The
+/// tier has to stay live whatever the config says.
+#[test]
+fn zero_swipe_threshold_leaves_the_pinch_reachable() {
+    let cfg = Config::from_toml("[touch]\nswipe_threshold = 0.0\n").unwrap();
+    // A deliberate spread to scale 1.25, past even the default 1.15 pinch-out.
+    let seq = four_finger_nav(
+        [200.0, 400.0, 700.0, 900.0],
+        &[[130.0, 370.0, 730.0, 970.0], [112.5, 362.5, 737.5, 987.5]],
+    );
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter()
+            .any(|d| matches!(d, Decision::FireThreshold(Action::HomeToggle))),
+        "the pinch must still reach its threshold, got {decs:?}"
+    );
+}
+
 #[test]
 fn holdback_then_claim_discards_and_cancels() {
     let cfg = cfg_default();

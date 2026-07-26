@@ -554,6 +554,12 @@
 # # [gestures] swipe_threshold is in px. The pinch scales are unitless ratios,
 # # same as their [gestures] counterparts, but tune independently — a finger on
 # # glass pinches differently from two on a touchpad.
+# #
+# # swipe_threshold has to be positive. The 4+ finger tier measures a swipe's
+# # travel as a fraction of it and compares that against the pinch scales, so 0
+# # would not hair-trigger the swipe — it would read as infinite swipe progress
+# # and put pinch-in/out out of reach. A value of 0 or less falls back to 15.0
+# # with a warning.
 # swipe_threshold = 15.0        # mm cumulative distance before directional swipe fires
 # pinch_in_threshold = 0.85     # scale below which pinch-in fires (1.0 = no pinch)
 # pinch_out_threshold = 1.15    # scale above which pinch-out fires (1.0 = no pinch)

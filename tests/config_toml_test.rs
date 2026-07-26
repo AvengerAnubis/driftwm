@@ -258,14 +258,36 @@ fn toml_touch_thresholds_are_independent_of_gesture_thresholds() {
 fn toml_touch_thresholds_reject_negatives_with_a_warning() {
     let toml = r#"
         [touch]
-        swipe_threshold = -5.0
+        pinch_in_threshold = -0.5
+        tap_travel = -1.0
     "#;
     let (config, warnings) = Config::from_toml_collect(toml).unwrap();
-    assert_eq!(config.touch_thresholds.swipe_distance_mm, 0.0);
+    assert_eq!(config.touch_thresholds.pinch_in_scale, 0.0);
+    assert_eq!(config.touch_thresholds.dead_zone_mm, 0.0);
     assert!(
-        warnings.iter().any(|w| w.contains("touch.swipe_threshold")),
+        warnings
+            .iter()
+            .any(|w| w.contains("touch.pinch_in_threshold"))
+            && warnings.iter().any(|w| w.contains("touch.tap_travel")),
         "a negative value should floor at 0 with a warning, got {warnings:?}"
     );
+}
+
+/// `swipe_threshold` is a divisor, not a floored knob: the recognizer rates a
+/// swipe's travel as a fraction of it and weighs that against the pinch scales,
+/// so 0 would read as infinite swipe progress and starve the pinch rather than
+/// hair-trigger the swipe. It falls back to the default instead.
+#[test]
+fn toml_non_positive_touch_swipe_threshold_falls_back_to_the_default() {
+    for value in ["0.0", "-5.0"] {
+        let toml = format!("[touch]\nswipe_threshold = {value}\n");
+        let (config, warnings) = Config::from_toml_collect(&toml).unwrap();
+        assert_eq!(config.touch_thresholds.swipe_distance_mm, 15.0);
+        assert!(
+            warnings.iter().any(|w| w.contains("touch.swipe_threshold")),
+            "{value} should warn, got {warnings:?}"
+        );
+    }
 }
 
 /// The timings are integers, so a negative one must still correct-and-warn like

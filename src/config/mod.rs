@@ -28,7 +28,7 @@ use defaults::{
 use parse_helpers::{
     Warnings, clamp_warn, collect_warn, non_negative, parse_backend_config,
     parse_decoration_config, parse_effects_config, parse_output_outline, parse_output_rule,
-    parse_window_rule,
+    parse_window_rule, positive_or_default,
 };
 use toml::{ConfigFile, expand_tilde};
 
@@ -823,9 +823,13 @@ impl Config {
         };
 
         let touch_thresholds = TouchThresholds {
-            swipe_distance_mm: non_negative(
-                raw.touch.swipe_threshold.unwrap_or(15.0),
+            // The 4+ finger tier rates swipe travel as a fraction of this and
+            // compares it against the pinch scales, so a zero budget isn't a hair
+            // trigger — it makes swipe progress infinite and the pinch unreachable.
+            swipe_distance_mm: positive_or_default(
+                raw.touch.swipe_threshold,
                 "touch.swipe_threshold",
+                15.0,
                 &mut errors,
             ),
             pinch_in_scale: non_negative(

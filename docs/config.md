@@ -965,6 +965,8 @@ Default: `15.0`
 
 Touch thresholds — independent of the [gestures] keys of the same name. A touchscreen is a display, so swipe travel is physical: swipe_threshold is in millimetres and scales with the panel's pixel density, where the [gestures] swipe_threshold is in px. The pinch scales are unitless ratios, same as their [gestures] counterparts, but tune independently — a finger on glass pinches differently from two on a touchpad.
 
+swipe_threshold has to be positive. The 4+ finger tier measures a swipe's travel as a fraction of it and compares that against the pinch scales, so 0 would not hair-trigger the swipe — it would read as infinite swipe progress and put pinch-in/out out of reach. A value of 0 or less falls back to 15.0 with a warning.
+
 mm cumulative distance before directional swipe fires
 
 ### `pinch_in_threshold`
