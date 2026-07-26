@@ -28,12 +28,17 @@ fn config_restore(on: bool) -> Config {
     .unwrap()
 }
 
+/// `config_restore`'s TOML plus an extra `[[window_rules]]` block appended
+/// verbatim — as text, so a hot-reload can feed the compositor the same shape.
+fn restore_toml(on: bool, rules_toml: &str) -> String {
+    format!(
+        "[session]\nrestore_windows = {on}\n[decorations]\ndefault_mode = \"server\"\n{rules_toml}"
+    )
+}
+
 /// `config_restore` plus an extra `[[window_rules]]` block appended verbatim.
 fn config_restore_with_rule(on: bool, rules_toml: &str) -> Config {
-    Config::from_toml(&format!(
-        "[session]\nrestore_windows = {on}\n[decorations]\ndefault_mode = \"server\"\n{rules_toml}"
-    ))
-    .unwrap()
+    Config::from_toml(&restore_toml(on, rules_toml)).unwrap()
 }
 
 /// Seat a desktop-entry cache resolving each `stem` to a launchable identity.
@@ -45,22 +50,25 @@ fn inject_cache(f: &mut Fixture, tmp: &TempDir, stems: &[&str]) {
     f.state().desktop_entry_cache = Some(DesktopEntryCache::new(vec![tmp.path().to_path_buf()]));
 }
 
-/// Map a client at `app_id`/`size` parked at a known canvas position.
+/// Map a client at `app_id`/`size` parked at a known canvas position. Returns
+/// the client-side surface for later lookups.
 fn map_at(
     f: &mut Fixture,
     id: super::client::ClientId,
     app_id: &str,
     size: (u16, u16),
     pos: (i32, i32),
-) {
-    map_window(f, id, app_id, size);
+) -> wayland_client::protocol::wl_surface::WlSurface {
+    let surface = map_window(f, id, app_id, size);
     let window = window_by_app_id(f, app_id).unwrap();
     f.state()
         .map_window(StageWindow::Client(window), Point::from(pos), true);
+    surface
 }
 
 /// Like `map_at`, but also sets a client-side title — for rules that match on
-/// `title` as well as `app_id`.
+/// `title` as well as `app_id`. The title lands after the map, as a real
+/// client's retitle does.
 fn map_titled_at(
     f: &mut Fixture,
     id: super::client::ClientId,
@@ -69,22 +77,11 @@ fn map_titled_at(
     size: (u16, u16),
     pos: (i32, i32),
 ) {
-    let window = f.client(id).create_window();
-    let surface = window.surface.clone();
-    window.set_app_id(app_id);
+    let surface = map_at(f, id, app_id, size, pos);
+    let window = f.client(id).window(&surface);
     window.set_title(title);
     window.commit();
     f.roundtrip(id);
-
-    let window = f.client(id).window(&surface);
-    window.set_size(size.0, size.1);
-    window.attach_new_buffer();
-    window.ack_last_and_commit();
-    f.double_roundtrip(id);
-
-    let window = window_by_app_id(f, app_id).unwrap();
-    f.state()
-        .map_window(StageWindow::Client(window), Point::from(pos), true);
 }
 
 /// The suspended stand-ins on the stage, in z-order (bottom→top), each with its
@@ -1209,12 +1206,13 @@ fn restore_windows_false_rule_removed_rematerializes_carried_quit() {
     f.state().dismiss_suspended(restored[0].0.id);
 }
 
-/// A rule keyed on both `app_id` and `title` excludes the live window from the
-/// shutdown save (title is known there), but not a pre-existing `Quit` record
-/// at load: saved records carry no title, so the title criterion never
-/// matches and the rule falls back to the global default.
+/// A rule keyed on both `app_id` and `title` is read off `app_id` alone at
+/// load, since a saved record carries no title: the record sits inert instead of
+/// materializing into a stand-in that would save itself again every cycle,
+/// coming back forever against the rule. The title criterion still narrows the
+/// save, where the live title is known.
 #[test]
-fn restore_windows_false_rule_with_title_excludes_save_but_not_load() {
+fn restore_windows_false_rule_with_title_excludes_records_by_app_id() {
     let cache = TempDir::new();
     let tmp = TempDir::new();
     let path = tmp.path().join("session.json");
@@ -1238,16 +1236,15 @@ fn restore_windows_false_rule_with_title_excludes_save_but_not_load() {
     f.state().session_store.path = Some(path.clone());
     f.state().load_session();
 
-    let restored = suspended_in_order(&mut f);
     assert_eq!(
-        restored.len(),
-        1,
-        "the title-scoped rule can't govern what materializes at load"
+        suspended_in_order(&mut f).len(),
+        0,
+        "a record the rule can't tell apart by title is excluded on its app_id"
     );
-    f.state().dismiss_suspended(restored[0].0.id);
 
-    // The live window's real title is known at save time, so the same rule
-    // keeps it out of the shutdown save.
+    // The live window's real title is known at save time, so the same rule keeps
+    // it out of the shutdown save — and the record is carried forward once, not
+    // re-saved as a stand-in of its own.
     let id = f.add_client();
     map_titled_at(
         &mut f,
@@ -1260,10 +1257,145 @@ fn restore_windows_false_rule_with_title_excludes_save_but_not_load() {
 
     f.state().serialize_session_on_shutdown();
     let after = session::read(&path);
-    assert!(
-        after.entries.iter().all(|e| e.app_id != "excluded"),
-        "the title-matched rule excludes the live window from the save"
+    assert_eq!(
+        after
+            .entries
+            .iter()
+            .filter(|e| e.app_id == "excluded")
+            .count(),
+        1,
+        "the live window stays out of the save, leaving just the carried record"
     );
+    assert_eq!(
+        after.entries[0].position,
+        [100, 200],
+        "that one record is the untouched carry, not a fresh save of the live window"
+    );
+}
+
+/// A rule matching on `title` alone can't be keyed to a saved record — nothing
+/// in the file carries a title — so it governs the save only and leaves what
+/// comes back to the section key. Consulting it with the title unknown would
+/// make it answer for every app instead.
+#[test]
+fn a_title_only_restore_windows_rule_does_not_govern_what_comes_back() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![entry(1, "someapp", Origin::Quit)],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    let config = config_restore_with_rule(
+        true,
+        "[[window_rules]]\ntitle = \"Some Window\"\nrestore_windows = false\n",
+    );
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(
+        restored.len(),
+        1,
+        "an unkeyable rule leaves the record to the section key"
+    );
+
+    f.state().dismiss_suspended(restored[0].0.id);
+}
+
+/// An explicitly suspended stand-in is saved at shutdown even for an app a
+/// `restore_windows = false` rule keeps out of the save: the rule governs the
+/// automatic save of still-open windows, not an artifact the user deliberately
+/// left on the canvas — which is what the load side's `Explicit` bypass expects
+/// to find in the file.
+#[test]
+fn restore_windows_false_rule_still_saves_an_explicit_stand_in() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let config = config_restore_with_rule(
+        true,
+        "[[window_rules]]\napp_id = \"excluded\"\nrestore_windows = false\n",
+    );
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &cache, &["excluded"]);
+    f.state().session_store.path = Some(path.clone());
+
+    let id = f.add_client();
+    let surface = map_at(&mut f, id, "excluded", (400, 300), (300, 300));
+    let window = window_by_app_id(&mut f, "excluded").unwrap();
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&window, serial);
+    f.state()
+        .execute_action(&driftwm::config::Action::SuspendWindow);
+    f.client(id).window(&surface).destroy();
+    f.roundtrip(id);
+    f.dispatch();
+
+    f.state().serialize_session_on_shutdown();
+
+    let saved = session::read(&path);
+    assert_eq!(saved.entries.len(), 1);
+    assert_eq!(saved.entries[0].app_id, "excluded");
+    assert_eq!(
+        saved.entries[0].origin,
+        Origin::Explicit,
+        "the deliberate stand-in is saved despite the rule"
+    );
+
+    let sid = suspended_in_order(&mut f)[0].0.id;
+    f.state().dismiss_suspended(sid);
+}
+
+/// `restore_windows` is resolved against the live config, not the rule stamped
+/// when a window mapped, so a rule added or dropped by a hot-reload decides the
+/// next shutdown save without either window remapping.
+#[test]
+fn a_hot_reloaded_restore_windows_rule_decides_the_next_save() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let rule_for =
+        |app: &str| format!("[[window_rules]]\napp_id = \"{app}\"\nrestore_windows = false\n");
+
+    let mut f = Fixture::with_config(config_restore_with_rule(true, &rule_for("alpha")));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &cache, &["alpha", "beta"]);
+    f.state().session_store.path = Some(path.clone());
+
+    let a = f.add_client();
+    map_at(&mut f, a, "alpha", (400, 300), (300, 300));
+    let b = f.add_client();
+    map_at(&mut f, b, "beta", (400, 300), (800, 300));
+
+    // Swap which app the rule excludes while both windows stay mapped.
+    f.state()
+        .reload_config_from_contents(&restore_toml(true, &rule_for("beta")));
+
+    f.state().serialize_session_on_shutdown();
+
+    let saved = session::read(&path);
+    assert!(
+        saved.entries.iter().any(|e| e.app_id == "alpha"),
+        "the app the reload stopped excluding is saved"
+    );
+    assert!(
+        saved.entries.iter().all(|e| e.app_id != "beta"),
+        "the app the reload started excluding is not"
+    );
+
+    // The headless fixture has no backend to drain a queued mode intent.
+    f.state().pending_mode_changes.clear();
 }
 
 /// A `restore_windows = false` rule does not touch `Explicit`-origin records:

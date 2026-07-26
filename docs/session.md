@@ -141,11 +141,14 @@ Three things worth knowing about it:
 - A window you suspended **explicitly** still comes back, since that's a
   deliberate artifact you placed on the canvas. The rule only governs the
   automatic logout save.
-- **Match on `app_id`.** Saved records carry no title, so a rule that also
-  matches on `title` can only decide what gets *saved*, where the live title is
-  known — not what comes back on the next launch. Records saved before you added
-  the rule stay in the file but sit inert: they stop coming back, and return if
-  you drop the rule again.
+- **Key it on `app_id`.** Saved records carry no title, so a `title` criterion
+  narrows only what gets *saved*, where the live title is known. On the way back
+  the rule is read off `app_id` alone, so it decides for *every* saved window of
+  that app — a rule matching on both keeps the titled windows out of the save
+  and keeps all of the app's saved records from coming back. A rule matching on
+  `title` alone has nothing to key a record on, so it governs saving only.
+  Records saved before you added the rule stay in the file but sit inert: they
+  stop coming back, and return if you drop the rule again.
 
 ## `restore_camera`
 

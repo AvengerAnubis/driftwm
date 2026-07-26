@@ -95,11 +95,8 @@ impl DriftWm {
             .into_iter()
             .filter(valid_entry_geometry)
             .collect();
-        // Records carry no title, so the per-app decision keys on `app_id`
-        // alone: a rule that also matches on `title` can only govern what gets
-        // *saved*, where the live title is known.
         let (materialize, carried) = session::partition_for_restore(entries, |e| {
-            self.resolve_restore_windows(&e.app_id, "")
+            self.resolve_restore_windows_for_record(&e.app_id)
         });
         self.session_store.carried_forward = carried;
         for entry in materialize {
@@ -352,6 +349,24 @@ impl DriftWm {
         self.config
             .resolve_window_rules(app_id, title)
             .and_then(|r| r.restore_windows)
+            .unwrap_or(self.config.session.restore_windows)
+    }
+
+    /// The effective `restore_windows` for a saved record. A record carries an
+    /// `app_id` but no title, so a rule is keyed on its `app_id` predicate
+    /// alone: one that also matches on `title` narrows what gets *saved*, but
+    /// answers for every record of that app on the way back. Resolving it
+    /// against an empty title instead would miss, and the record would come back
+    /// as a stand-in that saves itself again every cycle. A rule with no
+    /// `app_id` can't be keyed to a record and is skipped, rather than left to
+    /// answer for every app. Last match wins, as in `resolve_window_rules`.
+    fn resolve_restore_windows_for_record(&self, app_id: &str) -> bool {
+        self.config
+            .window_rules
+            .iter()
+            .rev()
+            .filter(|rule| rule.app_id.as_ref().is_some_and(|p| p.matches(app_id)))
+            .find_map(|rule| rule.restore_windows)
             .unwrap_or(self.config.session.restore_windows)
     }
 

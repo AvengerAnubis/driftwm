@@ -11,7 +11,9 @@ re-resolve live against the current config instead: `pass_keys` is evaluated per
 keypress (so a config reload — and a title change — takes effect immediately),
 layer-surface chrome is evaluated per frame (so a config reload takes effect
 immediately), `suspend_on_close` is evaluated when a window closes, and
-`restore_windows` when the session is saved or loaded.
+`restore_windows` when the session is saved or loaded — on load against a saved
+record, which carries an `app_id` but no title, so only the `app_id` criterion is
+consulted there (see [session restore](session.md#restore_windows)).
 
 ## How matching works
 

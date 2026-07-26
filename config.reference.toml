@@ -737,9 +737,11 @@
 # #                stays off. Independent of suspend_on_close, which only governs
 # #                closes: set both to false for an app that should never leave a
 # #                stand-in behind. A window you suspended explicitly still comes
-# #                back. Match on app_id: saved records carry no title, so a rule
-# #                that also matches on title only governs what gets saved.
-# #                (default: inherit)
+# #                back. Key the rule on app_id: saved records carry no title, so
+# #                a title criterion narrows what gets saved, while on the way
+# #                back the rule answers for every saved window of that app_id. A
+# #                rule matching on title alone can't be keyed to a saved record,
+# #                so it governs saving only. (default: inherit)
 # #   preserve_aspect_ratio — true: keep the window's aspect ratio during
 # #                interactive resizes; the ratio is taken at the start of each
 # #                resize. (default: false)

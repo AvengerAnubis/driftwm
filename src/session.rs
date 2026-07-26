@@ -20,7 +20,8 @@ pub const VERSION: u32 = 1;
 
 /// Why a durable entry exists, which decides whether it materializes on restore.
 /// `Explicit` (a live suspend) always comes back; `Quit` (serialized at
-/// graceful shutdown) only when `restore_windows` is on.
+/// graceful shutdown) only when `restore_windows` resolves on for its app — the
+/// global default, or a window rule keyed on the record's `app_id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Origin {
