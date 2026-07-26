@@ -666,7 +666,7 @@ Frame-rate cap for animated (`u_time`) shader backgrounds. 0 = every output fram
 
 Default: `[]`
 
-Opt out of built-in default bindings by category, for a clean slate. Normally your [keybindings]/[mouse]/[gestures] entries merge with the built-ins (use `= "none"` to drop a single default). Listing a category here removes ALL of that category's defaults, leaving only your own entries. Categories: "keys", "mouse", "gestures".
+Opt out of built-in default bindings by category, for a clean slate. Normally your [keybindings]/[mouse]/[gestures]/[touch] entries merge with the built-ins (use `= "none"` to drop a single default). Listing a category here removes ALL of that category's defaults, leaving only your own entries. Categories: "keys", "mouse", "gestures", "touch".
 
 **Example: bring your own keyboard scheme, keep mouse + gesture defaults**
 

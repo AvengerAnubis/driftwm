@@ -1,6 +1,6 @@
 use driftwm::config::{
     Action, BTN_RIGHT, BackgroundKind, BindingContext, Config, ContinuousAction,
-    GestureConfigEntry, GestureTrigger, Modifiers, MouseAction,
+    GestureConfigEntry, GestureTrigger, Modifiers, MouseAction, ThresholdAction,
 };
 use smithay::backend::input::AxisSource;
 use smithay::input::keyboard::{Keysym, ModifiersState, keysyms};
@@ -272,6 +272,70 @@ fn toml_disable_defaults_gestures_clears_default_gestures_only() {
             Some(Action::CloseWindow)
         ),
         "key defaults should survive disabling gesture defaults"
+    );
+}
+
+#[test]
+fn toml_disable_defaults_touch_clears_default_touch_bindings_only() {
+    let toml = r#"
+        [bindings]
+        disable_defaults = ["touch"]
+        [touch.on-canvas]
+        "1-finger-swipe" = "center-nearest"
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+
+    assert!(
+        config
+            .touch_lookup(
+                &GestureTrigger::Pinch { fingers: 2 },
+                BindingContext::OnCanvas,
+            )
+            .is_none(),
+        "default 2-finger canvas pinch should be gone when touch defaults are disabled"
+    );
+    assert!(
+        config
+            .touch_lookup(
+                &GestureTrigger::Swipe { fingers: 3 },
+                BindingContext::Anywhere,
+            )
+            .is_none(),
+        "default 3-finger touch swipe should be gone when touch defaults are disabled"
+    );
+    assert_eq!(
+        config.touch_lookup(
+            &GestureTrigger::Swipe { fingers: 1 },
+            BindingContext::OnCanvas,
+        ),
+        Some(&GestureConfigEntry::Threshold(
+            ThresholdAction::CenterNearest
+        )),
+        "user-defined touch binding should still resolve"
+    );
+    assert!(
+        config
+            .gesture_lookup(
+                &ModifiersState::default(),
+                &GestureTrigger::Swipe { fingers: 3 },
+                BindingContext::Anywhere,
+            )
+            .is_some(),
+        "trackpad gesture defaults should survive disabling touch defaults"
+    );
+    assert!(
+        matches!(
+            config.lookup(&logo(), Keysym::from(keysyms::KEY_q)),
+            Some(Action::CloseWindow)
+        ),
+        "key defaults should survive disabling touch defaults"
+    );
+    assert!(
+        matches!(
+            config.mouse_button_lookup_ctx(&alt(), BTN_RIGHT, BindingContext::OnWindow),
+            Some(MouseAction::ResizeWindow)
+        ),
+        "mouse defaults should survive disabling touch defaults"
     );
 }
 

@@ -302,10 +302,10 @@
 
 [bindings]
 # # Opt out of built-in default bindings by category, for a clean slate.
-# # Normally your [keybindings]/[mouse]/[gestures] entries merge with the
-# # built-ins (use `= "none"` to drop a single default). Listing a category
+# # Normally your [keybindings]/[mouse]/[gestures]/[touch] entries merge with
+# # the built-ins (use `= "none"` to drop a single default). Listing a category
 # # here removes ALL of that category's defaults, leaving only your own entries.
-# # Categories: "keys", "mouse", "gestures".
+# # Categories: "keys", "mouse", "gestures", "touch".
 # disable_defaults = []
 # # Example: bring your own keyboard scheme, keep mouse + gesture defaults
 # # disable_defaults = ["keys"]

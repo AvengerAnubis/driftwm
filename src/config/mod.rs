@@ -491,14 +491,16 @@ impl Config {
         let mut disable_keys = false;
         let mut disable_mouse = false;
         let mut disable_gestures = false;
+        let mut disable_touch = false;
         for cat in raw.bindings.disable_defaults.into_iter().flatten() {
             match cat.as_str() {
                 "keys" => disable_keys = true,
                 "mouse" => disable_mouse = true,
                 "gestures" => disable_gestures = true,
+                "touch" => disable_touch = true,
                 other => warn_and_collect!(
                     "config: unknown bindings.disable_defaults category '{other}' \
-                     (expected \"keys\", \"mouse\", or \"gestures\")"
+                     (expected \"keys\", \"mouse\", \"gestures\", or \"touch\")"
                 ),
             }
         }
@@ -661,7 +663,11 @@ impl Config {
             }
         }
 
-        let mut touch_bindings = default_touch_bindings();
+        let mut touch_bindings = if disable_touch {
+            ContextBindings::empty()
+        } else {
+            default_touch_bindings()
+        };
         let mut touch_dir_candidates: Vec<(BindingContext, GestureTrigger, String)> = Vec::new();
         for (ctx, section) in [
             (BindingContext::OnWindow, raw.touch.on_window),
