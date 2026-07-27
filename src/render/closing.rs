@@ -40,16 +40,19 @@ fn fade_out_alpha(progress: f64) -> f32 {
     (1.0 - p * p) as f32
 }
 
-/// Alpha of the outgoing half of a resize crossfade at `progress`: `1 - p`.
+/// Alpha of the outgoing half of a resize crossfade at `progress`: `(1 - p)²`.
 ///
-/// Linear rather than the eased [`fade_out_alpha`], because this is a morph and
-/// not a departure. Both pictures are stretched into the same interpolated rect,
-/// so the old one distorts further the longer it stays — exactly where the eased
-/// curve holds it near-opaque (0.91 at p=0.3) — and the chase covers most of the
-/// shape change in its first frames. Linear hands over to real content while the
-/// stretch is still small.
+/// Front-loaded rather than eased like [`fade_out_alpha`], because this is a
+/// morph and not a departure. Both pictures are stretched into the same
+/// interpolated rect, so the old one distorts further the longer it stays, and
+/// the chase covers most of the shape change in its first frames. This leaves a
+/// quarter of the old picture at the halfway point, against half of it under a
+/// linear ramp. Handing over early is safe because the new buffer is already
+/// committed underneath: the outgoing picture is strictly an overlay, so a
+/// faster fade reveals real content sooner and can never expose a gap.
 fn crossfade_out_alpha(progress: f64) -> f32 {
-    (1.0 - progress.clamp(0.0, 1.0)) as f32
+    let remaining = 1.0 - progress.clamp(0.0, 1.0);
+    (remaining * remaining) as f32
 }
 
 /// One surface of a captured window tree: an Rc-cloned GL texture and where it
