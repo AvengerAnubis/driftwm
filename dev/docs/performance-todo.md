@@ -190,6 +190,43 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   position, so the configured size is the rect that pairs with it — but it is a
   deliberate trade, not an oversight. The deeper issue is that a self-resize
   leaves fill membership claiming a rect the window no longer occupies.
+- **Input hit-testing is not visual-aware, so an animating window cannot be
+  clicked where it is drawn.** Every stage read in the input path is the
+  animation's *destination*: `topmost_under`'s `position_and_pinned`,
+  `element_under_skipping`'s, `decoration_under`'s and `surface_under`'s
+  `position_of` (`src/input/mod.rs`). The render path draws at
+  `geometry_visual_rect`, which has no consumer anywhere under `src/input/`. The
+  two rects are disjoint for the whole animation. For a fit the offset is
+  `old_size/2 - usable.size/2 + gap (+bar)` — independent of camera and position,
+  so a 800×600 window on a 1920×1080 usable area sits 548 px left and 204 px up
+  of its phantom. The title band is ~24 px, so a title-bar grab *cannot* land:
+  the press falls through `decoration_under` (the phantom's content occludes it),
+  matches the phantom body in `element_under`, and lands on click-to-focus.
+  Second symptom, worth fixing together: `surface_under` is stage-based too, so
+  the client receives the press at surface-local coordinates off by the same
+  offset — clicks during an animation reach the wrong part of the window.
+  The freeze is the worst phase: for up to `MAX_START_HOLD` (300 ms) the window
+  is perfectly *motionless* at its old position while the stage already holds the
+  new one, so divergence is at maximum and nothing on screen suggests anything is
+  in flight. Latent at default speeds (~120 ms, reads as a missed click); obvious
+  once `[effects] animation_speed` is lowered — at 0.02 it lasts ~4 s. Same root
+  family as the adopt/dismiss item above, but that one is a cosmetic one-frame
+  pop and this is the whole input layer. Fix: thread the visual rect into those
+  four stage reads, taking `geometry_visual_rect(id).loc` when a Canvas-space
+  entry is live and falling back to the stage position otherwise — the pattern
+  `window_screen_rect_on` (`src/state/window_animation_driver.rs`) already uses.
+  Check `geometry_space` first; that accessor's doc warns about Canvas vs Screen.
+- **A grab held still during a camera animation drags the window.** Press and
+  hold a title bar while the canvas is gliding (momentum, or any camera/zoom
+  animation) and the window travels with the camera. `warp_pointer`
+  (`src/state/viewport_animation.rs`) synthesizes real motion into a live grab to
+  keep the pointer at a fixed *screen* position, so its *canvas* position moves —
+  and `apply_move` measures its delta against a fixed canvas anchor, which reads
+  as a genuine drag. A press without hold is unaffected: no grab is live to
+  receive the synthesized motion. The underlying question is whether a `MoveGrab`
+  should track canvas or screen space during a camera animation; the answer also
+  decides what `apply_resize` should do, since it turns the same delta into a
+  size change. Confirmed on hardware.
 
 ## Structural backlog
 
