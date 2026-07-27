@@ -64,7 +64,8 @@ fullscreen window.
   (`src/render/tile_worker.rs`, `tile_chunks.rs`). Cancel unwanted requests; drop
   off-viewport responses; bound the queue. _Gigapixel-TIFF-wallpaper path only._
 - **B11** Momentum auto-launch timer removed + re-inserted per gesture event
-  (`src/state/animation.rs`, ~140-1000 Hz during pans). Keep one timer, reschedule.
+  (`src/state/viewport_animation.rs`, ~140-1000 Hz during pans). Keep one timer,
+  reschedule.
 - **B12** Output-outline strips rebuild pixel Vecs + `MemoryRenderBuffer` + fresh
   element ids per edge per frame (`src/render/mod.rs`), defeating damage tracking.
   _Multi-monitor only._ Cache per (output, color, size).
@@ -126,8 +127,9 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   not. No corruption — both grabs anticipate the vanish and `interactive_move`
   stays balanced — but the asymmetry is a behaviour decision, not a missed line.
 - **A grab does not drop an animation entry that already exists.**
-  `start_geometry_entry` (`src/state/animation.rs`) refuses to *create* an entry
-  for an element under an interactive grab, but no grab-install path clears one.
+  `start_geometry_entry` (`src/state/window_animation_driver.rs`) refuses to
+  *create* an entry for an element under an interactive grab, but no grab-install
+  path clears one.
   Fit a window, then within `MAX_START_HOLD` (300 ms) grab a stand-in the fit
   push displaced: the stand-in's entry is still parked on `waits_for`, so it
   draws at `visual.loc` and sits motionless under the finger, then rubber-bands
@@ -177,12 +179,8 @@ and a 0.54 test ratio to niri's 0.15), size is not the problem. Duplication is.
   and missed adoption, which left clients permanently stuck maximized. This is
   the codebase's most productive bug class by a wide margin. Fix: make the
   sequence a single constructor the arms call, so a new arm cannot forget a step.
-- **`state/animation.rs` (1,833) and `state/window_animation.rs` sit side by
-  side** with near-identical names and no way to tell from the names which owns
-  what. The recurring defect in this codebase is one name carrying two meanings;
-  this is that shape. Check whether the split is a real seam or an artifact of
-  two branches landing, and rename or merge accordingly.
-- **`state/mod.rs` is 3,059 lines**, the largest file in the tree. The
-  directory around it is fine — 22 files, 642 avg, better subdivided than niri's
-  `src/layout/` at 15 files and 1,661 avg — so this is one file to split, not a
-  directory to reorganize.
+  The `state/mod.rs` split has since removed the *distance* between these arms
+  without removing the duplication: the five `Maximized` sites are unchanged, and
+  the `pending_recenter` sites now sit across `state/fit.rs`, `state/fill.rs`,
+  `state/fullscreen.rs`, `state/suspended.rs` and `input/actions.rs` ×3. Extract
+  the constructor before adding a sixth arm.
