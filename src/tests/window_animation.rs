@@ -2784,9 +2784,9 @@ fn a_sub_threshold_resize_carries_no_request() {
 }
 
 /// The mirror: an exit armed while the *enter* is still frozen must not strip the
-/// chrome off the windowed picture that freeze is holding. Filled first, so the
-/// exit restores to a size the client does not have and the retarget genuinely
-/// carries a request.
+/// chrome off the windowed picture that freeze is holding. Seeded with a restore
+/// size the client never had, so the exit restores to a size that isn't on screen
+/// and the retarget genuinely carries a request.
 #[test]
 fn a_fullscreen_exit_during_the_enter_freeze_keeps_the_windowed_chrome() {
     let mut f = Fixture::new();
@@ -2800,11 +2800,11 @@ fn a_fullscreen_exit_during_the_enter_freeze_keeps_the_windowed_chrome() {
     let eid = element_id(&mut f, &window);
     tick_until_settled(&mut f);
 
-    f.state().fill_window(&window);
-    f.double_roundtrip(id);
-    super::adopt_last_configure(&mut f, id, &surface);
-    f.double_roundtrip(id);
-    tick_until_settled(&mut f);
+    // What a resize settle leaves behind once the client shrinks itself again:
+    // the size the exit will restore to is not the one on screen.
+    f.state()
+        .stage
+        .set_restore_size(&window, Size::from((520, 380)));
 
     f.client(id).window(&surface).set_fullscreen(None);
     f.double_roundtrip(id);

@@ -419,19 +419,18 @@ fn unfit_after_fullscreen_exit_drops_the_stale_recenter_so_the_next_resize_does_
 /// The fill twin of the test above: `unfill_window`'s equal-size branch must
 /// drop a recenter already owed, not merely skip inserting its own.
 ///
-/// This route reaches it through a resize interleave, because both saved sizes
-/// are read off `restore_size` here and only a resize settle re-anchors that:
-/// the fill saves the pre-resize size while the settle moves `restore_size` to
-/// the filled size, which is what the fullscreen exit then restores to. The
-/// exit therefore restores a size the client does not have and leaves a
-/// recenter owed, while the unfill — pre-fill size and still-fullscreen-sized
-/// geometry both being the output's 1920×1080 — settles in place through the
-/// equal-size branch. Left untouched, that stale entry fires on the next
-/// differing-size commit (a resize) and discards the drag in between.
+/// The two saved sizes disagree because they are captured in different eras:
+/// the fill records the pre-fill size, the fullscreen entry the filled one. The
+/// exit therefore restores a size the client does not have — it is still
+/// committing fullscreen-sized frames — and leaves a recenter owed, while the
+/// unfill (pre-fill size and still-fullscreen-sized geometry both being the
+/// output's 1920×1080) settles in place through the equal-size branch. Left
+/// untouched, that stale entry fires on the next differing-size commit (a
+/// resize) and discards the drag in between.
 ///
-/// The interleave is not the only way in: the twin below reaches the same
-/// branch with no resize at all, off the one rewrite that makes the two saved
-/// sizes disagree on their own.
+/// The resize interleave is what makes this route distinct from the twin below
+/// rather than what makes it work: the fill lands between a resize release and
+/// its settle commit, and the settle re-anchors `restore_size` under it.
 #[test]
 fn unfill_after_fullscreen_exit_drops_the_stale_recenter_so_the_next_resize_does_not_teleport() {
     let mut f = Fixture::new();
@@ -466,8 +465,7 @@ fn unfill_after_fullscreen_exit_drops_the_stale_recenter_so_the_next_resize_does
     );
 
     // The client's next commit adopts the fill *and* settles the resize, which
-    // anchors `restore_size` to the size the user ended on — the divergence
-    // from the fill's saved size that the fullscreen exit below needs.
+    // anchors `restore_size` to the size the user ended on.
     f.double_roundtrip(id);
     adopt_last_configure(&mut f, id, &surface);
     assert_eq!(
@@ -491,8 +489,8 @@ fn unfill_after_fullscreen_exit_drops_the_stale_recenter_so_the_next_resize_does
     );
 
     // Exit fullscreen but never ack the restore configure: it restores the
-    // 1896×1056 the settle recorded, which the client does not have, so a
-    // recenter is left owed.
+    // filled 1896×1056, which the client does not have, so a recenter is left
+    // owed.
     let cw = f.client(id).window(&surface);
     cw.unset_fullscreen();
     f.double_roundtrip(id);
@@ -545,16 +543,14 @@ fn unfill_after_fullscreen_exit_drops_the_stale_recenter_so_the_next_resize_does
 /// The same equal-size branch, reached with nothing but fill → fullscreen →
 /// exit → unfill — the shorter and likelier production route.
 ///
-/// `enter_fullscreen` rewrites an undersized restore size to a half-viewport
-/// default (`MIN_RESTORE_FLOOR`, guarding the clients that map at a throwaway
-/// size); `fill_window` reads the same restore size and keeps it verbatim. Below
-/// the floor on either axis the two saved sizes therefore disagree without any
-/// resize settle to split them: the fullscreen exit restores the floored size,
-/// which the client does not have, and leaves a recenter owed, while the unfill
-/// restores the size the client has been sitting at all along and settles in
-/// place.
+/// Nothing here is ever acked, so the client sits at its pre-fill size
+/// throughout. The fill saves that size while the fullscreen entry saves the
+/// filled one, so the two disagree with no resize settle to split them: the
+/// exit restores the filled size, which the client does not have, and leaves a
+/// recenter owed, while the unfill restores the size the client has been
+/// sitting at all along and settles in place.
 #[test]
-fn unfill_after_a_floored_fullscreen_exit_drops_the_stale_recenter() {
+fn unfill_after_a_plain_fullscreen_exit_drops_the_stale_recenter() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
     // Fullscreen below moves the camera, which seeds a per-output blur
@@ -564,15 +560,15 @@ fn unfill_after_a_floored_fullscreen_exit_drops_the_stale_recenter() {
     origin_view(&mut f);
     let id = f.add_client();
 
-    // 80 high is under the 100px floor, so the fullscreen enter rewrites what it
-    // saves; the fill's own saved size stays the raw 400×80.
+    // Small enough that the fill genuinely grows it, and the size the client
+    // stays at for the whole sequence.
     let surface = map_settled(&mut f, id, "a", (400, 80));
     let window = window_by_app_id(&mut f, "a").unwrap();
     f.state()
         .map_window(window.clone(), Point::from((0, 0)), false);
 
-    // Fill, and leave the client on its pre-fill size — nothing here re-anchors
-    // `restore_size`, so it is still 400×80 when the fullscreen enter reads it.
+    // Fill, and leave the client on its pre-fill size: the fill's saved size is
+    // that raw 400×80, while the fullscreen enter below captures the filled one.
     f.state().toggle_fill_window(&window);
     assert!(
         f.state().stage.is_fill(&window),
@@ -591,15 +587,15 @@ fn unfill_after_a_floored_fullscreen_exit_drops_the_stale_recenter() {
         "precondition: fill membership survives fullscreen"
     );
 
-    // Exit fullscreen: the restore size is the floored half-viewport, which the
-    // client does not have, so a recenter is left owed.
+    // Exit fullscreen: it restores the filled size, which the client never
+    // acked, so a recenter is left owed.
     let cw = f.client(id).window(&surface);
     cw.unset_fullscreen();
     f.double_roundtrip(id);
     let root = super::server_surface(&window);
     assert!(
         f.state().pending_recenter.contains_key(&root.id()),
-        "precondition: the floored fullscreen exit left a recenter owed"
+        "precondition: the fullscreen exit left a recenter owed"
     );
 
     // Unfill: the fill's saved 400×80 is the size the client still has, so this
@@ -638,6 +634,145 @@ fn unfill_after_a_floored_fullscreen_exit_drops_the_stale_recenter() {
         f.state().stage.position_of(&window),
         Some(dragged_to),
         "the resize must not teleport the window back toward the fullscreen exit's stale center"
+    );
+}
+
+/// Fill membership survives fullscreen deliberately, so the exit has to hand
+/// the window back the *filled* rect — position and size together. The size it
+/// saves has to come from the same era as the position it saves: a pre-fill
+/// `restore_size` paired with the current (filled) location brings the window
+/// back shrunken in the filled area's top-left corner, still believing it is
+/// filled.
+///
+/// The unfill afterwards is the other half — the pre-fill rect must still be
+/// where it goes home to.
+#[test]
+fn fullscreen_exit_restores_the_filled_rect_and_unfill_still_goes_home() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    // Fullscreen below moves the camera, which seeds a per-output blur
+    // generation that only clears on output disconnect, so it can never
+    // return to the pre-output baseline.
+    f.skip_baseline_check();
+    let id = f.add_client();
+
+    // An ordinary window: clear of `MIN_RESTORE_FLOOR` on both axes, and not the
+    // output's own size, so the pre-fill and filled rects can't coincide.
+    let surface = map_settled(&mut f, id, "a", (800, 600));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    let pre_fill_loc = Point::from((200, 150));
+    f.state().map_window(window.clone(), pre_fill_loc, false);
+    origin_view(&mut f);
+    let pre_fill = (pre_fill_loc, Size::from((800, 600)));
+
+    // Fill, and let the client adopt the filled size as a real one would.
+    f.state().toggle_fill_window(&window);
+    assert!(
+        f.state().stage.is_fill(&window),
+        "precondition: the fill ran"
+    );
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    let filled = (
+        f.state().stage.position_of(&window).unwrap(),
+        window.geometry().size,
+    );
+    assert_ne!(
+        filled, pre_fill,
+        "precondition: the fill both moved and grew the window"
+    );
+
+    f.state().enter_fullscreen(&window, Some(output.clone()));
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    assert!(
+        f.state().stage.is_fill(&window),
+        "precondition: fill membership survives fullscreen"
+    );
+
+    f.state().exit_fullscreen_on(&output);
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+
+    assert_eq!(
+        (
+            f.state().stage.position_of(&window).unwrap(),
+            window.geometry().size
+        ),
+        filled,
+        "the exit restores the whole filled rect, not a pre-fill size at the filled corner"
+    );
+    assert!(
+        f.state().stage.is_fill(&window),
+        "and the window is still filled"
+    );
+
+    // Unfill from there still goes home to the pre-fill rect.
+    f.state().toggle_fill_window(&window);
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    assert!(!f.state().stage.is_fill(&window));
+    assert_eq!(
+        (
+            f.state().stage.position_of(&window).unwrap(),
+            window.geometry().size
+        ),
+        pre_fill,
+        "unfill restores the pre-fill position and size"
+    );
+}
+
+/// The same restore when fullscreen beats the client's ack of the fill
+/// configure — two keypresses inside one frame. Committed geometry is still the
+/// pre-fill size there, so reading it would resurrect the very era mismatch the
+/// test above pins; the size last *configured* is what the filled position pairs
+/// with.
+#[test]
+fn fullscreen_exit_restores_the_filled_rect_when_it_beats_the_fill_ack() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+
+    let surface = map_settled(&mut f, id, "a", (800, 600));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((200, 150)), false);
+    origin_view(&mut f);
+
+    f.state().toggle_fill_window(&window);
+    assert!(
+        f.state().stage.is_fill(&window),
+        "precondition: the fill ran"
+    );
+    let filled_loc = f.state().stage.position_of(&window).unwrap();
+    assert_eq!(
+        window.geometry().size,
+        Size::from((800, 600)),
+        "precondition: the client has not acked the fill configure yet"
+    );
+
+    // Fullscreen straight through the un-acked fill, then back.
+    f.state().enter_fullscreen(&window, Some(output.clone()));
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    f.state().exit_fullscreen_on(&output);
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+
+    // Usable 1920×1080 minus a 12px gap on every side, no SSD bar or border on a
+    // default CSD window — the same rect `fill_grows_to_usable_minus_gap` pins.
+    assert_eq!(
+        (
+            f.state().stage.position_of(&window).unwrap(),
+            window.geometry().size
+        ),
+        (filled_loc, Size::from((1896, 1056))),
+        "the exit restores the filled rect the fill configured, not the size the client still had"
+    );
+    assert!(
+        f.state().stage.is_fill(&window),
+        "and the window is still filled"
     );
 }
 

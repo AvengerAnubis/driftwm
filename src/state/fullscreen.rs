@@ -137,10 +137,18 @@ impl DriftWm {
         let windowed_size = window.geometry().size;
         let pre_pin_site = self.stage.pin_of(window).cloned();
 
-        // If the window is fit, capture the fit-era geometry so exit_fullscreen
-        // restores it back to fit size with the fit state still intact. Otherwise
-        // prefer the restore size over geometry to dodge Chromium's CSD shrink spiral.
-        let saved_size = if self.stage.is_fit(window) {
+        // Fit and fill membership both survive fullscreen, so the exit has to
+        // hand the window back the rect the stage still believes it holds:
+        // capture a size from the same era as the `saved_location` above, not
+        // the pre-fit/pre-fill `restore_size`, which would pair a stale size
+        // with a current position. Fill reads the size last *configured*: a
+        // fullscreen pressed before the client acks the fill still finds
+        // committed geometry at the pre-fill size, at the filled position.
+        // Otherwise prefer the restore size over geometry to dodge Chromium's
+        // CSD shrink spiral.
+        let saved_size = if self.stage.is_fill(window) {
+            super::configured_window_size(window)
+        } else if self.stage.is_fit(window) {
             window.geometry().size
         } else {
             self.stage
