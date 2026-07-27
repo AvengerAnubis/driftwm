@@ -147,11 +147,11 @@ impl ClusterResizeSnapshot {
     /// cluster. Writes go through the stage (the map_window contract, inlined
     /// here because the grab owns this snapshot, not `DriftWm`).
     ///
-    /// Returns whether a member's *live* position actually changed this call
+    /// Returns the members whose *live* position actually changed this call
     /// (compared before each re-map, excluding the primary's z-raise re-map) —
-    /// the interactive-resize blur bump consumes this to catch a mid-tick
-    /// reflow on a size-constant tick. "Shifts non-empty" would over-report,
-    /// bumping every tick of a held cascade.
+    /// the interactive-resize blur bump and the animation take-down consume
+    /// this. "Shifts non-empty" would over-report, bumping every tick of a held
+    /// cascade.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_member_shifts(
         &mut self,
@@ -161,15 +161,15 @@ impl ClusterResizeSnapshot {
         new_w: i32,
         new_h: i32,
         gap: f64,
-    ) -> bool {
+    ) -> Vec<StageWindow> {
         if self.members.is_empty() {
-            return false;
+            return Vec::new();
         }
         let width_delta = new_w - initial_size.w;
         let height_delta = new_h - initial_size.h;
         let shifts = self.compute_shifts(stage, width_delta, height_delta, gap);
 
-        let mut moved = false;
+        let mut moved = Vec::new();
         for (i, (dx, dy)) in &shifts {
             let m = &self.members[*i];
             let Some(element) = m.window.resolve(stage) else {
@@ -179,7 +179,7 @@ impl ClusterResizeSnapshot {
             stage.clear_fill(&element);
             let new_pos = m.initial_pos + Point::from((*dx, *dy));
             if stage.position_of(&element) != Some(new_pos) {
-                moved = true;
+                moved.push(element.clone());
             }
             stage.map(element, new_pos);
         }

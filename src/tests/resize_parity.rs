@@ -153,7 +153,6 @@ fn install_client_resize_grab(
         touch_start: None,
         touch_slots: 0,
         locked_ratio: None,
-        ended_animation: false,
     };
 
     let pointer = f.state().seat.get_pointer().unwrap();

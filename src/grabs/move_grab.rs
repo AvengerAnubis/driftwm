@@ -80,10 +80,6 @@ pub struct MoveGrab {
     /// reassigning to whichever output the cursor is on — no snap, no cluster,
     /// no edge-pan (pinned windows ignore the camera).
     pinned_grab_offset: Option<Point<f64, Logical>>,
-    /// Whether this grab has already ended the animation entry it took the
-    /// element's geometry away from. Motion is high-frequency and the lookup is
-    /// a linear scan, so it runs once.
-    ended_animation: bool,
 }
 
 impl MoveGrab {
@@ -107,7 +103,6 @@ impl MoveGrab {
             cluster_members: to_cluster_members(cluster_members),
             last_mapped_loc: None,
             pinned_grab_offset: None,
-            ended_animation: false,
         }
     }
 
@@ -141,7 +136,6 @@ impl MoveGrab {
             cluster_members: to_cluster_members(cluster_members),
             last_mapped_loc: None,
             pinned_grab_offset: None,
-            ended_animation: false,
         }
     }
 
@@ -170,7 +164,6 @@ impl MoveGrab {
             cluster_members: Vec::new(),
             last_mapped_loc: None,
             pinned_grab_offset: Some(grab_offset),
-            ended_animation: false,
         }
     }
 
@@ -195,7 +188,6 @@ impl MoveGrab {
             cluster_members: Vec::new(),
             last_mapped_loc: None,
             pinned_grab_offset: Some(grab_offset),
-            ended_animation: false,
         }
     }
 
@@ -367,10 +359,6 @@ impl PointerGrab<DriftWm> for MoveGrab {
             return;
         };
 
-        // Every path below repositions the element, so the entry chasing it
-        // toward some earlier destination has lost its argument.
-        self.end_fought_animation(data, &element);
-
         if let Some(grab_offset) = self.pinned_grab_offset {
             let output = data
                 .focused_output
@@ -420,9 +408,9 @@ impl PointerGrab<DriftWm> for MoveGrab {
             // simply re-applies at new_primary_pos + offset.
             for (member, offset) in self.resolved_members(data) {
                 let member_pos = self.initial_window_location + offset;
-                data.map_window(member, member_pos, false);
+                crate::grabs::drag_map_window(data, member, member_pos);
             }
-            data.map_window(element.clone(), self.initial_window_location, false);
+            crate::grabs::drag_map_window(data, element.clone(), self.initial_window_location);
 
             // Output crossing always invalidates blur (different camera/zoom,
             // different background sample region).
@@ -513,6 +501,17 @@ impl MoveGrab {
         let new_screen_pos =
             Point::from((new_screen.x.round() as i32, new_screen.y.round() as i32));
         self.output = output.clone();
+        // A pinned window's geometry is its screen position: the canvas
+        // coordinate below moves with the camera while the window itself holds
+        // still, so only a changed screen position means the drag has taken the
+        // geometry away from a running entry (see `drag_map_window`).
+        if data
+            .stage
+            .pin_of(element)
+            .is_none_or(|site| site.screen_pos != new_screen_pos)
+        {
+            data.end_element_animation(element);
+        }
         // Guarded: the pin may have been toggled off mid-drag, and an
         // unconditional set_pin would silently re-pin.
         if data.stage.is_pinned(element) {
@@ -532,20 +531,6 @@ impl MoveGrab {
             data.render.blur_geometry_generation += 1;
             self.last_mapped_loc = Some(canvas);
         }
-    }
-
-    /// Take down the animation entry this drag is about to fight, once.
-    ///
-    /// Not at grab install: the SSD title bar installs a `MoveGrab` on every
-    /// left press, so cancelling there would pop a plain focus click's open fade
-    /// to full opacity. The first motion that actually repositions the element
-    /// is the moment the drag owns its geometry.
-    fn end_fought_animation(&mut self, data: &mut DriftWm, element: &StageWindow) {
-        if self.ended_animation {
-            return;
-        }
-        self.ended_animation = true;
-        data.end_element_animation(element);
     }
 
     /// Live `(StageWindow, offset)` pairs for the cluster members that still
@@ -598,9 +583,9 @@ impl MoveGrab {
         // which may surprise users whose members get hidden by outsiders.
         for (member, offset) in members {
             let member_pos = new_loc + offset;
-            data.map_window(member, member_pos, false);
+            crate::grabs::drag_map_window(data, member, member_pos);
         }
-        data.map_window(element.clone(), new_loc, false);
+        crate::grabs::drag_map_window(data, element.clone(), new_loc);
 
         // Sub-pixel motion that resolves to the same integer canvas position
         // doesn't actually shift the window, so blurred neighbours don't need
@@ -716,7 +701,6 @@ impl TouchGrab<DriftWm> for MoveGrab {
             handle.motion(data, None, event, seq);
             return;
         };
-        self.end_fought_animation(data, &element);
         // Pinned windows ignore the camera, so no edge-pan either.
         if let Some(grab_offset) = self.pinned_grab_offset {
             let output = self.output.clone();

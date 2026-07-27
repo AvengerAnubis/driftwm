@@ -4033,6 +4033,215 @@ fn a_drag_interrupting_a_fit_still_lands_its_parked_pan() {
     end_drag(&mut f);
 }
 
+/// The take-down waits for a geometry change, not for a motion *event*. A press
+/// that displaces nothing still gets motion: sub-pixel jitter truncates back to
+/// the same integer canvas position, and `warp_pointer` delivers every camera
+/// animation's compensating motion straight into a live grab. Ending on the
+/// event alone put a plain title-bar focus click back in the business of popping
+/// a running entry.
+#[test]
+fn a_move_motion_that_does_not_move_the_window_leaves_the_entry_alone() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    reset_view(&mut f);
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((200, 200)),
+        Size::from((300, 200)),
+        "n",
+        "N",
+    );
+    let element = standin_element(&mut f, sid);
+
+    f.state()
+        .map_window(element.clone(), Point::from((900, 200)), false);
+    f.state()
+        .animate_element_move_from(&element, Point::from((200, 200)), None);
+
+    let grab_at = Point::from((1000.0, 300.0));
+    assert!(f.state().try_start_gesture_move(grab_at, false));
+
+    motion(&mut f, grab_at + Point::from((0.4, 0.4)));
+    assert_eq!(
+        f.state().stage.position_of(&element),
+        Some(Point::from((900, 200))),
+        "precondition: sub-pixel motion truncates back to the same position"
+    );
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "a motion that moved nothing has taken nothing away from the slide"
+    );
+
+    motion(&mut f, grab_at + Point::from((60.0, 20.0)));
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "the first motion that does move it ends the slide"
+    );
+    end_drag(&mut f);
+}
+
+/// The resize half of the same rule: a motion too small to change the size sends
+/// no configure, so there is nothing for the entry to be fighting yet.
+#[test]
+fn a_resize_motion_that_does_not_resize_the_window_leaves_the_entry_alone() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((400, 300)), false);
+    tick_until_settled(&mut f);
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&window, serial);
+
+    f.state()
+        .execute_action(&Action::NudgeWindow(Direction::Right));
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "precondition: the nudge armed a chase"
+    );
+
+    let pos = f.state().stage.position_of(&window).unwrap();
+    let grab_at = Point::from((pos.x as f64 + 390.0, pos.y as f64 + 150.0));
+    assert!(f.state().try_start_gesture_resize(grab_at, false));
+
+    motion(&mut f, grab_at + Point::from((0.5, 0.0)));
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "a motion that drove no new size has taken nothing away from the chase"
+    );
+
+    motion(&mut f, grab_at + Point::from((40.0, 0.0)));
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "the first motion that does drive the size ends the chase"
+    );
+    end_drag(&mut f);
+}
+
+/// A cluster member is repositioned by every tick of the drag exactly as the
+/// primary is, and unlike the primary it is not under `interactive_move` — so an
+/// entry can be armed on it at any time and it has to be taken down on the same
+/// terms. Left running, the member holds its frozen picture still while the drag
+/// moves it, then rubber-bands when the chase releases.
+#[test]
+fn a_cluster_drag_ends_the_entry_a_member_fights() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    let member = StageWindow::Client(window.clone());
+
+    // A stand-in with the client adjacent on its right → one cluster.
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((400, 300)),
+        Size::from((400, 300)),
+        "s",
+        "S",
+    );
+    let gap = f.state().config.snap_gap as i32;
+    f.state()
+        .map_window(member.clone(), Point::from((800 + gap, 300)), false);
+    reset_view(&mut f);
+
+    // Something displaced the member; its slide is still running.
+    f.state()
+        .animate_element_move_from(&member, Point::from((800 + gap, 700)), None);
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "precondition: the member carries a chase"
+    );
+
+    // Cluster-drag the stand-in; the member rides the same delta.
+    let grab_at = Point::from((600.0, 450.0));
+    assert!(f.state().try_start_gesture_move(grab_at, true));
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "installing the grab alone leaves the member's chase alone"
+    );
+
+    motion(&mut f, grab_at + Point::from((100.0, 50.0)));
+    assert_eq!(
+        f.state().stage.position_of(&member),
+        Some(Point::from((900 + gap, 350))),
+        "precondition: the drag repositioned the member"
+    );
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "a repositioned member is fought on the same terms as the primary"
+    );
+    end_drag(&mut f);
+    f.state().dismiss_suspended(sid);
+}
+
+/// The resize half of the member rule: a cascade shifts its members through the
+/// stage directly, so the take-down rides the shifts the cascade reports rather
+/// than the primary's own configure.
+#[test]
+fn a_cluster_resize_ends_the_entry_a_shifted_member_fights() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    let member = StageWindow::Client(window.clone());
+
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((400, 300)),
+        Size::from((400, 300)),
+        "s",
+        "S",
+    );
+    let gap = f.state().config.snap_gap as i32;
+    f.state()
+        .map_window(member.clone(), Point::from((800 + gap, 300)), false);
+    reset_view(&mut f);
+
+    f.state()
+        .animate_element_move_from(&member, Point::from((800 + gap, 700)), None);
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "precondition: the member carries a chase"
+    );
+
+    // Right third of the stand-in → a right-edge resize; the member cascades.
+    let grab_at = Point::from((700.0, 450.0));
+    assert!(f.state().try_start_gesture_resize(grab_at, true));
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "installing the grab alone leaves the member's chase alone"
+    );
+
+    motion(&mut f, grab_at + Point::from((100.0, 0.0)));
+    assert_eq!(
+        f.state().stage.position_of(&member),
+        Some(Point::from((900 + gap, 300))),
+        "precondition: the cascade shifted the member"
+    );
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "a shifted member is fought on the same terms as the resized primary"
+    );
+    end_drag(&mut f);
+    f.state().dismiss_suspended(sid);
+}
+
 // A snapped fit's pushed cluster neighbours wait for the window pushing them:
 // `animate_element_move_from`'s `waits_for` parks a follower on whatever entry
 // it names until that entry's own start freeze releases, so the two move as one

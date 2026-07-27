@@ -949,7 +949,6 @@ impl DriftWm {
             touch_start: None,
             touch_slots: 0,
             locked_ratio: None,
-            ended_animation: false,
         };
         self.arm_interactive_move(&s.id);
         pointer.set_grab(self, grab, serial, Focus::Clear);
@@ -1250,7 +1249,6 @@ impl DriftWm {
             touch_start: None,
             touch_slots: 0,
             locked_ratio,
-            ended_animation: false,
         };
         pointer.set_grab(self, grab, serial, Focus::Clear);
         true

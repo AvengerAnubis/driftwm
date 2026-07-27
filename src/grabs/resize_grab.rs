@@ -209,10 +209,6 @@ pub struct ResizeGrab {
     /// Snapshotted from the window's size at grab start. Always `None` for a
     /// stand-in (the rule lookup needs a surface).
     pub locked_ratio: Option<f64>,
-    /// Whether this grab has already ended the animation entry it took the
-    /// element's geometry away from. Motion is high-frequency and the lookup is
-    /// a linear scan, so it runs once.
-    pub ended_animation: bool,
 }
 
 /// Check if `edges` includes a horizontal/vertical component via raw bit values.
@@ -263,13 +259,12 @@ impl PointerGrab<DriftWm> for ResizeGrab {
             return;
         }
 
-        // Both arms below drive the element's size, so the entry chasing it
-        // toward some earlier geometry has lost its argument.
-        self.end_fought_animation(data, &element);
-
         if self.pinned_initial_screen_pos.is_some() {
             if let StageWindow::Client(window) = &element {
-                let clamped = self.apply_pinned_resize(window, event.location);
+                let (clamped, resized) = self.apply_pinned_resize(window, event.location);
+                if resized {
+                    data.end_element_animation(&element);
+                }
                 let clamped_event = MotionEvent {
                     location: clamped,
                     serial: event.serial,
@@ -442,21 +437,21 @@ impl ResizeGrab {
             touch_start: Some(touch_start),
             touch_slots: slots,
             locked_ratio,
-            ended_animation: false,
         }
     }
 
     /// Screen-pinned resize step: size delta in output-relative screen space,
     /// no snap / cluster. Top/left-edge repositioning of `screen_pos` happens
     /// at commit (handle_resize_commit), mirroring the canvas path. Returns the
-    /// clamped canvas-space location the caller forwards. Shared by the pointer
-    /// and touch resize paths; pinned resize is client-only, so `window` is
-    /// always the resolved client.
+    /// clamped canvas-space location the caller forwards, and whether this step
+    /// actually drove the size — the caller ends a fought animation off that
+    /// (see `drag_map_window`). Shared by the pointer and touch resize paths;
+    /// pinned resize is client-only, so `window` is always the resolved client.
     fn apply_pinned_resize(
         &mut self,
         window: &Window,
         location: Point<f64, Logical>,
-    ) -> Point<f64, Logical> {
+    ) -> (Point<f64, Logical>, bool) {
         let (camera, zoom) = {
             let os = crate::state::output_state(&self.output);
             (os.camera, os.zoom)
@@ -489,7 +484,8 @@ impl ResizeGrab {
         (new_w, new_h) = self.bend_to_locked_ratio(new_w, new_h);
         let (new_w, new_h) = self.constraints.clamp(new_w, new_h);
         let new_size = Size::from((new_w, new_h));
-        if new_size != self.last_window_size {
+        let resized = new_size != self.last_window_size;
+        if resized {
             self.last_window_size = new_size;
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|state| {
@@ -499,20 +495,7 @@ impl ResizeGrab {
                 toplevel.send_pending_configure();
             }
         }
-        self.last_clamped_location
-    }
-
-    /// Take down the animation entry this resize is about to fight, once.
-    ///
-    /// Not at grab install, for the same reason the move grab doesn't: a grab
-    /// that never moves must leave a running animation alone. The first motion
-    /// that actually drives the size is where the resize owns the geometry.
-    fn end_fought_animation(&mut self, data: &mut DriftWm, element: &StageWindow) {
-        if self.ended_animation {
-            return;
-        }
-        self.ended_animation = true;
-        data.end_element_animation(element);
+        (self.last_clamped_location, resized)
     }
 
     /// Bend `(w, h)` onto the locked aspect ratio if the window carries one,
@@ -604,7 +587,7 @@ impl ResizeGrab {
         // neighbors. Treat a ratio-locked resize as single-window. Shifts run
         // every tick (not gated on size change): a member dying mid-tick can
         // reflow the cascade while the primary's size holds constant.
-        let members_moved = if self.locked_ratio.is_none() {
+        let moved_members = if self.locked_ratio.is_none() {
             self.cluster_resize.apply_member_shifts(
                 &mut data.stage,
                 element,
@@ -614,8 +597,15 @@ impl ResizeGrab {
                 data.config.snap_gap,
             )
         } else {
-            false
+            Vec::new()
         };
+        // A member is not under `interactive_move` — only the grab's own target
+        // is — so nothing stopped an entry from being armed on it, and the shift
+        // above has just taken its geometry away from that entry.
+        let members_moved = !moved_members.is_empty();
+        for member in moved_members {
+            data.end_element_animation(&member);
+        }
 
         let new_size = Size::from((new_w, new_h));
         // Computed before the per-arm tail, which updates `last_window_size`:
@@ -623,6 +613,9 @@ impl ResizeGrab {
         // below would never fire.
         let size_progressed = new_size != self.last_window_size;
         if size_progressed {
+            // The drag owns the geometry from the first tick that moves it, not
+            // from the first motion event — see `drag_map_window`.
+            data.end_element_animation(element);
             self.last_window_size = new_size;
             match element {
                 StageWindow::Client(window) => {
@@ -710,10 +703,12 @@ impl TouchGrab<DriftWm> for ResizeGrab {
             handle.motion(data, None, event, seq);
             return;
         };
-        self.end_fought_animation(data, &element);
         if self.pinned_initial_screen_pos.is_some() {
             if let StageWindow::Client(window) = &element {
-                let clamped = self.apply_pinned_resize(window, event.location);
+                let (clamped, resized) = self.apply_pinned_resize(window, event.location);
+                if resized {
+                    data.end_element_animation(&element);
+                }
                 let clamped_event = TouchMotionEvent {
                     slot: event.slot,
                     location: clamped,
