@@ -39,6 +39,25 @@ const MAX_TICKS: usize = 600;
 /// Comfortably past the 500ms endpoint-hold cap so an injected `now` releases it.
 const PAST_HOLD: Duration = Duration::from_millis(600);
 
+/// Deliver one pointer motion at canvas-space `loc` to the active grab.
+fn motion(f: &mut Fixture, loc: Point<f64, Logical>) {
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let event = smithay::input::pointer::MotionEvent {
+        location: loc,
+        serial: smithay::utils::SERIAL_COUNTER.next_serial(),
+        time: 0,
+    };
+    pointer.motion(f.state(), None, &event);
+}
+
+/// End a gesture drag the way `on_gesture_swipe_end` does — there's no button to
+/// release on a gesture.
+fn end_drag(f: &mut Fixture) {
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    pointer.unset_grab(f.state(), serial, 0);
+}
+
 fn dist(a: Point<f64, Logical>, b: Point<f64, Logical>) -> f64 {
     let dx = a.x - b.x;
     let dy = a.y - b.y;
@@ -3866,6 +3885,152 @@ fn cancelling_a_frozen_fit_drops_its_parked_pan() {
         f.state().camera_target().is_none(),
         "no late pan lands for a freeze that was cancelled, not released"
     );
+}
+
+/// A drag takes over the geometry of what it grabs, so the entry still chasing
+/// that element toward an earlier destination has to go — otherwise the window
+/// sits motionless under the cursor and rubber-bands over a full leg when the
+/// chase releases. The end happens on the first motion, not at grab install:
+/// the SSD title bar installs a move grab on every left press, including plain
+/// focus clicks.
+#[test]
+fn a_resize_drag_ends_the_entry_it_fights() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((400, 300)), false);
+    let eid = element_id(&mut f, &window);
+    tick_until_settled(&mut f);
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&window, serial);
+
+    // A nudge leaves the window travelling toward its new position.
+    f.state()
+        .execute_action(&Action::NudgeWindow(Direction::Right));
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "precondition: the nudge armed a chase"
+    );
+
+    // The user grabs the right edge before it lands.
+    let pos = f.state().stage.position_of(&window).unwrap();
+    let grab_at = Point::from((pos.x as f64 + 390.0, pos.y as f64 + 150.0));
+    assert!(f.state().try_start_gesture_resize(grab_at, false));
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "installing the grab alone leaves the chase alone"
+    );
+
+    motion(&mut f, grab_at + Point::from((40.0, 0.0)));
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "the first resizing motion ended the chase it was fighting"
+    );
+    assert!(
+        f.state()
+            .window_animations
+            .geometry_visual_rect(eid)
+            .is_none(),
+        "nothing overrides the live rect any more, so the window tracks the drag"
+    );
+    end_drag(&mut f);
+}
+
+/// The stand-in half of the same rule, through the other grab type: the bug's
+/// own repro is a stand-in displaced by a neighbour's fit and grabbed mid-slide.
+#[test]
+fn a_stand_in_drag_ends_the_entry_it_fights() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    reset_view(&mut f);
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((200, 200)),
+        Size::from((300, 200)),
+        "n",
+        "N",
+    );
+    let element = standin_element(&mut f, sid);
+
+    // Something displaced it; the slide is still running.
+    f.state()
+        .map_window(element.clone(), Point::from((900, 200)), false);
+    f.state()
+        .animate_element_move_from(&element, Point::from((200, 200)), None);
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "precondition: the slide armed an entry"
+    );
+
+    let grab_at = Point::from((1000.0, 300.0));
+    assert!(f.state().try_start_gesture_move(grab_at, false));
+    assert_eq!(
+        f.state().window_animations.len(),
+        1,
+        "installing the grab alone leaves the slide alone"
+    );
+
+    motion(&mut f, grab_at + Point::from((60.0, 20.0)));
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "the first moving motion ended the slide it was fighting"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&element),
+        Some(Point::from((960, 220))),
+        "and the stand-in tracks the finger from its stage position"
+    );
+    end_drag(&mut f);
+}
+
+/// Ending an entry is not cancelling one: a fit parks its whole camera move on
+/// the entry it freezes, and only that entry can ever hand it back. A drag takes
+/// the *window* away from the fit, not the viewport — so the pan still lands,
+/// unlike the `cancel_window_animation` above, which drops it deliberately.
+#[test]
+fn a_drag_interrupting_a_fit_still_lands_its_parked_pan() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    reset_view(&mut f);
+    f.state()
+        .map_window(window.clone(), Point::from((600, 400)), false);
+    tick_until_settled(&mut f);
+
+    f.state().fit_window(&window);
+    assert!(
+        f.state().camera_target().is_none(),
+        "precondition: the fit parked its pan behind the freeze"
+    );
+
+    // The user drags the window inside the freeze.
+    let pos = f.state().stage.position_of(&window).unwrap();
+    let grab_at = Point::from((pos.x as f64 + 100.0, pos.y as f64 + 100.0));
+    assert!(f.state().try_start_gesture_move(grab_at, false));
+    motion(&mut f, grab_at + Point::from((50.0, 20.0)));
+
+    assert_eq!(
+        f.state().window_animations.len(),
+        0,
+        "the drag ended the fit's entry"
+    );
+    assert!(
+        f.state().camera_target().is_some(),
+        "the pan parked on that entry still lands — the drag took the window \
+         away from the fit, not the view"
+    );
+    end_drag(&mut f);
 }
 
 // A snapped fit's pushed cluster neighbours wait for the window pushing them:

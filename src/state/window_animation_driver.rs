@@ -158,6 +158,24 @@ impl DriftWm {
         self.drop_resize_crossfade(id);
     }
 
+    /// End `element`'s animation because something else — a drag — has taken
+    /// control of its geometry, landing anything the entry still owed.
+    ///
+    /// Unlike [`Self::cancel_window_animation`], which discards a parked camera
+    /// move along with the entry, this applies it: a drag that interrupts a fit
+    /// still owes the viewport the pan that fit arranged, and the entry it takes
+    /// down is the only thing that could ever have handed it back.
+    pub(crate) fn end_element_animation(&mut self, element: &StageWindow) {
+        let Some(id) = self.stage.id_of(element) else {
+            return;
+        };
+        if let Some(pending) = self.window_animations.take_pending_view(id) {
+            self.apply_pending_view(pending);
+        }
+        self.window_animations.remove(id);
+        self.drop_resize_crossfade(id);
+    }
+
     /// Shared start path for every geometry chase: resolve the id, honor the
     /// interactive-grab guard, instant-complete (skip) when the seed rect
     /// intersects no drawable output, else (re)start the chase. `replace_visual`

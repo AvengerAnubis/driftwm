@@ -209,6 +209,10 @@ pub struct ResizeGrab {
     /// Snapshotted from the window's size at grab start. Always `None` for a
     /// stand-in (the rule lookup needs a surface).
     pub locked_ratio: Option<f64>,
+    /// Whether this grab has already ended the animation entry it took the
+    /// element's geometry away from. Motion is high-frequency and the lookup is
+    /// a linear scan, so it runs once.
+    pub ended_animation: bool,
 }
 
 /// Check if `edges` includes a horizontal/vertical component via raw bit values.
@@ -258,6 +262,10 @@ impl PointerGrab<DriftWm> for ResizeGrab {
             handle.motion(data, None, &clamped_event);
             return;
         }
+
+        // Both arms below drive the element's size, so the entry chasing it
+        // toward some earlier geometry has lost its argument.
+        self.end_fought_animation(data, &element);
 
         if self.pinned_initial_screen_pos.is_some() {
             if let StageWindow::Client(window) = &element {
@@ -434,6 +442,7 @@ impl ResizeGrab {
             touch_start: Some(touch_start),
             touch_slots: slots,
             locked_ratio,
+            ended_animation: false,
         }
     }
 
@@ -491,6 +500,19 @@ impl ResizeGrab {
             }
         }
         self.last_clamped_location
+    }
+
+    /// Take down the animation entry this resize is about to fight, once.
+    ///
+    /// Not at grab install, for the same reason the move grab doesn't: a grab
+    /// that never moves must leave a running animation alone. The first motion
+    /// that actually drives the size is where the resize owns the geometry.
+    fn end_fought_animation(&mut self, data: &mut DriftWm, element: &StageWindow) {
+        if self.ended_animation {
+            return;
+        }
+        self.ended_animation = true;
+        data.end_element_animation(element);
     }
 
     /// Bend `(w, h)` onto the locked aspect ratio if the window carries one,
@@ -688,6 +710,7 @@ impl TouchGrab<DriftWm> for ResizeGrab {
             handle.motion(data, None, event, seq);
             return;
         };
+        self.end_fought_animation(data, &element);
         if self.pinned_initial_screen_pos.is_some() {
             if let StageWindow::Client(window) = &element {
                 let clamped = self.apply_pinned_resize(window, event.location);

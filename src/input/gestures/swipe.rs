@@ -608,6 +608,7 @@ impl DriftWm {
             touch_start: None,
             touch_slots: 0,
             locked_ratio,
+            ended_animation: false,
         };
         let pointer = self.seat.get_pointer().unwrap();
         pointer.set_grab(self, grab, serial, Focus::Clear);

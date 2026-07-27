@@ -80,6 +80,10 @@ pub struct MoveGrab {
     /// reassigning to whichever output the cursor is on — no snap, no cluster,
     /// no edge-pan (pinned windows ignore the camera).
     pinned_grab_offset: Option<Point<f64, Logical>>,
+    /// Whether this grab has already ended the animation entry it took the
+    /// element's geometry away from. Motion is high-frequency and the lookup is
+    /// a linear scan, so it runs once.
+    ended_animation: bool,
 }
 
 impl MoveGrab {
@@ -103,6 +107,7 @@ impl MoveGrab {
             cluster_members: to_cluster_members(cluster_members),
             last_mapped_loc: None,
             pinned_grab_offset: None,
+            ended_animation: false,
         }
     }
 
@@ -136,6 +141,7 @@ impl MoveGrab {
             cluster_members: to_cluster_members(cluster_members),
             last_mapped_loc: None,
             pinned_grab_offset: None,
+            ended_animation: false,
         }
     }
 
@@ -164,6 +170,7 @@ impl MoveGrab {
             cluster_members: Vec::new(),
             last_mapped_loc: None,
             pinned_grab_offset: Some(grab_offset),
+            ended_animation: false,
         }
     }
 
@@ -188,6 +195,7 @@ impl MoveGrab {
             cluster_members: Vec::new(),
             last_mapped_loc: None,
             pinned_grab_offset: Some(grab_offset),
+            ended_animation: false,
         }
     }
 
@@ -359,6 +367,10 @@ impl PointerGrab<DriftWm> for MoveGrab {
             return;
         };
 
+        // Every path below repositions the element, so the entry chasing it
+        // toward some earlier destination has lost its argument.
+        self.end_fought_animation(data, &element);
+
         if let Some(grab_offset) = self.pinned_grab_offset {
             let output = data
                 .focused_output
@@ -520,6 +532,20 @@ impl MoveGrab {
             data.render.blur_geometry_generation += 1;
             self.last_mapped_loc = Some(canvas);
         }
+    }
+
+    /// Take down the animation entry this drag is about to fight, once.
+    ///
+    /// Not at grab install: the SSD title bar installs a `MoveGrab` on every
+    /// left press, so cancelling there would pop a plain focus click's open fade
+    /// to full opacity. The first motion that actually repositions the element
+    /// is the moment the drag owns its geometry.
+    fn end_fought_animation(&mut self, data: &mut DriftWm, element: &StageWindow) {
+        if self.ended_animation {
+            return;
+        }
+        self.ended_animation = true;
+        data.end_element_animation(element);
     }
 
     /// Live `(StageWindow, offset)` pairs for the cluster members that still
@@ -690,6 +716,7 @@ impl TouchGrab<DriftWm> for MoveGrab {
             handle.motion(data, None, event, seq);
             return;
         };
+        self.end_fought_animation(data, &element);
         // Pinned windows ignore the camera, so no edge-pan either.
         if let Some(grab_offset) = self.pinned_grab_offset {
             let output = self.output.clone();
