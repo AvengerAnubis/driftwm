@@ -3943,8 +3943,7 @@ fn a_resize_drag_ends_the_entry_it_fights() {
     end_drag(&mut f);
 }
 
-/// The stand-in half of the same rule, through the other grab type: the bug's
-/// own repro is a stand-in displaced by a neighbour's fit and grabbed mid-slide.
+/// The stand-in half of the same rule, through the other grab type.
 #[test]
 fn a_stand_in_drag_ends_the_entry_it_fights() {
     let mut f = Fixture::new();
