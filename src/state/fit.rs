@@ -14,9 +14,10 @@ use driftwm::window_ext::WindowExt;
 
 /// Build a `SnapRect` from a hypothetical canvas position, size, SSD
 /// bar, and border width — used by `fit_window_snapped` /
-/// `unfit_window_snapped` to compute exact per-edge deltas from the
-/// primary's pre-op and post-op geometry without round-tripping through
-/// `all_windows_with_snap_rects`.
+/// `unfit_window_snapped` to describe the primary's pre-op and post-op
+/// geometry, both for the exact per-edge deltas and for the primary's
+/// own entry in the rect list those paths cluster over
+/// (`snap_rects_with_primary`).
 fn snap_rect_at(
     loc: Point<i32, Logical>,
     size: Size<i32, Logical>,
@@ -238,6 +239,27 @@ impl DriftWm {
         }
     }
 
+    /// The live snap rects with `primary`'s own entry swapped for `rect` — the
+    /// rect it is becoming, rather than the one it still commits. Only the
+    /// primary can be mid-configure on these paths (a fit toggled straight out of
+    /// a fullscreen exit runs before the client acks the restore); every other
+    /// window's committed geometry is the authority, since a client-initiated
+    /// resize never updates the size we last configured.
+    #[allow(clippy::mutable_key_type)]
+    fn snap_rects_with_primary(
+        &self,
+        primary: &StageWindow,
+        rect: driftwm::layout::snap::SnapRect,
+    ) -> Vec<(StageWindow, driftwm::layout::snap::SnapRect)> {
+        let mut rects = self.all_windows_with_snap_rects();
+        // A primary with no rect of its own (widget, pinned, unmapped) stays
+        // absent, which is what degrades its cluster to `{self}`.
+        if let Some((_, r)) = rects.iter_mut().find(|(w, _)| w == primary) {
+            *r = rect;
+        }
+        rects
+    }
+
     /// Translate snapped cluster members to follow the primary's resize
     /// from `old_rect` to `new_rect`. Works for arbitrary asymmetric edge
     /// movements — per-side deltas are derived directly from the rects, so
@@ -275,10 +297,17 @@ impl DriftWm {
         ));
         let gap = self.config.snap_gap;
 
+        // Both passes classify the cluster against `old_rect`, the very rect the
+        // deltas above are measured from, so membership can never disagree with
+        // the shift it feeds. Rebuilt per pass, since the BR pass moves members.
+
         // BR pass: right members shift by +dx_right (= width_delta),
         // bottom members shift by +dy_bottom (= height_delta).
-        let mut br =
-            self.cluster_snapshot_for_resize(&primary, xdg_toplevel::ResizeEdge::BottomRight);
+        let mut br = self.cluster_snapshot_for_resize_with_rects(
+            &primary,
+            xdg_toplevel::ResizeEdge::BottomRight,
+            &self.snap_rects_with_primary(&primary, old_rect),
+        );
         br.apply_member_shifts(
             &mut self.stage,
             &primary,
@@ -291,7 +320,11 @@ impl DriftWm {
         // TL pass: left members shift by `-width_delta`, so width_delta = -dx_left
         // (left edge moves left → dx_left is negative → width_delta positive →
         // left members shift by dx_left). Same reasoning for top.
-        let mut tl = self.cluster_snapshot_for_resize(&primary, xdg_toplevel::ResizeEdge::TopLeft);
+        let mut tl = self.cluster_snapshot_for_resize_with_rects(
+            &primary,
+            xdg_toplevel::ResizeEdge::TopLeft,
+            &self.snap_rects_with_primary(&primary, old_rect),
+        );
         tl.apply_member_shifts(
             &mut self.stage,
             &primary,
@@ -312,29 +345,27 @@ impl DriftWm {
         let Some(old_loc) = self.stage.position_of(window) else {
             return;
         };
-        let old_size = self
-            .stage
-            .restore_size(window)
-            .unwrap_or_else(|| window.geometry().size);
+        // Last configured, not last committed, for the same reason as
+        // `unfit_window_snapped`. The restore size can't stand in for it: a
+        // fullscreen entry that rewrote an undersized `saved_size` (see
+        // `MIN_RESTORE_FLOOR`) leaves the two describing different rects.
+        let old_size = super::configured_window_size(window);
         let bar = self.window_ssd_bar(window);
         let bw = self.window_border_width(&wl_surface);
         let fit = self.compute_fit_geometry(window);
         let old_rect = snap_rect_at(old_loc, old_size, bar, bw);
         let new_rect = snap_rect_at(fit.new_loc, fit.target_size, bar, bw);
+        let primary = StageWindow::Client(window.clone());
         // Capture the cluster before shifting — members' caches must follow
         // their new live positions, or close-time `cluster_of` sees stale
         // cache vs shifted live and can't reconstruct the cluster.
         #[allow(clippy::mutable_key_type)]
         let cluster_members: Vec<StageWindow> = {
-            let rects = self.all_windows_with_snap_rects();
-            driftwm::layout::cluster::cluster_of(
-                &StageWindow::Client(window.clone()),
-                &rects,
-                self.config.snap_gap,
-            )
-            .into_iter()
-            .filter(|w| w != window)
-            .collect()
+            let rects = self.snap_rects_with_primary(&primary, old_rect);
+            driftwm::layout::cluster::cluster_of(&primary, &rects, self.config.snap_gap)
+                .into_iter()
+                .filter(|w| w != window)
+                .collect()
         };
         let primary_id = self.stage.id_of(window);
         let old_member_locs = self.cluster_member_positions(&cluster_members);
@@ -370,18 +401,15 @@ impl DriftWm {
         let new_loc = super::frame_loc_for_center(center, saved_size, bar);
         let old_rect = snap_rect_at(old_loc, old_size, bar, bw);
         let new_rect = snap_rect_at(new_loc, saved_size, bar, bw);
+        let primary = StageWindow::Client(window.clone());
         // See `fit_window_snapped` for why we refresh member caches here.
         #[allow(clippy::mutable_key_type)]
         let cluster_members: Vec<StageWindow> = {
-            let rects = self.all_windows_with_snap_rects();
-            driftwm::layout::cluster::cluster_of(
-                &StageWindow::Client(window.clone()),
-                &rects,
-                self.config.snap_gap,
-            )
-            .into_iter()
-            .filter(|w| w != window)
-            .collect()
+            let rects = self.snap_rects_with_primary(&primary, old_rect);
+            driftwm::layout::cluster::cluster_of(&primary, &rects, self.config.snap_gap)
+                .into_iter()
+                .filter(|w| w != window)
+                .collect()
         };
         let primary_id = self.stage.id_of(window);
         let old_member_locs = self.cluster_member_positions(&cluster_members);

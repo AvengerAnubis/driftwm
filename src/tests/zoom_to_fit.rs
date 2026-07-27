@@ -178,3 +178,106 @@ fn fitting_straight_out_of_fullscreen_centers_the_window() {
         "fit window centre {center:?} should sit at the usable centre ({want_x}, {want_y})"
     );
 }
+
+/// A snapped fit out of a fullscreen exit must still push both its neighbours
+/// aside. The client is still committing viewport-sized buffers when the fit
+/// runs, and cluster membership read off that live size sees a primary rect that
+/// swallows the right-hand neighbour rather than sitting a gap away from it — so
+/// nothing is adjacent, the cluster degrades to the primary alone, and both
+/// passes no-op. The left-hand neighbour rides the `TopLeft` pass, and its
+/// adjacency turns on its own far edge rather than the primary's: only the
+/// primary is mid-configure, so everything else has to be measured from what it
+/// has actually committed.
+#[test]
+fn fitting_snapped_out_of_fullscreen_still_pushes_its_neighbours() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let gap = f.state().config.snap_gap as i32;
+    let id = f.add_client();
+
+    let surface = map_window(&mut f, id, "primary", (400, 300));
+    let primary = window_by_app_id(&mut f, "primary").unwrap();
+    f.state()
+        .map_window(primary.clone(), Point::from((900, 300)), false);
+
+    let side_w = 300;
+    map_window(&mut f, id, "right", (300, 300));
+    let right = window_by_app_id(&mut f, "right").unwrap();
+    f.state()
+        .map_window(right.clone(), Point::from((900 + 400 + gap, 300)), false);
+
+    map_window(&mut f, id, "left", (300, 300));
+    let left = window_by_app_id(&mut f, "left").unwrap();
+    f.state()
+        .map_window(left.clone(), Point::from((900 - gap - side_w, 300)), false);
+    settle(&mut f);
+
+    f.state().enter_fullscreen(&primary, Some(output.clone()));
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+
+    // Exit + fit back-to-back, exactly as `execute_action` does for a fit
+    // binding pressed while fullscreen.
+    f.state().exit_fullscreen_on(&output);
+    f.state().fit_window_snapped(&primary);
+
+    // Borders are off by default, so the frame edges the expectations walk are
+    // the content edges.
+    let loc = f.state().stage.position_of(&primary).unwrap();
+    let size = crate::state::configured_window_size(&primary);
+    assert_eq!(
+        f.state().stage.position_of(&right).unwrap(),
+        Point::from((loc.x + size.w + gap, 300)),
+        "the right neighbour tracks the fitted primary's right edge"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&left).unwrap(),
+        Point::from((loc.x - gap - side_w, 300)),
+        "the left neighbour tracks the fitted primary's left edge"
+    );
+}
+
+/// The mirror case: a snapped unfit out of a fullscreen exit must pull the
+/// neighbour the fit pushed aside back in, or it is left stranded at the fit's
+/// spacing.
+#[test]
+fn unfitting_snapped_out_of_fullscreen_still_pulls_the_neighbour_back() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let gap = f.state().config.snap_gap as i32;
+    let id = f.add_client();
+
+    let surface = map_window(&mut f, id, "primary", (400, 300));
+    let primary = window_by_app_id(&mut f, "primary").unwrap();
+    f.state().fit_window(&primary);
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    settle(&mut f);
+
+    let fit_loc = f.state().stage.position_of(&primary).unwrap();
+    let fit_size = primary.geometry().size;
+    map_window(&mut f, id, "neighbour", (300, 300));
+    let neighbour = window_by_app_id(&mut f, "neighbour").unwrap();
+    f.state().map_window(
+        neighbour.clone(),
+        Point::from((fit_loc.x + fit_size.w + gap, fit_loc.y)),
+        false,
+    );
+
+    f.state().enter_fullscreen(&primary, Some(output.clone()));
+    f.double_roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+
+    f.state().exit_fullscreen_on(&output);
+    f.state().unfit_window_snapped(&primary);
+
+    let loc = f.state().stage.position_of(&primary).unwrap();
+    let size = crate::state::configured_window_size(&primary);
+    assert_eq!(
+        f.state().stage.position_of(&neighbour).unwrap(),
+        Point::from((loc.x + size.w + gap, fit_loc.y)),
+        "the neighbour tracks the unfitted primary's right edge back in"
+    );
+}

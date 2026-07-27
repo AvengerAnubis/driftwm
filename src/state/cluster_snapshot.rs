@@ -471,7 +471,23 @@ impl DriftWm {
         members
     }
 
-    /// Snapshot focused window's cluster for a resize drag.
+    /// Snapshot focused window's cluster for a resize drag, classified against
+    /// live committed geometry — what an interactive resize wants.
+    pub fn cluster_snapshot_for_resize(
+        &self,
+        window: &StageWindow,
+        edges: xdg_toplevel::ResizeEdge,
+    ) -> ClusterResizeSnapshot {
+        self.cluster_snapshot_for_resize_with_rects(
+            window,
+            edges,
+            &self.all_windows_with_snap_rects(),
+        )
+    }
+
+    /// [`Self::cluster_snapshot_for_resize`] over a caller-supplied rect list, so
+    /// the fit paths can classify against the pre-op primary rect their deltas
+    /// are measured from rather than the size the client still commits.
     ///
     /// Three-step classification per active resize edge:
     ///   1. **Seed**: primary's direct neighbors on that edge.
@@ -483,18 +499,18 @@ impl DriftWm {
     //
     // Same Arc-identity rationale as `cluster_snapshot_for_drag`.
     #[allow(clippy::mutable_key_type)]
-    pub fn cluster_snapshot_for_resize(
+    pub fn cluster_snapshot_for_resize_with_rects(
         &self,
         window: &StageWindow,
         edges: xdg_toplevel::ResizeEdge,
+        rects: &[(StageWindow, driftwm::layout::snap::SnapRect)],
     ) -> ClusterResizeSnapshot {
         use crate::grabs::{has_bottom, has_left, has_right, has_top};
         use driftwm::layout::cluster::{Side, adjacent_side, cluster_of};
         use driftwm::layout::snap::SnapRect;
 
-        let rects = self.all_windows_with_snap_rects();
         let gap = self.config.snap_gap;
-        let full = cluster_of(window, &rects, gap);
+        let full = cluster_of(window, rects, gap);
 
         // Primary's SnapRect for downstream filter; bail empty if absent
         // (widget, unmapped).
@@ -511,7 +527,7 @@ impl DriftWm {
             let mut set: HashSet<StageWindow> = HashSet::new();
             let mut queue: std::collections::VecDeque<StageWindow> =
                 std::collections::VecDeque::new();
-            for (w, r) in &rects {
+            for (w, r) in rects {
                 if w == window {
                     continue;
                 }
@@ -535,7 +551,7 @@ impl DriftWm {
                 let Some(cur_rect) = rect_of.get(&current).copied() else {
                     continue;
                 };
-                for (w, r) in &rects {
+                for (w, r) in rects {
                     if w == window || set.contains(w) || !full.contains(w) {
                         continue;
                     }
