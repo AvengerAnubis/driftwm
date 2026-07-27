@@ -230,6 +230,8 @@ workspaces; driftwm is still one canvas.
 
 ### Window suspend & session restore
 
+https://github.com/user-attachments/assets/a91d92bd-55af-4646-8be8-81f35f8f38ca
+
 Close a window and leave a placeholder behind instead of losing it:
 `suspend-window` swaps the window for a compositor-drawn stand-in at the same
 canvas spot — press `Enter` or click its name to bring the app right back, in
