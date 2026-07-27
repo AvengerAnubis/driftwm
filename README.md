@@ -244,7 +244,7 @@ See [docs/session.md](docs/session.md).
 
 ### Everything else
 
-- New window placement: in viewport center (default), under cursor, or snapped adjacent to whatever is in view — the focused window while it stays visible enough, otherwise the nearest element on screen, suspended stand-ins included
+- New window placement: in viewport center (default), under cursor, or snapped adjacent to whatever is in view
 - Click-to-focus (default) or focus-follows-mouse (sloppy focus)
 - Hot corners: any keybinding action fires when the cursor reaches a screen corner, configured per monitor
 - Cursor edge-pan: push the pointer against a screen edge and the viewport pans, toggled with `Mod+E`
@@ -315,8 +315,21 @@ Then, enable it in your configuration:
 }
 ```
 
-Non-flake setup and module options are at the [end of this
-section](#nixos-without-flakes).
+Without flakes, import the flake's output directly:
+
+```nix
+let
+  driftwm-flake = builtins.getFlake "github:malbiruk/driftwm";
+in
+{
+  imports = [ driftwm-flake.nixosModules.default ];
+  programs.driftwm.enable = true;
+}
+```
+
+`programs.driftwm.package` selects the package providing the compositor binary.
+XWayland via `xwayland-satellite` is on by default; set
+`programs.xwayland.enable = false;` to disable it.
 
 ### Build from source
 
@@ -406,24 +419,6 @@ transparently — no extra config beyond having the binary in `$PATH`.
 If satellite isn't found at startup, driftwm logs a warning and continues without
 X11 support. You can override the binary path or disable the integration in
 [`config.reference.toml`](config.reference.toml) under `[xwayland]`.
-
-### NixOS without flakes
-
-Import the flake's output directly:
-
-```nix
-let
-  driftwm-flake = builtins.getFlake "github:malbiruk/driftwm";
-in
-{
-  imports = [ driftwm-flake.nixosModules.default ];
-  programs.driftwm.enable = true;
-}
-```
-
-`programs.driftwm.package` selects the package providing the compositor binary.
-XWayland via `xwayland-satellite` is on by default; set
-`programs.xwayland.enable = false;` to disable it.
 
 ## Configuration
 
