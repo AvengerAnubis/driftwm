@@ -224,6 +224,9 @@ https://github.com/user-attachments/assets/31c235e6-baae-4843-bb43-aca749e41f04
 
 Layer shell surfaces (waybar, fuzzel, mako) work as expected. Docks and taskbars
 see every window — click one and the viewport pans to it and centers it.
+Bookmarks are exported as workspaces over `ext-workspace-v1` — bars that support
+it can list them and click to jump. It's an export for tooling, not real
+workspaces; driftwm is still one canvas.
 
 ### Window suspend & session restore
 
