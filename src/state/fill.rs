@@ -203,7 +203,9 @@ impl DriftWm {
         if saved_size == pre_exit_size {
             // The exit configure re-sends the size the client already has, so no
             // commit with a changed size will arrive to trigger the recenter — the
-            // position restored above is already final.
+            // position restored above is already final. A preceding fullscreen
+            // exit can have owed one already, so drop rather than merely skip.
+            self.drop_owed_recenter(window);
             self.refresh_stable_snap_rect(&StageWindow::Client(window.clone()));
         } else {
             self.pending_recenter.insert(
