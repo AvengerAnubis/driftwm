@@ -41,10 +41,12 @@ jobs:
         run: dev/scripts/build-docs-site
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: target/docs-site/book
+          # mdBook emits a .nojekyll; the action drops dotfiles by default.
+          include-hidden-files: true
 
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
