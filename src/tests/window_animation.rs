@@ -2728,7 +2728,7 @@ fn a_frozen_resize_that_moves_off_screen_is_still_drawn() {
 }
 
 /// A resize below the sub-threshold floor carries no request at all — nothing
-/// worth freezing over (`MIN_ANIMATED_RESIZE` in `state::animation`).
+/// worth freezing over (`MIN_ANIMATED_RESIZE` in `state::window_animation`).
 #[test]
 fn a_sub_threshold_resize_carries_no_request() {
     let mut f = Fixture::new();

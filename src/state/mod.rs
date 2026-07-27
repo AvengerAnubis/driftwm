@@ -1,4 +1,3 @@
-mod animation;
 mod cluster_snapshot;
 mod cursor;
 mod errors;
@@ -18,6 +17,7 @@ mod session_store;
 mod stage_window;
 mod suspended;
 mod viewport;
+mod viewport_animation;
 pub(crate) mod window_animation;
 mod window_animation_driver;
 pub use cluster_snapshot::{ClusterMember, ClusterResizeSnapshot};
