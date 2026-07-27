@@ -99,11 +99,8 @@ impl DriftWm {
             visual_center: center,
         } = self.compute_fit_geometry(window);
 
-        // A fit establishes its own placement, so an exit recenter still owed
-        // from the fullscreen/fill exit that preceded it must not fire: it would
-        // land on the client's next resize and yank the fitted window back to the
-        // pre-exit center (`enter_fullscreen` drops it for the same reason).
-        self.pending_recenter.remove(&wl_surface.id());
+        // A fit establishes its own placement.
+        self.drop_owed_recenter(window);
 
         // A freeze this fit arms of its own accord is the only one allowed to
         // hold its pan back, and a request-carrying (re)start is what bumps the
@@ -212,10 +209,9 @@ impl DriftWm {
         if saved_size == pre_exit_size {
             // The exit configure re-sends the size the client already has, so no
             // commit with a changed size will arrive to trigger the recenter — the
-            // position restored above is already final, and an entry left owed
-            // would gate the reflow forever. A preceding fullscreen exit can have
-            // owed one already, so drop rather than merely skip.
-            self.pending_recenter.remove(&wl_surface.id());
+            // position restored above is already final. A preceding fullscreen
+            // exit can have owed one already, so drop rather than merely skip.
+            self.drop_owed_recenter(window);
             // Refresh the cache the recenter completion would otherwise have
             // refreshed (`unfill_window` does the same); the fit rect cached by
             // `fit_window_snapped` is stale now.

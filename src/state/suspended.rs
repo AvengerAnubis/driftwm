@@ -436,11 +436,10 @@ impl DriftWm {
             self.drop_resize_crossfade(id);
         }
 
-        // The adopt places the window in the stand-in's slot, so a recenter still
-        // owed from a fullscreen/fit/fill exit it hasn't acked must not fire: the
-        // adopt configure's resize would complete the settle and re-map the window
-        // to the pre-exit center, out of the slot the hold below is drawing it in.
-        self.pending_recenter.remove(&root.id());
+        // The adopt places the window in the stand-in's slot; the adopt
+        // configure's own resize is exactly the commit an owed recenter would
+        // complete on.
+        self.drop_owed_recenter(window);
 
         // Compound replace: the fresh entry must leave before the suspended
         // entry is replaced, or the same window would sit in two z-slots and

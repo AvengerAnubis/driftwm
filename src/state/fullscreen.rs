@@ -126,14 +126,9 @@ impl DriftWm {
             self.exit_fullscreen_on(&output);
         }
 
-        // A re-fullscreen mid-settle must drop any outstanding exit recenter for
-        // this window (a prior fullscreen/fit/fill exit, or the same-window
-        // cross-output exit just above): otherwise the settle completion fires on
-        // a fullscreen-sized commit and maps the now-fullscreen window to a
-        // recentered position.
-        if let Some(surface) = window.wl_surface() {
-            self.pending_recenter.remove(&surface.id());
-        }
+        // The exit this supersedes can be the same-window cross-output one just
+        // above, not only a prior fullscreen/fit/fill exit.
+        self.drop_owed_recenter(window);
 
         let viewport_size = super::output_logical_size(&output);
         let saved_location = self.stage.position_of(window).unwrap_or_default();

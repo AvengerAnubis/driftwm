@@ -160,11 +160,8 @@ impl DriftWm {
             return;
         };
 
-        // A fill places the window absolutely, so a recenter still owed from the
-        // fullscreen/fill exit that preceded it must not fire: it would land on
-        // the client's next resize and drag the filled window to the pre-exit
-        // center (`enter_fullscreen` and `fit_window` drop it for the same reason).
-        self.pending_recenter.remove(&wl_surface.id());
+        // A fill places the window absolutely.
+        self.drop_owed_recenter(window);
 
         self.animate_window_geometry(window, new_size, None);
         self.send_size_configure(window, new_size);

@@ -27,6 +27,7 @@ mod output;
 pub mod persistence;
 mod pinned;
 mod placement;
+mod recenter;
 mod redraw;
 mod reload;
 mod render_cache;

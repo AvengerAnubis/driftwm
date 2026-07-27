@@ -1,6 +1,5 @@
 use smithay::{
     input::keyboard::Layout,
-    reexports::wayland_server::Resource,
     utils::{Logical, Point, Rectangle, Size},
     wayland::seat::WaylandFocus,
 };
@@ -106,11 +105,8 @@ impl DriftWm {
                         (uy * step as f64).round() as i32,
                     );
                     let new_loc = loc + Point::from(offset);
-                    // The nudge is the window's new position, so a recenter owed
-                    // from a preceding fullscreen exit must not fire and undo it.
-                    if let Some(surface) = window.wl_surface() {
-                        self.pending_recenter.remove(&surface.id());
-                    }
+                    // The nudge is the window's new position.
+                    self.drop_owed_recenter(&window);
                     self.map_window(window.clone(), new_loc, false);
                     self.animate_window_move_from(&window, loc, None);
                 }
@@ -401,11 +397,8 @@ impl DriftWm {
                             .unwrap_or_else(|| window.geometry().size);
                         let loc = canvas::rule_to_internal(rx, ry, size);
                         self.stage.clear_fill(&window);
-                        // The bookmark is the window's new position, so a recenter
-                        // owed from that exit must not fire and drag it back.
-                        if let Some(surface) = window.wl_surface() {
-                            self.pending_recenter.remove(&surface.id());
-                        }
+                        // The bookmark is the window's new position.
+                        self.drop_owed_recenter(&window);
                         self.map_window(window.clone(), loc, true);
                     }
                     Some(StageWindow::Suspended(s)) => {
@@ -722,13 +715,10 @@ impl DriftWm {
         let pre_toggle = output.and_then(|output| self.window_screen_rect_on(&window, &output));
         // Pin/unpin flips the chase space (canvas ↔ screen); an in-flight entry
         // would keep a stale-space visual, so drop it — along with any parked
-        // pan and stashed capture belonging to the transition it supersedes. A
-        // recenter owed from a preceding fullscreen exit goes too — it would
-        // re-place the window after the pin decided where it lives.
+        // pan and stashed capture belonging to the transition it supersedes.
         self.cancel_window_animation(&window);
-        if let Some(surface) = window.wl_surface() {
-            self.pending_recenter.remove(&surface.id());
-        }
+        // The pin decides where the window lives from here on.
+        self.drop_owed_recenter(&window);
         if let Some(site) = self.stage.take_pin(&window) {
             // Unpin: convert the fixed screen position back to a canvas
             // location at the current camera/zoom — no visual jump.
