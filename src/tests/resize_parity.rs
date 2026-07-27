@@ -5,9 +5,9 @@
 //! their existing behavior.
 //!
 //! Client grabs are installed directly via the public `ResizeGrab` struct
-//! literal (seeding `ResizeState::Resizing` the way the xdg-shell handler
-//! would, so `handle_resize_commit` reposition/settle runs instead of
-//! early-returning). Suspended grabs run through the real `try_suspended_button`
+//! literal, over the same `begin_client_resize` the real entry points run, so
+//! `handle_resize_commit` reposition/settle runs instead of early-returning.
+//! Suspended grabs run through the real `try_suspended_button`
 //! button path so the cursor and cluster install exactly as production drives
 //! them — the single-motion precedent in `suspended.rs`.
 //!
@@ -104,8 +104,8 @@ fn start_suspended_resize(f: &mut Fixture, click: Point<f64, Logical>) {
         .try_suspended_button(&pointer, click, BTN_LEFT, serial, held);
 }
 
-/// Install a live client [`ResizeGrab`] over `window`, seeding the
-/// `ResizeState::Resizing` the xdg-shell handler would have set so
+/// Install a live client [`ResizeGrab`] over `window`, entering the resize
+/// through the same `begin_client_resize` the real entry points run so
 /// `handle_resize_commit` runs its reposition/settle logic. `start` is the
 /// canvas-space grab origin; the size delta is measured from there.
 fn install_client_resize_grab(
@@ -124,18 +124,14 @@ fn install_client_resize_grab(
     let initial_window_size = window.geometry().size;
 
     let surface = server_surface(window);
-    with_states(&surface, |states| {
-        states
-            .data_map
-            .get_or_insert(|| RefCell::new(ResizeState::Idle))
-            .replace(ResizeState::Resizing {
-                edges,
-                initial_window_location,
-                initial_window_size,
-                initial_screen_pos: None,
-                last_committed_size: initial_window_size,
-            });
-    });
+    f.state().begin_client_resize(
+        window,
+        &surface,
+        edges,
+        initial_window_location,
+        initial_window_size,
+        None,
+    );
 
     let grab = ResizeGrab {
         start_data: GrabStartData {

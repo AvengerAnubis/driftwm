@@ -1,6 +1,4 @@
-use std::cell::RefCell;
-
-use crate::grabs::{MoveGrab, ResizeGrab, ResizeState};
+use crate::grabs::{MoveGrab, ResizeGrab};
 use crate::state::{
     ClusterMember, DriftWm, FocusTarget, PopupGrabState, StageWindow, output_logical_size,
     output_state,
@@ -24,7 +22,6 @@ use smithay::{
     },
     utils::{IsAlive, Logical, Point, Rectangle, Serial},
     wayland::{
-        compositor::with_states,
         input_method::InputMethodSeat,
         seat::WaylandFocus,
         shell::{
@@ -529,10 +526,6 @@ impl XdgShellHandler for DriftWm {
             return;
         };
 
-        // Clear fit/fill state — user took manual control
-        self.stage.clear_fit(&window);
-        self.stage.clear_fill(&window);
-
         // Pinned windows resize in screen space (see start_compositor_resize_with_edge).
         let pinned_site = self.stage.pin_of(&window).cloned();
         let pinned_initial_screen_pos = pinned_site.as_ref().map(|s| s.screen_pos);
@@ -540,27 +533,14 @@ impl XdgShellHandler for DriftWm {
             .as_ref()
             .and_then(|s| self.output_by_name(&s.output));
 
-        // Store resize state in the surface data map for commit() repositioning
-        with_states(&wl_surface, |states| {
-            states
-                .data_map
-                .get_or_insert(|| RefCell::new(ResizeState::Idle))
-                .replace(ResizeState::Resizing {
-                    edges,
-                    initial_window_location,
-                    initial_window_size,
-                    initial_screen_pos: pinned_initial_screen_pos,
-                    last_committed_size: initial_window_size,
-                });
-        });
-
-        surface.with_pending_state(|state| {
-            state.states.set(xdg_toplevel::State::Resizing);
-            // Mirror the fit-state clear above, or the client keeps a Maximized
-            // it can no longer shed — its restore button would dispatch an
-            // unmaximize_request that `unfit_window` silently drops.
-            state.states.unset(xdg_toplevel::State::Maximized);
-        });
+        self.begin_client_resize(
+            &window,
+            &wl_surface,
+            edges,
+            initial_window_location,
+            initial_window_size,
+            pinned_initial_screen_pos,
+        );
 
         self.cursor.grab_cursor = true;
         self.cursor.cursor_status = CursorImageStatus::Named(resize_cursor(edges));

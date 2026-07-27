@@ -1,10 +1,9 @@
 use std::any::Any;
-use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
 use crate::decorations::DecorationHit;
-use crate::grabs::{MoveGrab, ResizeGrab, ResizeState, TouchGestureGrab, edge_from_origin};
+use crate::grabs::{MoveGrab, ResizeGrab, TouchGestureGrab, edge_from_origin};
 use crate::input::DecoTarget;
 use crate::state::{
     ClusterMember, DriftWm, FocusTarget, SessionLock, StageWindow, SuspendedWindow, output_state,
@@ -25,10 +24,7 @@ use smithay::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
     },
     utils::{IsAlive, Logical, Point, SERIAL_COUNTER},
-    wayland::{
-        compositor::{get_parent, with_states},
-        seat::WaylandFocus,
-    },
+    wayland::{compositor::get_parent, seat::WaylandFocus},
 };
 
 /// How long touch events are withheld from the app after each finger lands,
@@ -395,28 +391,14 @@ impl DriftWm {
             .and_then(|s| self.output_by_name(&s.output))
             .unwrap_or(output);
 
-        self.stage.clear_fit(&window);
-        self.stage.clear_fill(&window);
-
-        with_states(&wl_surface, |states| {
-            states
-                .data_map
-                .get_or_insert(|| RefCell::new(ResizeState::Idle))
-                .replace(ResizeState::Resizing {
-                    edges,
-                    initial_window_location,
-                    initial_window_size,
-                    initial_screen_pos: pinned_initial_screen_pos,
-                    last_committed_size: initial_window_size,
-                });
-        });
-
-        if let Some(toplevel) = window.toplevel() {
-            toplevel.with_pending_state(|state| {
-                state.states.set(xdg_toplevel::State::Resizing);
-                state.states.unset(xdg_toplevel::State::Maximized);
-            });
-        }
+        self.begin_client_resize(
+            &window,
+            &wl_surface,
+            edges,
+            initial_window_location,
+            initial_window_size,
+            pinned_initial_screen_pos,
+        );
 
         // Pinned resize is screen-space and single-window — no snap or cluster.
         let cluster_resize = if snapped && pinned_site.is_none() {

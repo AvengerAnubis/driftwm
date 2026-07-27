@@ -31,6 +31,7 @@ mod recenter;
 mod redraw;
 mod reload;
 mod render_cache;
+mod resize;
 mod session_store;
 mod stage_window;
 mod suspended;
