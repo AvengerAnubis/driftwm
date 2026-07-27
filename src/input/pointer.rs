@@ -33,14 +33,20 @@ use smithay::reexports::wayland_server::Resource;
 
 impl DriftWm {
     /// Determine the binding context for the current pointer position.
-    pub(super) fn pointer_context(
+    pub(crate) fn pointer_context(
         &self,
         pos: Point<f64, smithay::utils::Logical>,
     ) -> BindingContext {
+        // Every canvas-space walk below skips pinned windows, so a real one under
+        // the pointer needs its own screen-space arm — mirroring the ordering in
+        // `focus_cascade` / `maybe_hover_focus`, where pinned sits above the
+        // canvas. Without it a click on a pinned window resolves OnCanvas.
+        let screen_pos = canvas_to_screen(CanvasPos(pos), self.camera(), self.zoom()).0;
         // SSD chrome and the CSD resize margin sit outside the surface bbox, so
         // `element_under` misses them; count them as OnWindow so on-window bindings
         // apply over the chrome, not just the client surface.
-        let over_window = self.element_under(pos).is_some()
+        let over_window = self.pinned_window_under(screen_pos, pos).is_some()
+            || self.element_under(pos).is_some()
             || self.canvas_layer_under(pos).is_some()
             || self.decoration_under(pos).is_some();
         if over_window {

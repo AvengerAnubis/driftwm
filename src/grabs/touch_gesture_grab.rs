@@ -413,7 +413,11 @@ impl TouchGestureGrab {
         let (camera, zoom) = self.camera_zoom();
         let canvas = screen_to_canvas(ScreenPos(focus_at), camera, zoom).0;
         let serial = SERIAL_COUNTER.next_serial();
-        let under = data.element_under_raw(canvas).map(|(w, _)| w.clone());
+        // Pinned windows hit-test in screen space and the canvas walk skips
+        // them, so check them first — as the move and resize siblings do.
+        let under = data
+            .pinned_element_under(focus_at)
+            .or_else(|| data.element_under_raw(canvas).map(|(w, _)| w.clone()));
         if let Some(window) = &under {
             data.raise_and_focus(window, serial);
         }

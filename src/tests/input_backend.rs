@@ -17,7 +17,7 @@ use driftwm::canvas::{CanvasPos, canvas_to_screen};
 use smithay::backend::input::{
     AbsolutePositionEvent, ButtonState, Device, DeviceCapability, Event, InputBackend, InputEvent,
     PointerButtonEvent, PointerMotionAbsoluteEvent, TouchDownEvent, TouchEvent, TouchSlot,
-    UnusedEvent,
+    TouchUpEvent, UnusedEvent,
 };
 use smithay::utils::{Logical, Point};
 
@@ -210,11 +210,38 @@ impl TouchEvent<FakeInput> for FakeTouchDownEvent {
 
 impl TouchDownEvent<FakeInput> for FakeTouchDownEvent {}
 
+/// A finger lifting. A real touch-up reports only its slot — where the finger
+/// was is the sequence's business, not the event's.
+pub struct FakeTouchUpEvent {
+    device: FakeDevice,
+    slot: TouchSlot,
+    time: u32,
+}
+
+impl Event<FakeInput> for FakeTouchUpEvent {
+    fn time(&self) -> u64 {
+        u64::from(self.time) * 1000
+    }
+
+    fn device(&self) -> FakeDevice {
+        self.device.clone()
+    }
+}
+
+impl TouchEvent<FakeInput> for FakeTouchUpEvent {
+    fn slot(&self) -> TouchSlot {
+        self.slot
+    }
+}
+
+impl TouchUpEvent<FakeInput> for FakeTouchUpEvent {}
+
 impl InputBackend for FakeInput {
     type Device = FakeDevice;
     type PointerButtonEvent = FakeButtonEvent;
     type PointerMotionAbsoluteEvent = FakeAbsoluteEvent;
     type TouchDownEvent = FakeTouchDownEvent;
+    type TouchUpEvent = FakeTouchUpEvent;
 
     type KeyboardKeyEvent = UnusedEvent;
     type PointerAxisEvent = UnusedEvent;
@@ -227,7 +254,6 @@ impl InputBackend for FakeInput {
     type GesturePinchEndEvent = UnusedEvent;
     type GestureHoldBeginEvent = UnusedEvent;
     type GestureHoldEndEvent = UnusedEvent;
-    type TouchUpEvent = UnusedEvent;
     type TouchMotionEvent = UnusedEvent;
     type TouchCancelEvent = UnusedEvent;
     type TouchFrameEvent = UnusedEvent;
@@ -298,6 +324,18 @@ pub fn touch_down(f: &mut Fixture, at: Point<f64, Logical>, slot: u32) {
             event: FakeTouchDownEvent {
                 device: FakeDevice::touchscreen(),
                 screen,
+                slot: TouchSlot::from(Some(slot)),
+                time: next_time(),
+            },
+        });
+}
+
+/// Lift the finger holding `slot`.
+pub fn touch_up(f: &mut Fixture, slot: u32) {
+    f.state()
+        .process_input_event::<FakeInput>(InputEvent::TouchUp {
+            event: FakeTouchUpEvent {
+                device: FakeDevice::touchscreen(),
                 slot: TouchSlot::from(Some(slot)),
                 time: next_time(),
             },

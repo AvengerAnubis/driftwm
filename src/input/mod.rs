@@ -1111,6 +1111,12 @@ impl DriftWm {
     /// suspended stand-in above a client terminates the scan, so no client is
     /// ever reached through a stand-in's frame. Callers that want the stand-in
     /// itself (raise, center) consult `decoration_under` explicitly.
+    ///
+    /// Pinned windows are skipped, like every other canvas-space walk: they
+    /// render at a fixed screen position at scale 1, so their stage rect is a
+    /// phantom that spans `zoom` times the screen extent they really occupy and
+    /// sits wherever the last camera move left it. Callers that need pinned
+    /// coverage pair this with `pinned_window_under` / `pinned_element_under`.
     fn element_under_skipping(
         &self,
         point: Point<f64, Logical>,
@@ -1127,17 +1133,20 @@ impl DriftWm {
                     if skip(w) {
                         continue;
                     }
-                    if !self
-                        .window_bbox_with_popups(w)
-                        .is_some_and(|bbox| bbox.to_f64().contains(point))
-                    {
-                        continue;
-                    }
-                    let Some(pos) = self.stage.position_of(w) else {
+                    // One stage lookup serves position, pin state and the bbox
+                    // below — this walk runs on every pointer motion.
+                    let Some((pos, pinned)) = self.stage.position_and_pinned(w) else {
                         continue;
                     };
+                    if pinned {
+                        continue;
+                    }
                     let render_location = pos - w.geometry().loc;
-                    if w.is_in_input_region(&(point - render_location.to_f64())) {
+                    let mut bbox = w.bbox_with_popups();
+                    bbox.loc += render_location;
+                    if bbox.to_f64().contains(point)
+                        && w.is_in_input_region(&(point - render_location.to_f64()))
+                    {
                         return Some((w, render_location));
                     }
                 }

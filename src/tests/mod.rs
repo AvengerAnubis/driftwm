@@ -37,6 +37,7 @@ mod hover_focus;
 mod input_dispatch;
 mod interact_min;
 mod opacity;
+mod pinned_phantom;
 mod popups;
 mod real_clients;
 mod relaunch;

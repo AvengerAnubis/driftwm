@@ -122,19 +122,6 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   button-up. A *client* under a grab defers to the 30 s TTL; a stand-in does
   not. No corruption — both grabs anticipate the vanish and `interactive_move`
   stays balanced — but the asymmetry is a behaviour decision, not a missed line.
-- **A pinned window's canvas ghost misdirects clicks and taps at zoom > 1.**
-  `sync_pinned_locs` keeps a pinned window's stage position in sync but leaves
-  its canvas *size* unscaled, so at zoom 2 the stage rect covers twice the
-  screen area the window occupies. The gesture half is closed — `topmost_under`
-  skips pinned windows, so move/resize gestures, Alt+drag and hover all reach
-  what is genuinely rendered in the outer band. `element_under_skipping` is now
-  the one canvas-space walk that doesn't skip pinned (`topmost_under`,
-  `decoration_under` and `surface_under` all do), so its consumers still see the
-  ghost: `pointer_context` (`src/input/pointer.rs`) reads OnWindow over empty
-  canvas, so on-canvas bindings don't fire there, and the click-to-focus
-  fallback plus the touch clean-tap raise (`src/grabs/touch_gesture_grab.rs`)
-  raise+focus the pinned window instead of the window actually under the
-  pointer.
 - **Zero-net-change resize strands `ResizeState::WaitingForLastCommit`.**
   Grab start sets `Resizing` in *pending* state only, so a resize that ends
   where it began leaves `send_pending_configure` with nothing to send and the
