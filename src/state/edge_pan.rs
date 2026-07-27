@@ -1,3 +1,12 @@
+//! Edge-pan arming: which output edges the pointer is pushing against and how
+//! fast the camera should follow. Only the request is recorded here; the
+//! animation tick in `viewport_animation.rs` applies it.
+//!
+//! An edge that physically touches another monitor is held back by
+//! `edge_pan_latency_ms`, so a pointer heading for the next screen crosses to
+//! it instead of dragging the canvas along. Components not facing a monitor
+//! stay immediate, including at a mixed inner/outer corner.
+
 use std::time::{Duration, Instant};
 
 use smithay::output::Output;

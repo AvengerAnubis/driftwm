@@ -1,6 +1,37 @@
-# Commits to skip in `git blame` (mechanical reformats, no logic changes).
+# Commits to skip in `git blame` (mechanical reformats and pure code motion —
+# text moved between files verbatim, no logic changes).
 # GitHub honors this file automatically. Enable it locally with:
 #   git config blame.ignoreRevsFile .git-blame-ignore-revs
 
 # Apply cargo fmt across the codebase
 f16c2e0d246cbb6776cf9040eb8b9ef9a68820c6
+
+# Split src/state/animation.rs and src/state/mod.rs into per-subject modules
+# Move the window-animation driver methods into their own file
+abbe793845fcf72c579b3d243d200017eb4ca9db
+# Rename the viewport half of animation.rs to viewport_animation.rs
+58a6334e0671ddff7d4f5f90159f96845b62de5e
+# Move the edge-pan methods into their own file
+7e21f3eeb403069e0522384b0a8f0cfed372a6a6
+# Move the layer-surface ordering helpers into their own file
+da083287eadeeb733415aa6ba5898b460cb2ea8f
+# Move the keyboard-focus policy methods into their own file
+e80934e365390d22639907cb8f25d30cf60e23d0
+# Move the xdg-activation methods into their own file
+1de9fe9994177de0f818be6e21c65e89de05cedf
+# Move the window map/unmap chokepoint methods into their own file
+7207da0cf28c8ee95636ed2aa4634e56f4eafb28
+# Move the redraw dirty-marking and animation-liveness methods into their own file
+1a3e7676c7513c9701e4b707340383b67fca0273
+# Move the window-animation rect scoping methods beside the rest of that math
+1e26706605e23ea7801835016d9ce07241912450
+# Move the output resolution and coordinate methods into output.rs
+69e9b6ad6347c5fe1683d2a7d02480b1e871c84b
+# Move the fullscreen queries next to the rest of the fullscreen policy
+a44e44f9ad93df8e5ef166348a8ef3a80c21bc52
+# Move the screen-pinned window methods into their own file
+82e8a13af977cf803f5b37009230770d5e9c4c88
+# Move the viewport and usable-area accessors into viewport.rs
+cc31fd70b5a823f466fe99e0fdfd378cb82edbbc
+# Move the window frame geometry helpers into their own file
+bde66d63867e3573236fcbdc51a9aa66eae4d3bc

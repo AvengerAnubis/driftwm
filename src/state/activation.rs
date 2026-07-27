@@ -1,3 +1,11 @@
+//! The xdg Activated hint: exactly one window carries it, and a change reaches
+//! the client even when no other configure follows.
+//!
+//! The subtlety is *when* to flush. A window that already has a configure
+//! batched (first commit, fullscreen) should ride it — forcing the hint out
+//! early splits that batch — hence the `set_activated_exclusive` /
+//! `activate_riding_batch` pair over one shared implementation.
+
 use super::{DriftWm, StageWindow};
 
 impl DriftWm {

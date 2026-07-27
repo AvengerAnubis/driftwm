@@ -1,3 +1,13 @@
+//! The window mutation chokepoint: `map_window`, `raise_window`,
+//! `unmap_window` and the stacking rules around them. Everything that changes
+//! which windows exist or how they stack routes through here so stage
+//! membership, the activation hint, and per-output leaves stay in step — the
+//! `Space` clippy lint and `verify_stage_invariants` exist to catch anything
+//! that goes around it.
+//!
+//! Also the per-surface teardown sweep, shared by the normal and crash
+//! shutdown paths so the two cannot drift apart and leak.
+
 use smithay::desktop::Window;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;

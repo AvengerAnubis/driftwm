@@ -1,3 +1,14 @@
+//! Per-output camera motion: scroll momentum, edge pan, and the camera and
+//! zoom animations, plus the [`DriftWm::tick_all_animations`] turn that drives
+//! them from the event loop.
+//!
+//! Carries a second, unrelated subject that belongs in `src/input/`:
+//! `apply_key_repeat`, the pointer quartet (`focus_under`,
+//! `pointer_constraint_active`, `warp_pointer`, `flush_pointer_resync`), and
+//! `check_exec_cursor_timeout`. They are here because they were already in
+//! `animation.rs` when its window half was split off, and are pending
+//! relocation — the module name does not describe them.
+
 use std::time::{Duration, Instant};
 
 use smithay::input::pointer::CursorImageStatus;

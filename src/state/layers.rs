@@ -1,3 +1,11 @@
+//! Layer-surface ordering. The wlr-layer protocol defines no z-order within a
+//! layer, so map order decides unless `layer_order` window rules rank surfaces
+//! explicitly. Render, hit-testing, and focus scans all take the order from
+//! here, so visual z, input z, and focus priority cannot disagree.
+//!
+//! Also home to [`CanvasLayer`] — a layer surface pinned to a canvas position
+//! by rule instead of anchored through a LayerMap.
+
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point};

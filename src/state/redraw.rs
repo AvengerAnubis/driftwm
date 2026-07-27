@@ -1,3 +1,10 @@
+//! What marks the compositor dirty and what lets it sleep: surface damage
+//! routed to the outputs that actually show it, and the liveness checks the
+//! idle path consults before skipping a frame.
+//!
+//! Damage resolves against each output's zoom-aware visible canvas rect rather
+//! than `Space`'s cached mode-sized geometry, which undercounts at zoom < 1.
+
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 

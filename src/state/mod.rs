@@ -1,3 +1,14 @@
+//! The [`DriftWm`] struct — every field of compositor state — together with the
+//! ancillary types those fields are built from and the whole-state routines
+//! that have to enumerate them ([`DriftWm::debug_counters`],
+//! [`DriftWm::verify_stage_invariants`]).
+//!
+//! Behaviour does not belong here. An `impl DriftWm` method goes beside the
+//! subsystem it serves — `output.rs`, `keyboard_focus.rs`, `redraw.rs`,
+//! `window_lifecycle.rs`, … — leaving this file the state declarations and the
+//! routines that must name every field. Nothing said so before, and the file
+//! grew past 3,000 lines of methods that each had a better home.
+
 mod activation;
 mod cluster_snapshot;
 mod cursor;

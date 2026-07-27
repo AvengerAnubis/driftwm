@@ -1,3 +1,14 @@
+//! Compositor-side driver for window animations: starting, cancelling, and
+//! ticking entries, resolving them against client commits, and answering the
+//! render loop's per-frame questions — animated visual, chrome alpha, cull
+//! rect, fullscreen cover.
+//!
+//! [`super::window_animation`] holds the smithay-free state machine; this is
+//! everything that needs `DriftWm` (config, stage, per-output camera) to feed
+//! it. The split is a file boundary, not encapsulation: `WindowAnimations`'
+//! own methods stay `pub(crate)` for `fit.rs`, `suspended.rs`, the winit
+//! backend, and the tests.
+
 use std::time::{Duration, Instant};
 
 use smithay::desktop::Window;

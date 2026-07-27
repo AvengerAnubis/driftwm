@@ -1,3 +1,11 @@
+//! Window frame geometry: SSD title-bar height, border widths, and the
+//! conversions between a content top-left and the visual center of the frame
+//! that strip sits above.
+//!
+//! [`visual_frame_center`] and [`frame_loc_for_center`] are inverses, shared by
+//! navigation, fit, fill, and the fullscreen-exit settle so the formula cannot
+//! drift between them.
+
 use smithay::desktop::Window;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;

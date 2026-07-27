@@ -1,3 +1,11 @@
+//! Screen-pinned windows: keeping each pin's canvas location in step with the
+//! fixed screen position it renders at, and rehoming pins whose output changes
+//! or is unplugged.
+//!
+//! The canvas location is bookkeeping — rendering and hit-testing read
+//! `screen_pos` — but it has to be re-anchored whenever the camera moves, or
+//! the window drifts off its output and the visibility culls freeze it.
+
 use smithay::desktop::Window;
 use smithay::output::Output;
 

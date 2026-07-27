@@ -1,3 +1,10 @@
+//! Keyboard-focus policy: who gets focus and what has to happen on the way
+//! there — raise-and-focus, modal redirect, layer-shell interactivity, empty
+//! canvas, and the suspended stand-in cases.
+//!
+//! `focus.rs` is the type half ([`FocusTarget`] and its smithay trait impls);
+//! this is the decision half.
+
 use smithay::desktop::{PopupUngrabStrategy, Window};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::seat::WaylandFocus;
