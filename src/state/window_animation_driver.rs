@@ -15,7 +15,7 @@ use super::window_animation::{
     AnimSpace, AnimatedVisual, ContentPolicy, FrozenPicture, FullscreenCover, GeometryRole,
     MIN_ANIMATED_RESIZE,
 };
-use super::{DriftWm, PendingView, StageWindow, output_state};
+use super::{DriftWm, PendingView, StageWindow, output_logical_size, output_state};
 
 impl DriftWm {
     /// Render-time animated stand-in for the window with stable id `id`, given
@@ -1141,5 +1141,93 @@ impl DriftWm {
         if let Some(snapshot) = snapshot {
             self.closing_snapshots.push(snapshot);
         }
+    }
+
+    /// Whether any window animation, closing snapshot, or adoption fade has a
+    /// visual rect intersecting `output`'s viewport. Caller passes the output's
+    /// already-read camera/zoom so this never re-locks `output_state`.
+    ///
+    /// `frozen_cutoff` is `Some(now)` for the redraw side: an entry still frozen
+    /// at `now` repaints the identical picture every frame, so it is not a reason
+    /// to compose one.
+    pub(super) fn output_shows_window_animations(
+        &self,
+        output: &Output,
+        camera: Point<f64, Logical>,
+        zoom: f64,
+        frozen_cutoff: Option<Instant>,
+    ) -> bool {
+        let name = output.name();
+        let viewport = output_logical_size(output);
+        let visible = driftwm::canvas::visible_canvas_rect(camera.to_i32_round(), viewport, zoom);
+
+        for snapshot in &self.closing_snapshots {
+            match snapshot.pinned_output() {
+                Some(o) => {
+                    if o == name {
+                        return true;
+                    }
+                }
+                None => {
+                    if visible.overlaps(snapshot.canvas_rect().to_i32_round()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        for fade in &self.standin_fades {
+            let rect = Rectangle::new(fade.loc, fade.suspended.size.get());
+            if visible.overlaps(rect) {
+                return true;
+            }
+        }
+        // A crossfade outlives its leg only by a tick or two, but it rides the
+        // window's live rect for scoping either way.
+        for id in self.resize_crossfades.keys() {
+            if let Some(rect) = self.animation_open_canvas_rect(*id)
+                && visible.overlaps(rect)
+            {
+                return true;
+            }
+        }
+        for (id, geo) in self.window_animations.scoping_entries() {
+            if frozen_cutoff.is_some_and(|now| self.window_animations.frozen_at(id, now)) {
+                continue;
+            }
+            match geo {
+                Some((super::window_animation::AnimSpace::Screen(o), _)) => {
+                    if o == name {
+                        return true;
+                    }
+                }
+                Some((super::window_animation::AnimSpace::Canvas, rect)) => {
+                    if visible.overlaps(rect.to_i32_round()) {
+                        return true;
+                    }
+                }
+                None => {
+                    if let Some(rect) = self.animation_open_canvas_rect(id)
+                        && visible.overlaps(rect)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Live canvas rect of a window whose effect has no rect of its own — an
+    /// open entry, a resize crossfade (used for scoping only).
+    fn animation_open_canvas_rect(
+        &self,
+        id: driftwm::stage::ElementId,
+    ) -> Option<Rectangle<i32, Logical>> {
+        let window = self.stage.window_by_id(id)?;
+        let loc = self.stage.position_of(window)?;
+        Some(Rectangle::new(
+            loc,
+            driftwm::stage::StageElement::size(window),
+        ))
     }
 }
