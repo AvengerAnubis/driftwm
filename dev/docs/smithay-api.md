@@ -365,8 +365,10 @@ So it never races an in-flight page flip — the kernel serializes atomic commit
 Source: `src/backend/input/mod.rs`, `src/backend/input/tablet.rs`.
 
 `InputBackend` is **25 associated types and zero methods** — a pure type-level
-description of what a backend can emit. Implementing it costs nothing but the
-event types you actually produce:
+description of what a backend can emit. It is declared `pub trait InputBackend:
+Sized`, so it is never object-safe: backends are selected with a type parameter
+(`process_input_event::<I>`), never a `dyn`. Implementing it costs nothing but
+the event types you actually produce:
 
 - **`pub enum UnusedEvent {}`** is uninhabited and carries a blanket impl of
   *every* event trait (each method is `match *self {}`). Any associated type you
@@ -432,7 +434,7 @@ driftwm's synthetic backend for tests lives in `src/tests/input_backend.rs`.
 - **`LayerMap` guard (MutexGuard) must be dropped before calling `keyboard.set_focus()`** — `set_focus` triggers `SeatHandler::focus_changed()` which may need `&mut self`.
 - **Layer surface exclusive focus must be guarded** — only grab keyboard focus when it's not already on this surface. Otherwise every commit from an Exclusive layer surface steals focus back.
 - **`pointer_over_layer` must be reset on layer destroy and fullscreen enter** — stale flag breaks all input until next motion event.
-- **`TouchHandle::is_grabbed()` is true after any `down()`** — smithay's touch `DefaultGrab::down` installs its own `TouchDownGrab`, so `is_grabbed()` can't distinguish "the compositor set a grab" from "a finger is down". Assert on `grab_start_data()` or on compositor-side state instead.
+- **`TouchHandle::is_grabbed()` is true after any `down()`, and `grab_start_data()` is no better** — smithay's touch `DefaultGrab::down` (`input/touch/grab.rs`) installs its own `TouchDownGrab` unconditionally, so `is_grabbed()` can't distinguish "the compositor set a grab" from "a finger is down". `grab_start_data()` is the same tautology under another name: `set_grab` stores *every* grab as `GrabStatus::Active` (`input/touch/mod.rs`) and `grab_start_data()` returns `Some` for any `Active`, so it is `Some` after any `down()` too — it reports the start data of whichever grab is installed, not who installed it. Nothing on `TouchHandle` answers the question; assert on the compositor's own grab bookkeeping instead.
 
 ### Trait Impls / Method Clashes
 

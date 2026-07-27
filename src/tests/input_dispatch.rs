@@ -1,9 +1,10 @@
 //! Input driven through the real `process_input_event` entry point with the
-//! synthetic backend (`input_backend`), not by calling the sub-handlers it
-//! dispatches to. Two things only exist there: the hardcoded click-to-focus
-//! fallback that runs when no mouse binding matched, and the device-capability
-//! gate that decides whether a middle click is buffered for a 3-finger swipe —
-//! a question only the event's own device can answer.
+//! synthetic backend (`input_backend`). The sub-handlers are directly callable
+//! but generic over the backend, so a scenario needs a backend impl regardless;
+//! going in at the top then keeps the event whole, which is what the
+//! device-capability gate on a buffered middle click reads. Covered here: that
+//! gate, the hardcoded click-to-focus fallback that runs when no mouse binding
+//! matched, and the screen→canvas mapping applied to what a device reports.
 
 use driftwm::config::{BTN_LEFT, BTN_MIDDLE};
 use smithay::desktop::Window;
@@ -12,7 +13,7 @@ use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 use crate::state::StageWindow;
 
 use super::client::ClientId;
-use super::input_backend::{FakeDevice, click, pointer_to, press, touch_down};
+use super::input_backend::{FakeDevice, click, pointer_to, pointer_to_screen, press, touch_down};
 use super::{Fixture, keyboard_focus, map_window, server_surface, window_by_app_id};
 
 /// Canvas-space center of `window`'s current geometry.
@@ -84,7 +85,10 @@ fn click_focuses_the_window_under_the_pointer() {
 }
 
 /// A touchpad's middle click may be the tap half of a 3-finger swipe, so it is
-/// held back rather than dispatched — nothing else about the press happens yet.
+/// held back rather than dispatched. The press-time bookkeeping ahead of the
+/// buffer — held buttons, tap taint, the cancelled navigate/pick/momentum — has
+/// already run; what waits is everything downstream of it. The 300 ms timer
+/// that would release the buffer outlives the scenario, which never pumps it.
 #[test]
 fn touchpad_middle_press_is_buffered() {
     let mut f = Fixture::new();
@@ -93,8 +97,9 @@ fn touchpad_middle_press_is_buffered() {
     let (first, second) = two_windows(&mut f, id);
 
     let target = center_of(&mut f, &first);
-    pointer_to(&mut f, target);
-    press(&mut f, &FakeDevice::touchpad(), BTN_MIDDLE);
+    let touchpad = FakeDevice::touchpad();
+    pointer_to(&mut f, &touchpad, target);
+    press(&mut f, &touchpad, BTN_MIDDLE);
 
     assert!(
         f.state().pending_middle_click.is_some(),
@@ -114,7 +119,12 @@ fn mouse_middle_press_is_never_buffered() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
     let id = f.add_client();
-    let (first, _second) = two_windows(&mut f, id);
+    let (first, second) = two_windows(&mut f, id);
+    assert_eq!(
+        keyboard_focus(&mut f),
+        Some(server_surface(&second)),
+        "the second window holds focus before the click"
+    );
 
     let target = center_of(&mut f, &first);
     click(&mut f, &FakeDevice::mouse(), target, BTN_MIDDLE);
@@ -131,16 +141,20 @@ fn mouse_middle_press_is_never_buffered() {
     );
 }
 
-/// A finger landing on a window focuses it like a click, hides the pointer
-/// cursor, and pins the rest of the sequence to the output it resolved to — a
-/// fake device is no libinput device, so that resolution falls back to the
-/// only output there is.
+/// A finger landing on a window focuses it, down the same fallback a click
+/// takes. The finger is never lifted, so the scenario ends inside smithay's
+/// touch-down grab — the fake has no frame event to close the sequence with.
 #[test]
 fn touch_down_focuses_the_window_under_the_finger() {
     let mut f = Fixture::new();
-    let output = f.add_output(1, (1920, 1080));
+    f.add_output(1, (1920, 1080));
     let id = f.add_client();
-    let (first, _second) = two_windows(&mut f, id);
+    let (first, second) = two_windows(&mut f, id);
+    assert_eq!(
+        keyboard_focus(&mut f),
+        Some(server_surface(&second)),
+        "the second window holds focus before the touch"
+    );
 
     let target = center_of(&mut f, &first);
     touch_down(&mut f, target, 0);
@@ -151,13 +165,30 @@ fn touch_down_focuses_the_window_under_the_finger() {
         Some(server_surface(&first)),
         "a touch on a window focuses it"
     );
-    assert!(
-        f.state().cursor.hidden_by_touch,
-        "touch input hides the pointer cursor"
-    );
+}
+
+/// The fake reports raw screen coordinates, so this is what pins down the
+/// screen→canvas mapping the handler puts them through. The expected point is
+/// worked out by hand: running it back through `canvas_to_screen` would let a
+/// bug shared by both directions round-trip clean, and at the default camera
+/// and zoom the mapping is the identity, which any sign flip survives.
+#[test]
+fn absolute_motion_maps_screen_through_camera_and_zoom() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.state().with_output_state(|os| {
+        os.camera = Point::from((300.0, -200.0));
+        os.camera_target = None;
+        os.zoom = 2.0;
+        os.zoom_target = None;
+    });
+
+    pointer_to_screen(&mut f, &FakeDevice::mouse(), Point::from((640.0, 360.0)));
+
+    // canvas = screen / zoom + camera = (640/2 + 300, 360/2 - 200)
     assert_eq!(
-        f.state().touch_state.output,
-        Some(output),
-        "the sequence is pinned to the output the finger landed on"
+        f.state().seat.get_pointer().unwrap().current_location(),
+        Point::from((620.0, -20.0)),
+        "the pointer sits where the camera and zoom put the reported position"
     );
 }
