@@ -381,6 +381,10 @@ fn unfit_after_fullscreen_exit_drops_the_stale_recenter_so_the_next_resize_does_
     // 1920×1080, so this hits the equal-size branch.
     f.state().toggle_fit_window(&window);
     assert!(!f.state().stage.is_fit(&window));
+    assert!(
+        !f.state().pending_recenter.contains_key(&root.id()),
+        "the equal-size branch settles in place, so it must drop the owed recenter"
+    );
     f.double_roundtrip(id);
     adopt_last_configure(&mut f, id, &surface);
 
@@ -415,19 +419,19 @@ fn unfit_after_fullscreen_exit_drops_the_stale_recenter_so_the_next_resize_does_
 /// The fill twin of the test above: `unfill_window`'s equal-size branch must
 /// drop a recenter already owed, not merely skip inserting its own.
 ///
-/// Reaching that state takes one turn more than the fit case.
-/// `enter_fullscreen` restores a *fit* window to its fit-era geometry but a
-/// *filled* one to `restore_size` — the very value the fill recorded as its
-/// own restore point — so a plain fill → fullscreen → exit restores the size
-/// the client already has and owes no recenter at all. A fill dispatched
-/// between a resize release and the client's final commit splits the two: the
-/// fill saves the pre-resize size while the settle re-anchors `restore_size`
-/// to the filled size. The fullscreen exit then restores to a size the client
-/// does not have and leaves a recenter owed, while the unfill — pre-fill size
-/// and still-fullscreen-sized geometry both being the output's 1920×1080 —
-/// settles in place through the equal-size branch. Left untouched, that stale
-/// entry fires on the next differing-size commit (a resize) and discards the
-/// drag in between.
+/// This route reaches it through a resize interleave, because both saved sizes
+/// are read off `restore_size` here and only a resize settle re-anchors that:
+/// the fill saves the pre-resize size while the settle moves `restore_size` to
+/// the filled size, which is what the fullscreen exit then restores to. The
+/// exit therefore restores a size the client does not have and leaves a
+/// recenter owed, while the unfill — pre-fill size and still-fullscreen-sized
+/// geometry both being the output's 1920×1080 — settles in place through the
+/// equal-size branch. Left untouched, that stale entry fires on the next
+/// differing-size commit (a resize) and discards the drag in between.
+///
+/// The interleave is not the only way in: the twin below reaches the same
+/// branch with no resize at all, off the one rewrite that makes the two saved
+/// sizes disagree on their own.
 #[test]
 fn unfill_after_fullscreen_exit_drops_the_stale_recenter_so_the_next_resize_does_not_teleport() {
     let mut f = Fixture::new();
@@ -525,6 +529,105 @@ fn unfill_after_fullscreen_exit_drops_the_stale_recenter_so_the_next_resize_does
 
     // The user then resizes it from its right edge.
     let grab_at = pt(dragged_to.x as f64 + 1900.0, dragged_to.y as f64 + 540.0);
+    assert!(f.state().try_start_gesture_resize(grab_at, false));
+    motion(&mut f, grab_at + pt(100.0, 0.0));
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    end_swipe(&mut f);
+
+    assert_eq!(
+        f.state().stage.position_of(&window),
+        Some(dragged_to),
+        "the resize must not teleport the window back toward the fullscreen exit's stale center"
+    );
+}
+
+/// The same equal-size branch, reached with nothing but fill → fullscreen →
+/// exit → unfill — the shorter and likelier production route.
+///
+/// `enter_fullscreen` rewrites an undersized restore size to a half-viewport
+/// default (`MIN_RESTORE_FLOOR`, guarding the clients that map at a throwaway
+/// size); `fill_window` reads the same restore size and keeps it verbatim. Below
+/// the floor on either axis the two saved sizes therefore disagree without any
+/// resize settle to split them: the fullscreen exit restores the floored size,
+/// which the client does not have, and leaves a recenter owed, while the unfill
+/// restores the size the client has been sitting at all along and settles in
+/// place.
+#[test]
+fn unfill_after_a_floored_fullscreen_exit_drops_the_stale_recenter() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    // Fullscreen below moves the camera, which seeds a per-output blur
+    // generation that only clears on output disconnect, so it can never
+    // return to the pre-output baseline.
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    // 80 high is under the 100px floor, so the fullscreen enter rewrites what it
+    // saves; the fill's own saved size stays the raw 400×80.
+    let surface = map_settled(&mut f, id, "a", (400, 80));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((0, 0)), false);
+
+    // Fill, and leave the client on its pre-fill size — nothing here re-anchors
+    // `restore_size`, so it is still 400×80 when the fullscreen enter reads it.
+    f.state().toggle_fill_window(&window);
+    assert!(
+        f.state().stage.is_fill(&window),
+        "precondition: the fill ran"
+    );
+
+    let cw = f.client(id).window(&surface);
+    cw.set_fullscreen(None);
+    f.double_roundtrip(id);
+    assert!(
+        f.state().stage.is_fullscreen(&window),
+        "precondition: fullscreen"
+    );
+    assert!(
+        f.state().stage.is_fill(&window),
+        "precondition: fill membership survives fullscreen"
+    );
+
+    // Exit fullscreen: the restore size is the floored half-viewport, which the
+    // client does not have, so a recenter is left owed.
+    let cw = f.client(id).window(&surface);
+    cw.unset_fullscreen();
+    f.double_roundtrip(id);
+    let root = super::server_surface(&window);
+    assert!(
+        f.state().pending_recenter.contains_key(&root.id()),
+        "precondition: the floored fullscreen exit left a recenter owed"
+    );
+
+    // Unfill: the fill's saved 400×80 is the size the client still has, so this
+    // hits the equal-size branch.
+    f.state().toggle_fill_window(&window);
+    assert!(!f.state().stage.is_fill(&window));
+    assert!(
+        !f.state().pending_recenter.contains_key(&root.id()),
+        "the equal-size branch settles in place, so it must drop the owed recenter"
+    );
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+
+    // The user drags the window elsewhere.
+    let pos = f.state().stage.position_of(&window).unwrap();
+    let center = pt(pos.x as f64 + 200.0, pos.y as f64 + 40.0);
+    assert!(f.state().try_start_gesture_move(center, false));
+    motion(&mut f, center + pt(100.0, 30.0));
+    end_swipe(&mut f);
+    let dragged_to = f.state().stage.position_of(&window).unwrap();
+    assert_eq!(
+        dragged_to,
+        pos + Point::from((100, 30)),
+        "precondition: the drag landed at its natural destination"
+    );
+
+    // The user then resizes it from its right edge.
+    let grab_at = pt(dragged_to.x as f64 + 390.0, dragged_to.y as f64 + 40.0);
     assert!(f.state().try_start_gesture_resize(grab_at, false));
     motion(&mut f, grab_at + pt(100.0, 0.0));
     f.double_roundtrip(id);
