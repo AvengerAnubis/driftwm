@@ -1,5 +1,6 @@
 use smithay::{
     desktop::Window,
+    output::Output,
     reexports::wayland_server::Resource,
     utils::{Logical, Point, Rectangle, Size},
     wayland::seat::WaylandFocus,
@@ -10,6 +11,15 @@ use super::{DriftWm, FocusTarget, PendingRecenter};
 use driftwm::window_ext::WindowExt;
 
 impl DriftWm {
+    pub fn is_fullscreen(&self) -> bool {
+        self.active_output()
+            .is_some_and(|o| self.is_output_fullscreen(&o))
+    }
+
+    pub fn is_output_fullscreen(&self, output: &Output) -> bool {
+        self.stage.fullscreen_on(&output.name()).is_some()
+    }
+
     /// Resolve which output a window should fullscreen onto. An already-fullscreen
     /// window re-asserting with no requested output stays on its current output;
     /// otherwise a window-rule `output` wins, then the client-requested output,

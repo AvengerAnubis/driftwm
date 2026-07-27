@@ -961,15 +961,6 @@ impl DriftWm {
         self.flush_middle_click(pending.press_time, pending.release_time);
     }
 
-    pub fn is_fullscreen(&self) -> bool {
-        self.active_output()
-            .is_some_and(|o| self.is_output_fullscreen(&o))
-    }
-
-    pub fn is_output_fullscreen(&self, output: &Output) -> bool {
-        self.stage.fullscreen_on(&output.name()).is_some()
-    }
-
     /// Bounding box of a mapped window in canvas coordinates: `window.bbox_with_popups()`
     /// (which includes popup/subsurface overhang) placed at the stage position.
     /// Mirrors `Space::element_bbox`.
