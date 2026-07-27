@@ -172,6 +172,24 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   neighbouring resize pushed within the last few hundred ms teleports the
   departing chrome to the end of the slide in one frame: a pop inside the
   crossfade that exists to prevent exactly that. Cosmetic, narrow window.
+- **A fullscreen dispatched before a fit's ack saves a mismatched rect.**
+  `enter_fullscreen` (`src/state/fullscreen.rs`) pairs `saved_location`, read
+  live from the stage, with a `saved_size` read from `window.geometry().size` on
+  the fit arm — but `fit_window` maps to the fit location without waiting for the
+  ack, so a fullscreen in that gap saves the fit-era position against the pre-fit
+  size and the exit restores the two together. The fill arm had the identical
+  bug against `restore_size` and now reads `configured_window_size` instead;
+  fit was left alone because nothing forced it. Verified in the fixture: fit
+  un-acked, then fullscreen, then exit, restores 800×600 at the fit position.
+- **A filled window's fullscreen exit ignores a client's own resize.** The fill
+  arm above reads `configured_window_size`, which is what closes the pre-ack
+  race, but that is pending state and no client-initiated resize updates it (see
+  the note on the IPC `move` item). So a client that resizes *itself* after being
+  filled gets its fill-configured size back on the fullscreen exit rather than
+  its current one. Narrow, and arguably right — the stage still holds the filled
+  position, so the configured size is the rect that pairs with it — but it is a
+  deliberate trade, not an oversight. The deeper issue is that a self-resize
+  leaves fill membership claiming a rect the window no longer occupies.
 
 ## Structural backlog
 
