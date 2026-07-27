@@ -41,6 +41,14 @@ pub(crate) enum DecoTarget {
     Suspended(Rc<SuspendedWindow>),
 }
 
+/// Which band of an element `topmost_under` landed on: its client surface tree,
+/// or the compositor-drawn chrome around it.
+#[derive(Clone, Copy)]
+pub(crate) enum HitKind {
+    Content,
+    Decoration(DecorationHit),
+}
+
 /// Constant-speed edge-pan velocity for the bare cursor: a steady glide
 /// whenever the cursor sits within `zone` px of an edge of the *usable* area
 /// (output minus layer-shell exclusive zones), directed away from the edge(s)
@@ -533,30 +541,37 @@ impl DriftWm {
             return;
         }
 
-        // A suspended window is above normal canvas windows: hovering one sets
-        // the focus intent (it holds no seat keyboard focus).
-        if self.any_suspended()
-            && let Some((DecoTarget::Suspended(s), _)) = self.decoration_under(canvas_pos)
-        {
-            let id = s.id;
-            let already = matches!(
-                self.window_focus,
-                Some(crate::state::FocusIntent::Suspended(sid)) if sid == id
-            );
-            if !already {
-                let serial = SERIAL_COUNTER.next_serial();
-                self.set_suspended_focus(id, serial);
-                // The stand-in has no toplevel to activate, but this still
-                // clears the Activated hint off the previously-focused window.
-                self.set_activated_exclusive(&StageWindow::Suspended(s));
+        let hit = self.topmost_under(canvas_pos, |elem, hit| {
+            // A client's resize band is the invisible margin around *every* CSD
+            // window, so accepting it would arm hover slightly outside every
+            // window on screen. Reject so the walk continues underneath, where
+            // an overhanging margin lets the window below take focus. Written
+            // as a rejection because Body and Label must still be accepted;
+            // and client-only, because a stand-in's margin belongs to an
+            // opaque frame with nothing behind it to fall through to.
+            !(matches!(elem, StageWindow::Client(_))
+                && matches!(hit, HitKind::Decoration(DecorationHit::ResizeBorder(_))))
+        });
+        match hit {
+            Some((StageWindow::Client(window), _)) => self.hover_focus_window(window),
+            // A suspended window holds no seat keyboard focus, so hovering one
+            // sets the focus intent instead.
+            Some((StageWindow::Suspended(s), _)) => {
+                let id = s.id;
+                let already = matches!(
+                    self.window_focus,
+                    Some(crate::state::FocusIntent::Suspended(sid)) if sid == id
+                );
+                if !already {
+                    let serial = SERIAL_COUNTER.next_serial();
+                    self.set_suspended_focus(id, serial);
+                    // The stand-in has no toplevel to activate, but this still
+                    // clears the Activated hint off the previously-focused window.
+                    self.set_activated_exclusive(&StageWindow::Suspended(s));
+                }
             }
-            return;
+            None => {}
         }
-
-        let Some(window) = self.element_under(canvas_pos).map(|(w, _)| w.clone()) else {
-            return;
-        };
-        self.hover_focus_window(window);
     }
 
     /// Sloppy-focus a client window under the pointer (skipping widgets),
@@ -1156,6 +1171,92 @@ impl DriftWm {
         self.element_under_skipping(point, |_| false)
     }
 
+    /// Topmost element under `pos`, counting a window's compositor-drawn chrome
+    /// as part of that window. One z-order pass: per element, content first,
+    /// then that element's own chrome, then descend — exhausting every
+    /// window's content before checking any window's chrome would let a lower
+    /// window's content win over a higher window's title bar.
+    ///
+    /// `accept` filters bands: a rejected offer falls through to the next one in
+    /// order (this window's chrome, then the element below), which is what keeps
+    /// the within-window ordering meaningful. An opaque stand-in is the one
+    /// exception — a rejection there ends the walk rather than reaching a client
+    /// through the stand-in's frame.
+    pub(crate) fn topmost_under(
+        &self,
+        pos: Point<f64, Logical>,
+        mut accept: impl FnMut(&StageWindow, HitKind) -> bool,
+    ) -> Option<(StageWindow, HitKind)> {
+        let active = self.active_output();
+
+        for element in self.stage.windows().rev() {
+            match element {
+                StageWindow::Suspended(s) => {
+                    let Some(hit) = self.suspended_decoration_hit(s, pos) else {
+                        continue;
+                    };
+                    let hit = HitKind::Decoration(hit);
+                    if accept(element, hit) {
+                        return Some((element.clone(), hit));
+                    }
+                    return None;
+                }
+                StageWindow::Client(w) => {
+                    let Some(wl_surface) = w.wl_surface() else {
+                        continue;
+                    };
+                    let Some((loc, pinned)) = self.stage.position_and_pinned(w) else {
+                        continue;
+                    };
+                    // Pinned windows hit-test in screen space, and an off-output
+                    // fullscreen window isn't visible here. Both are skips, not
+                    // stops: whatever is genuinely rendered under `pos` on this
+                    // output must stay reachable.
+                    if pinned || self.fullscreen_on_other_output(&wl_surface, &active) {
+                        continue;
+                    }
+                    let render_location = loc - w.geometry().loc;
+
+                    // Content before chrome, matching `surface_under`. A CSD
+                    // window's shadow surface overlaps its own compositor resize
+                    // margin and such clients usually declare no input region,
+                    // so the shadow reads as content — chrome-first would report
+                    // a resize band there and, for filters that reject one, push
+                    // the hit to whatever lies underneath.
+                    //
+                    // Inlined rather than `window_bbox_with_popups` so the one
+                    // stage lookup above serves the whole window — this walk
+                    // runs on every pointer motion.
+                    let mut bbox = w.bbox_with_popups();
+                    bbox.loc += render_location;
+                    if bbox.to_f64().contains(pos)
+                        && w.is_in_input_region(&(pos - render_location.to_f64()))
+                        && accept(element, HitKind::Content)
+                    {
+                        return Some((element.clone(), HitKind::Content));
+                    }
+
+                    if let Some(hit) = self.decoration_hit_for(w, loc, pos) {
+                        let hit = HitKind::Decoration(hit);
+                        if accept(element, hit) {
+                            return Some((element.clone(), hit));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// `topmost_under` narrowed to a client window. A stand-in on top yields
+    /// `None` — it is opaque, so nothing below it is a valid target.
+    pub(crate) fn topmost_client_under(&self, pos: Point<f64, Logical>) -> Option<Window> {
+        match self.topmost_under(pos, |_, _| true)? {
+            (StageWindow::Client(w), _) => Some(w),
+            (StageWindow::Suspended(_), _) => None,
+        }
+    }
+
     /// The pick target under a canvas position: a suspended stand-in occluding
     /// the point, or a non-widget canvas window taken as one uniform target —
     /// its content, its SSD chrome (title bar, close button, resize borders) and
@@ -1193,28 +1294,15 @@ impl DriftWm {
     /// hit-test in screen space and each caller checks `pinned_element_under`
     /// first.
     ///
-    /// Each channel is topmost-first and stops at the first element it finds
-    /// covering the point, so nothing below an occluder *on that channel* is
-    /// reachable. The two are sequential rather than interleaved, though: the
-    /// surface channel is exhausted before the decoration one is consulted at
-    /// all, so a point on window A's SSD title bar that also lies over window
-    /// B's content resolves to B even when A is on top. The canvas gate is a
-    /// stop, not a skip: a widget on top makes the gesture find nothing, rather
-    /// than reaching through it to the window underneath.
+    /// Pinned is a *skip* inside the walk — a pinned window's stale canvas rect
+    /// never masks what is really rendered beneath it. Widget and fullscreen are
+    /// *stops* via the canvas gate: either one on top makes the gesture find
+    /// nothing rather than reaching through to the window underneath.
     pub(crate) fn draggable_element_under(
         &self,
         canvas_pos: Point<f64, smithay::utils::Logical>,
     ) -> Option<StageWindow> {
-        let element = if let Some((window, _)) = self.element_under_raw(canvas_pos) {
-            StageWindow::Client(window.clone())
-        } else {
-            // SSD chrome lies outside the surface bbox and a stand-in owns no
-            // surface at all, so both are only visible on the decoration channel.
-            match self.decoration_under(canvas_pos)? {
-                (DecoTarget::Client(w), _) => StageWindow::Client(w),
-                (DecoTarget::Suspended(s), _) => StageWindow::Suspended(s),
-            }
-        };
+        let (element, _) = self.topmost_under(canvas_pos, |_, _| true)?;
         self.is_canvas_window(&element).then_some(element)
     }
 
@@ -1643,8 +1731,6 @@ impl DriftWm {
         &self,
         pos: Point<f64, smithay::utils::Logical>,
     ) -> Option<(DecoTarget, DecorationHit)> {
-        let bar_height = self.config.decorations.title_bar_height;
-        let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
         let active = self.active_output();
 
         // Iterate in z-order (topmost first, matching stage.windows().rev())
@@ -1677,46 +1763,9 @@ impl DriftWm {
             let Some(loc) = self.stage.position_of(window) else {
                 continue;
             };
-            let size = window.geometry().size;
 
-            if self
-                .decorations
-                .contains_key(&DecorationKey::Surface(wl_surface.id()))
-            {
-                if crate::decorations::close_button_contains(pos, loc, size.w, bar_height) {
-                    return Some((
-                        DecoTarget::Client(window.clone()),
-                        DecorationHit::CloseButton,
-                    ));
-                }
-                if crate::decorations::title_bar_contains(pos, loc, size.w, bar_height) {
-                    return Some((DecoTarget::Client(window.clone()), DecorationHit::TitleBar));
-                }
-                if self.config.resize_on_border
-                    && let Some(edge) =
-                        crate::decorations::resize_edge_at(pos, loc, size, bar_height, border_width)
-                {
-                    return Some((
-                        DecoTarget::Client(window.clone()),
-                        DecorationHit::ResizeBorder(edge),
-                    ));
-                }
-            } else {
-                // CSD: only the outer resize margin (see surface_under).
-                let is_widget =
-                    driftwm::config::applied_rule(&wl_surface).is_some_and(|r| r.widget);
-                let is_fullscreen = self.is_window_fullscreen(window);
-                if self.config.resize_on_border
-                    && !is_widget
-                    && !is_fullscreen
-                    && let Some(edge) =
-                        crate::decorations::resize_edge_at(pos, loc, size, 0, border_width)
-                {
-                    return Some((
-                        DecoTarget::Client(window.clone()),
-                        DecorationHit::ResizeBorder(edge),
-                    ));
-                }
+            if let Some(hit) = self.decoration_hit_for(window, loc, pos) {
+                return Some((DecoTarget::Client(window.clone()), hit));
             }
 
             // If this window's client surface covers pos, stop: a higher window's
@@ -1728,6 +1777,56 @@ impl DriftWm {
                 .is_some()
             {
                 return None;
+            }
+        }
+        None
+    }
+
+    /// Which chrome band of `window` covers `pos`, given the window's canvas
+    /// position — SSD title bar / close button / resize border, or the
+    /// compositor-side CSD resize margin. Pure geometry: the caller owns the
+    /// z-order walk, the pinned / off-output-fullscreen skips, and the occlusion
+    /// stop. `loc` is passed in because `Stage::position_of` is a linear scan and
+    /// both callers already hold it.
+    fn decoration_hit_for(
+        &self,
+        window: &Window,
+        loc: Point<i32, Logical>,
+        pos: Point<f64, Logical>,
+    ) -> Option<DecorationHit> {
+        let wl_surface = window.wl_surface()?;
+        let bar_height = self.config.decorations.title_bar_height;
+        let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
+        let size = window.geometry().size;
+
+        if self
+            .decorations
+            .contains_key(&DecorationKey::Surface(wl_surface.id()))
+        {
+            if crate::decorations::close_button_contains(pos, loc, size.w, bar_height) {
+                return Some(DecorationHit::CloseButton);
+            }
+            if crate::decorations::title_bar_contains(pos, loc, size.w, bar_height) {
+                return Some(DecorationHit::TitleBar);
+            }
+            if self.config.resize_on_border
+                && let Some(edge) =
+                    crate::decorations::resize_edge_at(pos, loc, size, bar_height, border_width)
+            {
+                return Some(DecorationHit::ResizeBorder(edge));
+            }
+        } else {
+            // CSD: only the outer resize margin (see surface_under). The
+            // geometry test leads so the rule lookup and the fullscreen scan run
+            // only for a point actually in the margin — the walk above visits
+            // every window on every pointer motion.
+            if self.config.resize_on_border
+                && let Some(edge) =
+                    crate::decorations::resize_edge_at(pos, loc, size, 0, border_width)
+                && !driftwm::config::applied_rule(&wl_surface).is_some_and(|r| r.widget)
+                && !self.is_window_fullscreen(window)
+            {
+                return Some(DecorationHit::ResizeBorder(edge));
             }
         }
         None

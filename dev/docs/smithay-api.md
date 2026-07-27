@@ -246,6 +246,26 @@ the `_with_popups` variants merge in every popup from `PopupManager::popups_for_
 both send frame callbacks to popup surface trees too, so throttling decisions keyed on a popup-less
 bbox starve visible popups.
 
+### Input-region hit-testing: `is_in_input_region` vs `surface_under`
+`SpaceElement::is_in_input_region` for `Window` is literally
+`self.surface_under(*point, WindowSurfaceType::ALL).is_some()`
+(source: `src/desktop/space/wayland/window.rs`) — the "cheap predicate" and the "full lookup" are the
+same traversal, so a bbox test in front of it is the only actual early-out.
+
+`WindowSurfaceType::ALL` = `TOPLEVEL | SUBSURFACE | POPUP`, and `Window::surface_under` tests
+**popups first** (in `PopupManager::popups_for_surface` order, each offset by
+`geometry().loc + location - popup.geometry().loc`) before descending the toplevel's surface tree.
+
+Per-surface, `contains_point` (`src/desktop/wayland/utils.rs`) rejects points outside the buffer
+rect, then returns `true` when `input_region.is_none()` — **a surface that declares no input region
+is input across its whole buffer**. A CSD client's shadow margin is usually exactly that, so it
+hit-tests as content, not as empty space.
+
+`Window::bbox()` is a commit-time cache: `on_commit` recomputes it from the surface tree, and
+driftwm only calls `on_commit` for non-sync-subsurface commits (`src/handlers/compositor.rs`). The
+popup half of `bbox_with_popups()` is computed live. So the box and `surface_under` can disagree
+transiently — treat the bbox as a conservative filter, not as an equivalent test.
+
 ## Selection / Clipboard
 
 ### Cross-app clipboard

@@ -5,7 +5,9 @@
 //! (`try_start_gesture_move`, `build_touch_move_grab`, `touch_suspended_hit`)
 //! rather than a hand-installed grab, so the pickers are under test too.
 
+use driftwm::config::Action;
 use smithay::backend::input::TouchSlot;
+use smithay::desktop::Window;
 use smithay::input::pointer::MotionEvent;
 use smithay::input::touch::{
     GrabStartData as TouchGrabStartData, MotionEvent as TouchMotionEvent, UpEvent,
@@ -16,7 +18,7 @@ use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
 use crate::decorations::DecorationHit;
 use crate::state::StageWindow;
 
-use super::{Fixture, config, map_window, window_by_app_id};
+use super::{Fixture, config, give_ssd, is_activated, map_window, window_by_app_id};
 
 fn pt(x: f64, y: f64) -> Point<f64, Logical> {
     Point::from((x, y))
@@ -513,4 +515,93 @@ fn touch_bar_drag_moves_a_stand_in() {
 
     lift_finger(&mut f);
     f.state().dismiss_suspended(sid);
+}
+
+/// A above B: A's SSD title bar (y in `[0, 25)`) sits directly over B's
+/// content, while A's own content starts at y = 25 — a point in the bar hits
+/// neither window's content, only A's chrome.
+fn title_bar_over_lower_content(f: &mut Fixture) -> (Window, Window) {
+    let id = f.add_client();
+    map_window(f, id, "b", (400, 300));
+    let b = window_by_app_id(f, "b").unwrap();
+    f.state()
+        .map_window(StageWindow::Client(b.clone()), Point::from((0, 0)), false);
+
+    map_window(f, id, "a", (400, 300));
+    let a = window_by_app_id(f, "a").unwrap();
+    f.state()
+        .map_window(StageWindow::Client(a.clone()), Point::from((0, 25)), false);
+    give_ssd(f, &a);
+
+    (a, b)
+}
+
+/// The interleaved walk must prefer A's chrome over B's content since A is
+/// on top — scanning every window's content before any chrome would resolve
+/// this point to B instead.
+#[test]
+fn draggable_element_under_prefers_a_higher_windows_title_bar_over_lower_content() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let (a, _b) = title_bar_over_lower_content(&mut f);
+
+    let point = pt(100.0, 10.0);
+    assert_eq!(
+        f.state().draggable_element_under(point),
+        Some(StageWindow::Client(a)),
+        "a point on the topmost window's title bar must resolve to that window"
+    );
+}
+
+/// `MoveWindow`/`ResizeWindow` resolve their target through
+/// `topmost_client_under`, the same interleaved walk `draggable_element_under`
+/// uses. The full Mod+drag path isn't reachable here — `on_pointer_button`
+/// takes a live `InputBackend` event the fixture can't construct — so this
+/// exercises the shared primitive directly: a press on a title bar must
+/// resolve to the window instead of finding nothing.
+#[test]
+fn topmost_client_under_resolves_an_ssd_title_bar_to_its_window() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    map_window(&mut f, id, "w", (400, 300));
+    let window = window_by_app_id(&mut f, "w").unwrap();
+    f.state()
+        .map_window(StageWindow::Client(window.clone()), INITIAL, false);
+    give_ssd(&mut f, &window);
+
+    // A point in the title-bar band, above the window's own content.
+    let bar = pt(INITIAL.x as f64 + 100.0, INITIAL.y as f64 - 10.0);
+    assert_eq!(
+        f.state().topmost_client_under(bar),
+        Some(window),
+        "a title-bar press must resolve to the window, not miss entirely"
+    );
+}
+
+/// `FocusCenter` resolves through the same unified walk, so pointing at A's
+/// title bar targets A even with B's content underneath and B currently
+/// holding focus.
+#[test]
+fn focus_center_on_a_title_bar_targets_that_window_not_the_content_beneath_it() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let (a, b) = title_bar_over_lower_content(&mut f);
+
+    f.state()
+        .set_activated_exclusive(&StageWindow::Client(b.clone()));
+    assert!(is_activated(&b));
+
+    f.state().warp_pointer(pt(100.0, 10.0));
+    f.state().execute_action(&Action::FocusCenter);
+
+    assert!(
+        is_activated(&a),
+        "FocusCenter on A's title bar must resolve to A, not the content beneath it"
+    );
+    assert!(!is_activated(&b));
 }

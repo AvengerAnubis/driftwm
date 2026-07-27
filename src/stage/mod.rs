@@ -199,6 +199,16 @@ impl<W: StageElement> Stage<W> {
         self.entry(window).map(|e| e.position)
     }
 
+    /// Position and pin state from a single `entry` lookup. `entry` is a linear
+    /// scan and the pointer-motion hit-test asks both questions of every window
+    /// it walks.
+    pub fn position_and_pinned<Q>(&self, window: &Q) -> Option<(Point<i32, Logical>, bool)>
+    where
+        W: PartialEq<Q>,
+    {
+        self.entry(window).map(|e| (e.position, e.pinned.is_some()))
+    }
+
     pub fn id_of<Q>(&self, window: &Q) -> Option<ElementId>
     where
         W: PartialEq<Q>,

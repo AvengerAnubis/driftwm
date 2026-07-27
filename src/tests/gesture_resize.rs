@@ -557,6 +557,74 @@ size = [400, 300]
     end_swipe(&mut f);
 }
 
+/// A pinned window's stage entry keeps its stale canvas position (only its
+/// screen-space site is live) — the walk must skip past it rather than
+/// stopping there, so `under`, genuinely mapped beneath it, stays reachable.
+#[test]
+fn draggable_element_under_reaches_through_a_pinned_windows_phantom_rect() {
+    let mut f = Fixture::with_config(config(
+        r#"
+[[window_rules]]
+app_id = "pin"
+pinned_to_screen = true
+size = [400, 300]
+"#,
+    ));
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    map_window(&mut f, id, "pin", (400, 300));
+    let pin = window_by_app_id(&mut f, "pin").unwrap();
+    let site = f.state().stage.pin_of(&pin).unwrap().screen_pos;
+
+    map_window(&mut f, id, "under", (400, 300));
+    let under = window_by_app_id(&mut f, "under").unwrap();
+    // Overlap the pin's phantom canvas rect exactly, then re-raise the pin so
+    // it stays topmost — the walk must reach `under` by skipping past it, not
+    // because `under` happens to be on top.
+    f.state()
+        .map_window(StageWindow::Client(under.clone()), site, false);
+    f.state().raise_window(&pin, false);
+
+    let point = pt(site.x as f64 + 200.0, site.y as f64 + 150.0);
+    assert_eq!(
+        f.state().draggable_element_under(point),
+        Some(StageWindow::Client(under)),
+        "the pinned window's phantom rect must be skipped, not a dead end"
+    );
+}
+
+/// Unlike hover (which rejects a client's own resize border and continues to
+/// whatever's beneath it), gesture targeting accepts every band the walk
+/// offers — so window A's margin overhanging window B's content resolves to
+/// A, the window whose margin it actually is.
+#[test]
+fn draggable_element_under_resolves_a_resize_margin_to_its_owner() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    map_window(&mut f, id, "b", (400, 300));
+    let b = window_by_app_id(&mut f, "b").unwrap();
+    f.state()
+        .map_window(StageWindow::Client(b.clone()), Point::from((0, 0)), false);
+
+    map_window(&mut f, id, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(StageWindow::Client(a.clone()), Point::from((400, 0)), false);
+
+    // A's left resize margin overhangs B's right edge: x in [392, 400).
+    let overhang = pt(396.0, 150.0);
+    assert_eq!(
+        f.state().draggable_element_under(overhang),
+        Some(StageWindow::Client(a)),
+        "the margin must resolve to its owner, not the window it overhangs"
+    );
+}
+
 /// The pinned branch is widget-proof. A window that is both `pinned_to_screen`
 /// and a widget is claimed by the screen-space pinned arm before the canvas
 /// picker (which rejects widgets) ever sees it, so that arm has to reject it

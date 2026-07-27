@@ -386,11 +386,12 @@ impl DriftWm {
                 match action {
                     MouseAction::MoveWindow | MouseAction::MoveSnappedWindows => {
                         let want_cluster = matches!(action, MouseAction::MoveSnappedWindows);
-                        if let Some((window, _)) =
-                            self.element_under(pos).map(|(w, l)| (w.clone(), l))
+                        // Chrome counts: the modifier suppressed the decoration
+                        // branch above, so a title-bar press must still resolve
+                        // to its window. The walk skips pinned windows.
+                        if let Some(window) = self.topmost_client_under(pos)
                             && let Some(surface) = window.wl_surface()
                             && !config::applied_rule(&surface).is_some_and(|r| r.widget)
-                            && !self.is_pinned(&window)
                         {
                             self.raise_and_focus(&window, serial);
 
@@ -433,7 +434,7 @@ impl DriftWm {
                             pointer.set_grab(self, grab, serial, Focus::Clear);
                             return;
                         }
-                        // No window or pinned — fall through to normal click
+                        // Empty canvas or a widget — fall through to normal click
                     }
                     MouseAction::ResizeWindow | MouseAction::ResizeWindowSnapped => {
                         // Opt-in cluster propagation: only
@@ -441,13 +442,11 @@ impl DriftWm {
                         // `ResizeWindow` builds an empty snapshot so the
                         // grab behaves like pre-slice-2 single-window resize.
                         let want_cluster = matches!(action, MouseAction::ResizeWindowSnapped);
-                        if let Some((window, _)) =
-                            self.element_under(pos).map(|(w, l)| (w.clone(), l))
+                        if let Some(window) = self.topmost_client_under(pos)
                             && !window
                                 .wl_surface()
                                 .and_then(|s| config::applied_rule(&s))
                                 .is_some_and(|r| r.widget)
-                            && !self.is_pinned(&window)
                         {
                             self.raise_and_focus(&window, serial);
 
@@ -461,7 +460,7 @@ impl DriftWm {
                             );
                             return;
                         }
-                        // No window or pinned — fall through
+                        // Empty canvas or a widget — fall through
                     }
                     MouseAction::PanViewport => {
                         self.set_panning(true);

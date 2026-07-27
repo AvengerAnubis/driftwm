@@ -204,6 +204,21 @@ fn server_surface(window: &Window) -> WlSurface {
     window.wl_surface().unwrap().into_owned()
 }
 
+/// Register an SSD title bar for `window`, exactly as the compositor does on the
+/// first sized commit under `default_mode = "server"`. The headless test client
+/// never binds xdg-decoration, so that commit path doesn't run — do it directly
+/// so the hit-tests report the window's chrome bands.
+fn give_ssd(f: &mut Fixture, window: &Window) {
+    use smithay::reexports::wayland_server::Resource;
+    let width = window.geometry().size.w;
+    let id = server_surface(window).id();
+    let deco =
+        crate::decorations::WindowDecoration::new(width, true, &f.state().config.decorations);
+    f.state()
+        .decorations
+        .insert(crate::decorations::DecorationKey::Surface(id), deco);
+}
+
 /// Whether the client's most recent configure carried `Maximized` — what a
 /// client's own restore button keys off. Shared by every resize arm's test, so
 /// the check that keeps the arms in sync isn't itself duplicated.

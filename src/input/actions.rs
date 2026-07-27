@@ -170,19 +170,12 @@ impl DriftWm {
             Action::FocusCenter => {
                 let pointer = self.seat.get_pointer().unwrap();
                 let pos = pointer.current_location();
-                // Pinned windows live in screen space (no canvas position to
-                // center the camera on) — skip them here.
-                if let Some((window, _)) = self.element_under(pos) {
-                    let window = window.clone();
-                    if !self.is_pinned(&window) {
-                        self.navigate_to_element(&StageWindow::Client(window), true);
-                    }
-                } else if let Some((crate::input::DecoTarget::Suspended(s), _)) =
-                    self.decoration_under(pos)
-                {
-                    // A stand-in occludes any client beneath it — center the
-                    // stand-in by its visual frame, not the hidden client.
-                    self.navigate_to_element(&StageWindow::Suspended(s), true);
+                // Chrome counts as part of its window, and a stand-in is
+                // centered by its own visual frame rather than the client hidden
+                // beneath it. Pinned windows live in screen space (no canvas
+                // position to center the camera on) — the walk skips them.
+                if let Some((element, _)) = self.topmost_under(pos, |_, _| true) {
+                    self.navigate_to_element(&element, true);
                 }
             }
             Action::CenterNearest(dir) => {

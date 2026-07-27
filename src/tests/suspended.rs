@@ -12,7 +12,7 @@ use crate::decorations::DecorationHit;
 use crate::input::DecoTarget;
 use crate::state::{FocusIntent, FocusTarget, StageWindow, SuspendedId};
 
-use super::{Fixture, is_activated, map_window, window_by_app_id};
+use super::{Fixture, give_ssd, is_activated, map_window, window_by_app_id};
 
 /// Server decorations on by default so suspended chrome (and the client bar)
 /// resolve, and 1:1 canvas↔screen (camera origin, zoom 1).
@@ -547,6 +547,110 @@ fn hover_onto_suspended_deactivates_the_previous_window() {
     assert!(
         !is_activated(&a),
         "hovering onto a stand-in must clear the previously-activated window's Activated hint"
+    );
+
+    f.state().dismiss_suspended(sid);
+}
+
+/// A widget's own SSD chrome can only ever be topmost over a stand-in —
+/// `enforce_stacking` keeps every widget below every ordinary window, so a
+/// normal window can never sit under a widget's title bar in the first place.
+/// The widget's chrome must still win the walk here and `hover_focus_window`
+/// bails on the widget gate, so the point must not fall through to the
+/// stand-in underneath: no focus intent at all, not even the stand-in's.
+#[test]
+fn hover_on_a_widgets_title_bar_over_a_stand_in_focuses_neither() {
+    let mut f = Fixture::with_config(
+        Config::from_toml(
+            r#"
+            focus_follows_mouse = true
+            [decorations]
+            default_mode = "server"
+            [[window_rules]]
+            app_id = "widget"
+            widget = true
+        "#,
+        )
+        .unwrap(),
+    );
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((0, 0)),
+        Size::from((400, 300)),
+        "s",
+        "S",
+    );
+
+    let id = f.add_client();
+    map_window(&mut f, id, "widget", (400, 300));
+    let widget = window_by_app_id(&mut f, "widget").unwrap();
+    // Mapping a widget re-raises every non-widget (including a stand-in)
+    // above it via `enforce_stacking`; re-place it to get back on top.
+    f.state().map_window(
+        StageWindow::Client(widget.clone()),
+        Point::from((0, 25)),
+        false,
+    );
+    give_ssd(&mut f, &widget);
+    assert!(f.state().window_focus.is_none());
+
+    // The widget's title bar (y in [0, 25)) sits over the stand-in's body.
+    let bar = pt(100.0, 10.0);
+    f.state().warp_pointer(bar);
+    f.state().maybe_hover_focus(bar);
+
+    assert!(
+        f.state().window_focus.is_none(),
+        "the widget's title bar must not fall through to the stand-in beneath it"
+    );
+
+    f.state().dismiss_suspended(sid);
+}
+
+/// A client's own invisible resize margin can overhang a suspended stand-in
+/// beneath it. The margin is chrome belonging to the client, not a target on
+/// its own, so hover rejects it and continues the walk — landing on the
+/// stand-in's body, since it's what's genuinely there.
+#[test]
+fn hover_on_a_clients_resize_margin_overhanging_a_stand_in_focuses_the_stand_in() {
+    let mut f = Fixture::with_config(
+        Config::from_toml(
+            r#"
+            focus_follows_mouse = true
+            [decorations]
+            default_mode = "server"
+        "#,
+        )
+        .unwrap(),
+    );
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((0, 0)),
+        Size::from((400, 300)),
+        "s",
+        "S",
+    );
+
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(StageWindow::Client(a.clone()), Point::from((400, 0)), false);
+
+    // A's left resize margin overhangs the stand-in's right edge: x in [392, 400).
+    let overhang = pt(396.0, 150.0);
+    f.state().warp_pointer(overhang);
+    f.state().maybe_hover_focus(overhang);
+
+    assert!(
+        matches!(f.state().window_focus, Some(FocusIntent::Suspended(s)) if s == sid),
+        "the margin must reject-and-continue to the stand-in beneath it"
     );
 
     f.state().dismiss_suspended(sid);

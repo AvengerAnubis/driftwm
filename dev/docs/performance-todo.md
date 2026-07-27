@@ -116,21 +116,6 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   `self.pending_recenter.remove(&wl_surface.id());` in that branch, mirroring
   `unfit_window`. Left out of the release only because doing it properly wants
   its own test, and the fit-side chain was the one with a demonstrated repro.
-- **Gesture move/resize drags the window *behind* an SSD title bar.**
-  `draggable_element_under` (`src/input/mod.rs`) consults its two channels
-  sequentially: `element_under_raw` is exhausted before `decoration_under` is
-  tried at all. A 25px SSD title bar and 8px CSD resize margin lie outside
-  `window_bbox_with_popups`, so on that band the topmost window is invisible to
-  the surface channel and a lower window's content wins. Pointer clicks and
-  pick-mode clicks both resolve correctly, so this is gesture-only — and within
-  touch, a one-finger title-bar drag moves the right window while a hold-drag at
-  the same pixel moves the wrong one. Pre-existing (the old `window_under` had
-  it) and documented in the function's doc comment. Fix: interleave, folding the
-  chrome test into the `element_under_skipping` loop the way the stand-in arm
-  already is. `pointer_context` (`src/input/pointer.rs`) is a hand-assembled
-  picker that already gets this union right and is the model to follow.
-  _Deferred from the release: it changes hit-testing on every gesture move and
-  resize, and wants its own test pass._
 - **A stand-in is adopted out from under a live grab.**
   `element_under_interactive_grab`'s contract is that nothing may reposition an
   element under a grab, but the activation path only asks about
@@ -148,14 +133,19 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   draws at `visual.loc` and sits motionless under the finger, then rubber-bands
   over a full leg when the wait releases. Fix: `cancel_window_animation` at grab
   install, symmetric with the existing arm.
-- **A pinned window's canvas ghost is a gesture dead zone at zoom > 1.**
+- **A pinned window's canvas ghost misdirects clicks and taps at zoom > 1.**
   `sync_pinned_locs` keeps a pinned window's stage position in sync but leaves
   its canvas *size* unscaled, so at zoom 2 the stage rect covers twice the
-  screen area the window occupies. In the outer band `pinned_element_under`
-  (screen space) says no, `element_under_raw` returns the pinned window, and the
-  `is_canvas_window` stop returns `None` — a gesture over a genuinely visible
-  normal window pans instead of moving it. `element_under` has the same hole, so
-  Alt+drag agrees; consistent and pre-existing.
+  screen area the window occupies. The gesture half is closed — `topmost_under`
+  skips pinned windows, so move/resize gestures, Alt+drag and hover all reach
+  what is genuinely rendered in the outer band. `element_under_skipping` is now
+  the one canvas-space walk that doesn't skip pinned (`topmost_under`,
+  `decoration_under` and `surface_under` all do), so its consumers still see the
+  ghost: `pointer_context` (`src/input/pointer.rs`) reads OnWindow over empty
+  canvas, so on-canvas bindings don't fire there, and the click-to-focus
+  fallback plus the touch clean-tap raise (`src/grabs/touch_gesture_grab.rs`)
+  raise+focus the pinned window instead of the window actually under the
+  pointer.
 - **Zero-net-change resize strands `ResizeState::WaitingForLastCommit`.**
   Grab start sets `Resizing` in *pending* state only, so a resize that ends
   where it began leaves `send_pending_configure` with nothing to send and the

@@ -5,10 +5,11 @@
 use smithay::desktop::Window;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
-use crate::state::StageWindow;
+use crate::state::{FocusTarget, StageWindow};
 
 use super::{
-    Fixture, config, is_activated, keyboard_focus, map_window, server_surface, window_by_app_id,
+    Fixture, config, give_ssd, is_activated, keyboard_focus, map_window, server_surface,
+    window_by_app_id,
 };
 
 /// Force `window` to a known canvas position without touching activation —
@@ -176,4 +177,252 @@ widget = true
 
     assert!(is_activated(&normal));
     assert!(!is_activated(&widget));
+}
+
+/// SSD chrome lives outside the surface bbox that `element_under` scans, so
+/// hover-focus must resolve a title-bar hit through the decoration channel
+/// rather than missing it entirely.
+#[test]
+fn hover_on_an_ssd_title_bar_focuses_its_window() {
+    let mut f = Fixture::with_config(config(
+        r#"
+focus_follows_mouse = true
+[decorations]
+default_mode = "server"
+"#,
+    ));
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    map_window(&mut f, id, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    place(&mut f, &a, Point::from((0, 0)));
+    map_window(&mut f, id, "b", (400, 300));
+    let b = window_by_app_id(&mut f, "b").unwrap();
+    place(&mut f, &b, Point::from((2000, 0)));
+    give_ssd(&mut f, &b);
+
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&a, serial);
+    assert!(is_activated(&a));
+
+    // B's title bar band, above its own content: y in [-25, 0).
+    let bar = Point::from((2010.0, -10.0));
+    f.state().warp_pointer(bar);
+    f.state().maybe_hover_focus(bar);
+
+    assert!(
+        is_activated(&b),
+        "hovering the SSD title bar must focus its window"
+    );
+}
+
+/// The close button is a separate chrome band from the title bar; hover must
+/// resolve it to the window too, not just the bar body.
+#[test]
+fn hover_on_an_ssd_close_button_focuses_its_window() {
+    let mut f = Fixture::with_config(config(
+        r#"
+focus_follows_mouse = true
+[decorations]
+default_mode = "server"
+"#,
+    ));
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    map_window(&mut f, id, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    place(&mut f, &a, Point::from((0, 0)));
+    map_window(&mut f, id, "b", (400, 300));
+    let b = window_by_app_id(&mut f, "b").unwrap();
+    place(&mut f, &b, Point::from((2000, 0)));
+    give_ssd(&mut f, &b);
+
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&a, serial);
+    assert!(is_activated(&a));
+
+    // B's close button, bar 25px tall: x in [2000+400-25-8, 2000+400-8), y in [-25, 0).
+    let close = Point::from((2000.0 + 400.0 - 20.0, -12.0));
+    f.state().warp_pointer(close);
+    f.state().maybe_hover_focus(close);
+
+    assert!(
+        is_activated(&b),
+        "hovering the close button must still focus the window, not swallow the hover"
+    );
+}
+
+/// The invisible CSD resize margin is chrome too, but hover must not treat it
+/// as a target on its own — otherwise every window would grab focus slightly
+/// outside its own edges. `b` holds focus so a wrongly-accepted margin hit has
+/// something to visibly steal: with only `a` on the canvas (already the sole
+/// focus target), this test couldn't fail no matter what the margin does.
+#[test]
+fn hover_on_the_csd_resize_margin_over_empty_canvas_does_not_focus() {
+    let mut f = Fixture::with_config(config("focus_follows_mouse = true\n"));
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    map_window(&mut f, id, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    place(&mut f, &a, Point::from((0, 0)));
+    let b_surface = map_window(&mut f, id, "b", (400, 300));
+    let b = window_by_app_id(&mut f, "b").unwrap();
+    place(&mut f, &b, Point::from((2000, 0)));
+
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&b, serial);
+    f.double_roundtrip(id);
+    assert!(is_activated(&b));
+    f.client(id).window(&b_surface).format_recent_configures();
+
+    // A's outer 8px CSD resize margin, left edge — clear of any window content,
+    // and clear of b too.
+    let margin = Point::from((-4.0, 150.0));
+    f.state().warp_pointer(margin);
+    f.state().maybe_hover_focus(margin);
+    f.double_roundtrip(id);
+
+    assert!(
+        is_activated(&b),
+        "hovering a's resize margin over empty canvas must not steal focus"
+    );
+    let configures = f.client(id).window(&b_surface).format_recent_configures();
+    assert!(
+        configures.is_empty(),
+        "hovering the resize margin over empty canvas must not touch focus, got:\n{configures}"
+    );
+}
+
+/// Window A's resize margin can overhang window B's content — a click there
+/// still resizes A, but hover must reject-and-continue past A's margin to
+/// focus B underneath.
+#[test]
+fn hover_on_a_resize_margin_overhanging_another_window_focuses_that_window() {
+    let mut f = Fixture::with_config(config("focus_follows_mouse = true\n"));
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    map_window(&mut f, id, "b", (400, 300));
+    let b = window_by_app_id(&mut f, "b").unwrap();
+    place(&mut f, &b, Point::from((0, 0)));
+    map_window(&mut f, id, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    place(&mut f, &a, Point::from((400, 0)));
+
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&a, serial);
+    assert!(is_activated(&a));
+
+    // A's left resize margin overhangs B's right edge: x in [392, 400).
+    let overhang = Point::from((396.0, 150.0));
+    f.state().warp_pointer(overhang);
+    f.state().maybe_hover_focus(overhang);
+
+    assert!(
+        is_activated(&b),
+        "the overhanging margin must reject-and-continue to the window beneath it"
+    );
+    assert!(!is_activated(&a));
+}
+
+/// A sits above B, and a point on A's SSD title bar also lies directly over
+/// B's content underneath. The two title-bar tests above place windows
+/// 2000px apart and don't exercise this overlap, where the walk must prefer
+/// the topmost window's chrome over a lower window's content.
+#[test]
+fn hover_on_a_higher_windows_title_bar_over_a_lower_windows_content_focuses_the_higher_window() {
+    let mut f = Fixture::with_config(config(
+        r#"
+focus_follows_mouse = true
+[decorations]
+default_mode = "server"
+"#,
+    ));
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    map_window(&mut f, id, "b", (400, 300));
+    let b = window_by_app_id(&mut f, "b").unwrap();
+    place(&mut f, &b, Point::from((0, 0)));
+    map_window(&mut f, id, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    // A's title bar (y in [0, 25)) sits directly over B's content; A's own
+    // content starts at y = 25.
+    place(&mut f, &a, Point::from((0, 25)));
+    give_ssd(&mut f, &a);
+
+    // Focus b directly, without the raise that `place`/`raise_and_focus`
+    // would apply — z-order must stay with a on top.
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state()
+        .set_window_focus(Some(FocusTarget(server_surface(&b))), serial);
+    f.state()
+        .set_activated_exclusive(&StageWindow::Client(b.clone()));
+    assert!(is_activated(&b));
+
+    let bar = Point::from((100.0, 10.0));
+    f.state().warp_pointer(bar);
+    f.state().maybe_hover_focus(bar);
+
+    assert!(
+        is_activated(&a),
+        "a point on the topmost window's title bar must resolve to it, not the content beneath"
+    );
+    assert!(!is_activated(&b));
+}
+
+/// Hover's counterpart to the pinned-window phantom-rect case covered for
+/// gestures in `gesture_resize.rs`: a pinned window's stage entry is a
+/// cached canvas position, re-anchored to its live `screen_pos` only on a
+/// camera move, so a zoom change alone leaves it stale. `pin` starts focused
+/// so a wrong hit on the stale phantom entry is a visible no-op; hover must
+/// instead reach `under`, which is what's genuinely drawn there.
+#[test]
+fn hover_on_a_pinned_windows_phantom_rect_focuses_the_window_really_there() {
+    let mut f = Fixture::with_config(config(
+        r#"
+focus_follows_mouse = true
+
+[[window_rules]]
+app_id = "pin"
+pinned_to_screen = true
+size = [400, 300]
+"#,
+    ));
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    map_window(&mut f, id, "pin", (400, 300));
+    let pin = window_by_app_id(&mut f, "pin").unwrap();
+    let site = f.state().stage.pin_of(&pin).unwrap().screen_pos;
+
+    map_window(&mut f, id, "under", (400, 300));
+    let under = window_by_app_id(&mut f, "under").unwrap();
+    // Overlap the pin's (zoom-1) phantom canvas rect exactly, then re-raise
+    // the pin so it stays topmost.
+    f.state()
+        .map_window(StageWindow::Client(under.clone()), site, false);
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&pin, serial);
+    assert!(is_activated(&pin));
+
+    // Zoom in without panning: the pin keeps rendering at `site` (pinned
+    // windows always draw at scale 1), but its cached canvas position is only
+    // re-derived on the next camera move — so a point deep in the phantom
+    // rect now maps to a screen position well outside where the pin actually
+    // is.
+    f.state().with_output_state(|os| os.zoom = 2.0);
+
+    let point = Point::from((site.x as f64 + 350.0, site.y as f64 + 250.0));
+    f.state().warp_pointer(point);
+    f.state().maybe_hover_focus(point);
+
+    assert!(
+        is_activated(&under),
+        "hovering the pin's phantom rect must reach the window really drawn there"
+    );
+    assert!(!is_activated(&pin));
 }

@@ -14,7 +14,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1;
 
 use crate::state::{PickTarget, StageWindow};
 
-use super::{Fixture, map_window, window_by_app_id};
+use super::{Fixture, give_ssd, map_window, window_by_app_id};
 
 /// Feature armed with a 0.5 threshold; a client window path needs no SSD.
 fn config_pick() -> Config {
@@ -71,21 +71,6 @@ fn clear_targets(f: &mut Fixture) {
 
 fn pointer(f: &mut Fixture) -> smithay::input::pointer::PointerHandle<crate::state::DriftWm> {
     f.state().seat.get_pointer().unwrap()
-}
-
-/// Register an SSD title bar for `window`, exactly as the compositor does on the
-/// first sized commit under `default_mode = "server"`. The headless test client
-/// never binds xdg-decoration, so that commit path doesn't run — do it directly
-/// so `surface_under` reports the window's chrome bands.
-fn give_ssd(f: &mut Fixture, window: &smithay::desktop::Window) {
-    use smithay::reexports::wayland_server::Resource;
-    let width = window.geometry().size.w;
-    let id = super::server_surface(window).id();
-    let deco =
-        crate::decorations::WindowDecoration::new(width, true, &f.state().config.decorations);
-    f.state()
-        .decorations
-        .insert(crate::decorations::DecorationKey::Surface(id), deco);
 }
 
 /// Above the threshold, pick mode is inert: a press over a window is not
