@@ -209,6 +209,7 @@ impl TouchGestureGrab {
             };
             let serial = SERIAL_COUNTER.next_serial();
             data.raise_and_focus(&window, serial);
+            data.arm_interactive_move(&window);
             handle.set_grab(self, data, seq, grab);
             return true;
         }

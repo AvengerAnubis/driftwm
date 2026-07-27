@@ -728,6 +728,11 @@ pub struct DriftWm {
     /// run on different elements at once; grabs push on install and remove on
     /// unset.
     pub interactive_move: Vec<ClusterMember>,
+    /// View moves a live grab held back, keyed by the output each was staged
+    /// for. Landing one warps the pointer into the grab, so it waits — and the
+    /// animation entry that carried it is gone by the time it is held back, so
+    /// this is the only thing left that can hand it over once the grab lets go.
+    pub(crate) deferred_views: HashMap<String, PendingView>,
 
     pub held_action: Option<(u32, driftwm::config::Action, Instant)>,
 
@@ -920,20 +925,40 @@ impl DriftWm {
         self.idle_notifier_state.set_is_inhibited(is_inhibited);
     }
 
-    /// Record `target` as under a fresh interactive move grab. Called at grab
-    /// install (not first motion) so a press-and-hold with no motion is still
-    /// guarded; balanced by `disarm_interactive_move` on grab unset.
+    /// Take every output's viewport out of flight — camera target, zoom target,
+    /// zoom anchor and momentum — and record `target` as under a fresh
+    /// interactive move grab. Called at grab install (not first motion) so a
+    /// press-and-hold with no motion is still guarded. Only the bookkeeping half
+    /// is balanced by `disarm_interactive_move` on grab unset; the cancel is a
+    /// one-way snapshot of the moment the grab took over.
     pub fn arm_interactive_move<T: Clone + Into<ClusterMember>>(&mut self, target: &T) {
+        // The grab measures its delta against a frozen canvas anchor, and a
+        // camera tick warps the pointer synchronously into it — so a flight the
+        // grab did not cause would drag the window from a motionless mouse.
+        // Stopping momentum drops the pan samples behind it too, which is what
+        // we want: a drag decided mid-swipe must not inherit that swipe's fling.
+        self.cancel_animations_everywhere();
         self.interactive_move.push(target.clone().into());
     }
 
     /// Drop one `target` entry armed by `arm_interactive_move`. Removes a single
-    /// occurrence so overlapping pointer/touch moves stay balanced.
+    /// occurrence so overlapping pointer/touch moves stay balanced. Mirroring
+    /// the arm's cancel, the last one out hands back the view moves the grab
+    /// held off.
     pub fn disarm_interactive_move<T: Clone + Into<ClusterMember>>(&mut self, target: &T) {
         let target = target.clone().into();
         if let Some(i) = self.interactive_move.iter().position(|m| *m == target) {
             self.interactive_move.remove(i);
         }
+        self.flush_deferred_views();
+    }
+
+    /// Whether `element` is the target of a live move grab. Membership only —
+    /// [`Self::element_under_interactive_grab`] is the wider question, since a
+    /// client resize is witnessed by the surface rather than by this list.
+    pub(crate) fn element_under_interactive_move(&self, element: &StageWindow) -> bool {
+        self.interactive_move
+            .contains(&ClusterMember::from_element(element))
     }
 
     pub fn cursor_is_animated(&self) -> bool {

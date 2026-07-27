@@ -22,6 +22,27 @@ use smithay::output::Output;
 use super::{DriftWm, FocusTarget, output_state};
 
 impl DriftWm {
+    /// Stop `output`'s camera flight where it stands: both targets, the zoom
+    /// anchor they lerp around, and any momentum still feeding them.
+    /// `overview_return` deliberately survives — it is a place to go back to,
+    /// not a motion.
+    pub(crate) fn cancel_animations_on(&mut self, output: &Output) {
+        let mut os = output_state(output);
+        os.camera_target = None;
+        os.zoom_target = None;
+        os.zoom_animation_anchor = None;
+        os.momentum.stop();
+    }
+
+    /// [`Self::cancel_animations_on`] for every output. What a grab install
+    /// needs: the cancel runs once, but `focused_output` keeps moving after it,
+    /// so a flight left running on another output becomes the active one mid-grab.
+    pub(crate) fn cancel_animations_everywhere(&mut self) {
+        for output in self.space.outputs().cloned().collect::<Vec<_>>() {
+            self.cancel_animations_on(&output);
+        }
+    }
+
     /// Frame-rate independent lerp factor for smooth animations.
     /// Returns how much of the remaining distance to cover this frame.
     fn animation_factor(&self, dt: Duration) -> f64 {

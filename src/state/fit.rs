@@ -144,8 +144,10 @@ impl DriftWm {
         };
         // This fit owns the output's view from here on, whether it parks its pan
         // or applies it below. A pan parked on some other window's freeze was
-        // promised to an action this one has just superseded.
+        // promised to an action this one has just superseded — including one
+        // already released and waiting out a grab.
         self.window_animations.drop_pending_views_on(&output.name());
+        self.deferred_views.remove(&output.name());
         let Some(id) = frozen else {
             let mut os = output_state(&output);
             os.momentum.stop();
@@ -159,12 +161,9 @@ impl DriftWm {
         // of by the fit's own pan, and clearing it also makes the stamp below
         // exact — nothing legitimately moves this camera between here and the
         // release.
+        self.cancel_animations_on(&output);
         let (staged_camera, staged_zoom) = {
-            let mut os = output_state(&output);
-            os.momentum.stop();
-            os.camera_target = None;
-            os.zoom_target = None;
-            os.zoom_animation_anchor = None;
+            let os = output_state(&output);
             (os.camera, os.zoom)
         };
         self.window_animations.stage_pending_view(

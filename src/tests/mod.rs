@@ -55,11 +55,33 @@ use fixture::Fixture;
 use driftwm::config::Config;
 use driftwm::window_ext::WindowExt;
 use smithay::desktop::Window;
+use smithay::input::pointer::MotionEvent;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 use smithay::wayland::seat::WaylandFocus;
 
 fn config(toml: &str) -> Config {
     Config::from_toml(toml).unwrap()
+}
+
+/// Deliver one pointer motion at canvas-space `loc`, routed through whatever
+/// grab is live.
+fn motion(f: &mut Fixture, loc: Point<f64, Logical>) {
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let event = MotionEvent {
+        location: loc,
+        serial: SERIAL_COUNTER.next_serial(),
+        time: 0,
+    };
+    pointer.motion(f.state(), None, &event);
+}
+
+/// Tear the live grab down through its real `unset`, whether or not a physical
+/// button installed it — a gesture drag has no button to release.
+fn end_grab(f: &mut Fixture) {
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let serial = SERIAL_COUNTER.next_serial();
+    pointer.unset_grab(f.state(), serial, 0);
 }
 
 /// Map a toplevel with `app_id`, attach a buffer at `size`, and settle.

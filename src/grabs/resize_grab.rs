@@ -324,7 +324,13 @@ impl PointerGrab<DriftWm> for ResizeGrab {
             // persist its settled size on the session-store debounce instead,
             // and balance the grab-target entry its install armed (a client's
             // resize is witnessed by the surface's own `ResizeState`).
-            ClusterMember::Client(_) => self.finalize(),
+            ClusterMember::Client(_) => {
+                self.finalize();
+                // A client resize is on no grab-target list, so nothing above
+                // hands back a view move this grab held off — the stand-in arm's
+                // disarm does that for itself.
+                data.flush_deferred_views();
+            }
             ClusterMember::Suspended(id) => {
                 data.disarm_interactive_move(id);
                 data.session_store_mark_dirty();

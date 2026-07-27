@@ -685,7 +685,7 @@ impl DriftWm {
                 self.resize_captures.drop_for(id);
             }
             if let Some(pending) = released_view {
-                self.apply_pending_view(pending);
+                self.land_or_defer_view(&element, pending);
             }
         }
 
@@ -721,6 +721,66 @@ impl DriftWm {
 
         for output in affected {
             self.redraws_needed.insert(output);
+        }
+    }
+
+    /// Land the view move `element`'s entry just released, or hold it until the
+    /// grab that would be warped by it lets go.
+    ///
+    /// A grab install clears the camera targets [`Self::apply_pending_view`]
+    /// treats as "a later action owns the view", so without this the pan would
+    /// land *more* readily under a grab than without one — straight into
+    /// something measuring its delta against a frozen canvas anchor.
+    fn land_or_defer_view(&mut self, element: &StageWindow, pending: PendingView) {
+        if self.view_warps_a_live_grab(element, &pending) {
+            self.deferred_views.insert(pending.output.clone(), pending);
+            return;
+        }
+        self.apply_pending_view(pending);
+    }
+
+    /// Whether landing `pending` would feed synthetic motion to a grab that did
+    /// not ask for it.
+    fn view_warps_a_live_grab(&self, element: &StageWindow, pending: &PendingView) -> bool {
+        // `warp_pointer` reaches a grab on exactly this condition, and only on
+        // it: `interactive_move` would miss every client resize, which installs
+        // a grab measuring against the same frozen anchor without registering as
+        // an interactive move.
+        if !self
+            .seat
+            .get_pointer()
+            .is_some_and(|pointer| pointer.is_grabbed())
+        {
+            return false;
+        }
+        // The dragged element is exempt: `end_element_animation` hands this same
+        // pan to a drag that interrupts the fit, so the user's own action
+        // inherits the promise on whichever release path gets there first.
+        if self.element_under_interactive_move(element) {
+            return false;
+        }
+        // Only the active output's camera warps the pointer (every tick that
+        // calls `warp_pointer` is `is_active`-gated), so a flight staged for any
+        // other output cannot reach the grab.
+        self.active_output()
+            .is_some_and(|output| output.name() == pending.output)
+    }
+
+    /// Hand over the view moves a grab held back. Called from the grab teardowns
+    /// rather than polled per frame: landing a pan is itself what makes the
+    /// compositor non-idle, so a check that only ran on an already-live frame
+    /// would never fire on the release that ends all activity.
+    ///
+    /// Reads no `PointerHandle` — a grab's `unset` runs inside the pointer mutex.
+    /// The `interactive_move` check stands in for it: the pointer grab is on its
+    /// way out by definition, and any *other* grab still holding one is on that
+    /// list and will flush on its own release.
+    pub(crate) fn flush_deferred_views(&mut self) {
+        if self.deferred_views.is_empty() || !self.interactive_move.is_empty() {
+            return;
+        }
+        for pending in std::mem::take(&mut self.deferred_views).into_values() {
+            self.apply_pending_view(pending);
         }
     }
 

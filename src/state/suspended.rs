@@ -25,7 +25,7 @@ use driftwm::window_ext::WindowExt;
 
 use crate::decorations::DecorationKey;
 use crate::grabs::ResizeState;
-use crate::state::{ClusterMember, DriftWm, StageWindow, SuspendedId, SuspendedWindow};
+use crate::state::{DriftWm, StageWindow, SuspendedId, SuspendedWindow};
 use crate::surface_tree::focus_belongs_to_toplevel;
 
 /// A close whose `toplevel_destroyed` should convert into a suspended window,
@@ -318,10 +318,7 @@ impl DriftWm {
     /// this is transient, so the relaunch caller leaves the pending relaunch to
     /// its TTL rather than dismissing.
     pub(crate) fn element_under_interactive_grab(&self, element: &StageWindow) -> bool {
-        if self
-            .interactive_move
-            .contains(&ClusterMember::from_element(element))
-        {
+        if self.element_under_interactive_move(element) {
             return true;
         }
         // The resize half is a client-side protocol state, so it answers for

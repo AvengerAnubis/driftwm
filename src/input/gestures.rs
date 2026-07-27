@@ -61,12 +61,9 @@ impl DriftWm {
     }
 
     pub(crate) fn cancel_animations(&mut self) {
-        self.with_output_state(|os| {
-            os.camera_target = None;
-            os.zoom_target = None;
-            os.zoom_animation_anchor = None;
-            os.momentum.stop();
-        });
+        if let Some(output) = self.active_output() {
+            self.cancel_animations_on(&output);
+        }
     }
 }
 

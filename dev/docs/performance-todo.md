@@ -216,17 +216,24 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   entry is live and falling back to the stage position otherwise — the pattern
   `window_screen_rect_on` (`src/state/window_animation_driver.rs`) already uses.
   Check `geometry_space` first; that accessor's doc warns about Canvas vs Screen.
-- **A grab held still during a camera animation drags the window.** Press and
-  hold a title bar while the canvas is gliding (momentum, or any camera/zoom
-  animation) and the window travels with the camera. `warp_pointer`
-  (`src/state/viewport_animation.rs`) synthesizes real motion into a live grab to
-  keep the pointer at a fixed *screen* position, so its *canvas* position moves —
-  and `apply_move` measures its delta against a fixed canvas anchor, which reads
-  as a genuine drag. A press without hold is unaffected: no grab is live to
-  receive the synthesized motion. The underlying question is whether a `MoveGrab`
-  should track canvas or screen space during a camera animation; the answer also
-  decides what `apply_resize` should do, since it turns the same delta into a
-  size change. Confirmed on hardware.
+- **A camera target armed *after* a resize grab installs still resizes the
+  window.** `warp_pointer` (`src/state/viewport_animation.rs`) synthesizes real
+  motion into a live grab to keep the pointer at a fixed *screen* position, so its
+  *canvas* position moves, and `apply_resize` measures that delta against a fixed
+  canvas anchor. The two grab-install chokepoints (`arm_interactive_move` in
+  `src/state/mod.rs`, `begin_client_resize` in `src/state/resize.rs`) take the
+  viewport out of flight, so a grab installed *during* a glide is safe — but that
+  is a snapshot of the moment the grab took over, not an invariant. Anything
+  arming `camera_target`/`zoom_target` while the grab is held resumes warping:
+  keyboard and IPC navigation (`src/input/actions.rs`, `src/ipc/mod.rs`), a new
+  window mapping (`src/handlers/compositor.rs`), an activation request
+  (`src/handlers/xdg_shell.rs`), the output-removal warp
+  (`src/state/output.rs`). The **move** counterpart of this is deliberate and
+  hardware-confirmed: hold a window, then jump to a bookmark or home, and the
+  window is carried along — that is the feature, not a bug, and it is why the
+  chokepoints cancel only at install. Only the resize arm is wrong; a held border
+  is not a handle on the window. The fix is to re-anchor `ResizeGrab`'s
+  `start_data.location` by the camera delta, not to gate the producers.
 
 ## Structural backlog
 
