@@ -1,9 +1,11 @@
 use std::time::Instant;
 
 use smithay::output::Output;
-use smithay::utils::{Logical, Point};
+use smithay::utils::{Logical, Point, Rectangle, Size};
 
-use super::{DriftWm, output_state};
+use driftwm::stage::StageElement;
+
+use super::{DriftWm, OutputState, StageWindow, output_logical_size, output_state};
 
 impl DriftWm {
     // Per-output field accessors. Getters fall back to a sensible default
@@ -120,5 +122,87 @@ impl DriftWm {
         if let Some(o) = self.active_output() {
             output_state(&o).last_frame_instant = val;
         }
+    }
+
+    /// Batch-access per-output state under a single mutex lock. Returns
+    /// `None` (skipping `f`) when there's no active output — per-output state
+    /// has no meaning then. Value-returning callers should provide a fallback
+    /// (e.g. `unwrap_or(1.0)` for zoom).
+    pub fn with_output_state<R>(&mut self, f: impl FnOnce(&mut OutputState) -> R) -> Option<R> {
+        let output = self.active_output()?;
+        let mut guard = output_state(&output);
+        Some(f(&mut guard))
+    }
+
+    pub fn get_viewport_size(&self) -> Size<i32, Logical> {
+        self.active_output()
+            .map(|o| output_logical_size(&o))
+            .unwrap_or((1, 1).into())
+    }
+
+    /// Viewport area minus layer-shell exclusive zones (panels, bars).
+    pub fn get_usable_area(&self) -> Rectangle<i32, Logical> {
+        self.active_output()
+            .map(|o| self.usable_area_on(&o))
+            .unwrap_or_else(|| Rectangle::new((0, 0).into(), (1, 1).into()))
+    }
+
+    /// `output`'s usable area (viewport minus layer-shell exclusive zones).
+    pub fn usable_area_on(&self, output: &Output) -> Rectangle<i32, Logical> {
+        smithay::desktop::layer_map_for_output(output).non_exclusive_zone()
+    }
+
+    /// Screen-space center of the usable area (= viewport center when no panels exist).
+    pub fn usable_center_screen(&self) -> Point<f64, Logical> {
+        self.active_output()
+            .map(|o| self.usable_center_screen_on(&o))
+            .unwrap_or_else(|| Point::from((0.5, 0.5)))
+    }
+
+    /// Screen-space center of `output`'s usable area (viewport minus panels).
+    pub fn usable_center_screen_on(&self, output: &Output) -> Point<f64, Logical> {
+        let usable = smithay::desktop::layer_map_for_output(output).non_exclusive_zone();
+        Point::from((
+            usable.loc.x as f64 + usable.size.w as f64 / 2.0,
+            usable.loc.y as f64 + usable.size.h as f64 / 2.0,
+        ))
+    }
+
+    pub fn viewport_center_canvas(&self) -> Point<f64, Logical> {
+        let vc = self.usable_center_screen();
+        let camera = self.camera();
+        let zoom = self.zoom();
+        Point::from((camera.x + vc.x / zoom, camera.y + vc.y / zoom))
+    }
+
+    /// True if at least `threshold` of the window's area is inside the active
+    /// output's viewport.
+    pub fn window_visible_at_least<W>(&self, window: &W, threshold: f64) -> bool
+    where
+        W: StageElement,
+        StageWindow: PartialEq<W>,
+    {
+        self.active_output()
+            .is_some_and(|o| self.window_visible_at_least_on(window, &o, threshold))
+    }
+
+    /// As `window_visible_at_least`, but against `output`'s viewport instead
+    /// of the active one.
+    pub fn window_visible_at_least_on<W>(&self, window: &W, output: &Output, threshold: f64) -> bool
+    where
+        W: StageElement,
+        StageWindow: PartialEq<W>,
+    {
+        let Some(loc) = self.stage.position_of(window) else {
+            return false;
+        };
+        let os = output_state(output);
+        driftwm::canvas::visible_fraction(
+            loc,
+            StageElement::size(window),
+            os.camera,
+            output_logical_size(output),
+            os.zoom,
+        ) >= threshold
     }
 }
