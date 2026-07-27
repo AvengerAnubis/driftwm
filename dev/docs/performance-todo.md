@@ -93,19 +93,23 @@ All four seam hypotheses came back refuted; these are what the sweep found on
 the way past. The three missed-checklist bugs it also found were fixed at the
 time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
 
-- **`unfill_window` strands a fullscreen exit's owed recenter** — the identical
-  hole just closed in `unfit_window`. `src/state/fill.rs`'s equal-size branch
-  skips the `pending_recenter` insert but never drops one already owed, and
-  `enter_fullscreen` preserves fill membership the same way it preserves fit, so
-  filled → fullscreen → exit → unfill-before-ack survives with a stale entry.
-  Symptom matches the fit case: the reflow is gated forever, and a later
-  drag-then-resize teleports the window back. Fix is the one line
-  `self.pending_recenter.remove(&wl_surface.id());` in that branch, mirroring
-  `unfit_window`. Left out of the release only because doing it properly wants
-  its own test, and the fit-side chain was the one with a demonstrated repro.
-  The same arm is missing on the IPC side: `src/ipc/mod.rs`'s `move` clears fill
-  and calls `map_window` but never drops an owed recenter, unlike its keybind
-  twin in `input/actions.rs`. Fix both together.
+- **The IPC `move` handler misplaces a window mid-settle, and two coupled bugs
+  do it.** `cmd_move` (`src/ipc/mod.rs`) clears fill and calls `map_window` but
+  never drops an owed `pending_recenter`, unlike its `MoveToBookmark` keybind
+  twin — *and* it sizes `rule_to_internal` from `window.geometry().size`, which
+  mid-settle after a fullscreen/fit/fill exit is the stale pre-exit size. Fixing
+  only the drop makes the second one worse: today the stale recenter drags the
+  window back, which at least reads as a visible no-op; without it the move
+  silently lands off by the pre/post-exit size difference and nothing corrects
+  it. The keybind twin carries the same stale read for fit and fill exits —
+  `move_bookmark_restore_rect` is `Some` only for a fullscreen exit, and
+  `input/actions.rs` falls back to the same `geometry().size`. Note
+  `configured_window_size` is *not* the fix: it reads pending state that goes
+  stale on any client-initiated resize (`src/state/fit.rs` documents this),
+  trading a one-frame race for a permanent error on mpv, terminals and browsers.
+  `cmd_move`'s single `geometry().size` read also feeds both the read and the
+  write arm, so a fix has to decide whether `driftwm msg move` *reporting*
+  changes with it, or accept read-then-write being non-idempotent mid-settle.
 - **A stand-in is adopted out from under a live grab.**
   `element_under_interactive_grab`'s contract is that nothing may reposition an
   element under a grab, but the activation path only asks about
@@ -115,15 +119,6 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   button-up. A *client* under a grab defers to the 30 s TTL; a stand-in does
   not. No corruption — both grabs anticipate the vanish and `interactive_move`
   stays balanced — but the asymmetry is a behaviour decision, not a missed line.
-- **A grab does not drop an animation entry that already exists.**
-  `start_geometry_entry` (`src/state/window_animation_driver.rs`) refuses to
-  *create* an entry for an element under an interactive grab, but no grab-install
-  path clears one.
-  Fit a window, then within `MAX_START_HOLD` (300 ms) grab a stand-in the fit
-  push displaced: the stand-in's entry is still parked on `waits_for`, so it
-  draws at `visual.loc` and sits motionless under the finger, then rubber-bands
-  over a full leg when the wait releases. Fix: `cancel_window_animation` at grab
-  install, symmetric with the existing arm.
 - **A pinned window's canvas ghost misdirects clicks and taps at zoom > 1.**
   `sync_pinned_locs` keeps a pinned window's stage position in sync but leaves
   its canvas *size* unscaled, so at zoom 2 the stage rect covers twice the
@@ -153,25 +148,24 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
 
 ## Structural backlog
 
-Not bugs. Measured against niri (93,951 Rust lines to driftwm's 98,156, but
-81,832 non-test to driftwm's 63,671 — driftwm carries ~29% less production code
-and a 0.54 test ratio to niri's 0.15), size is not the problem. Duplication is.
-Both sides of that comparison count dedicated test files only; driftwm also
-carries 11,897 lines of inline `#[cfg(test)]` modules, putting its true non-test
-total at 51,774 and its true test ratio nearer 0.90.
+Empty — the duplication it tracked is extracted, and both extractions are worth
+recording so a new arm grows through them rather than beside them.
 
-- **One invariant, N hand-maintained copies.** The
-  *clear fit → clear fill → seed `ResizeState` → set `Resizing` → unset
-  `Maximized`* sequence exists at five independent sites (`input/pointer.rs`,
-  `handlers/xdg_shell.rs`, `input/gestures/swipe.rs`, `input/touch.rs`,
-  `state/suspended.rs`), and the "drop an owed `pending_recenter` before
-  establishing a placement" step at eight (`state/fit.rs` ×2, `state/fill.rs`,
-  `state/fullscreen.rs`, `state/suspended.rs`, `input/actions.rs` ×3). Both have
-  now been caught mid-drift — a sweep found four of the five `Maximized` arms
-  and missed adoption, which left clients permanently stuck maximized. This is
-  the codebase's most productive bug class by a wide margin. Fix: make the
-  sequence a single constructor the arms call, so a new arm cannot forget a step.
-  The `state/mod.rs` split scattered the `pending_recenter` arms across one file
-  each without deduplicating any of them, so the count above is post-split and
-  the distance between arms is now larger, not smaller. Extract the constructor
-  before adding a ninth.
+The *clear fit → clear fill → seed `ResizeState` → set `Resizing` → unset
+`Maximized`* sequence is `DriftWm::begin_client_resize` (`src/state/resize.rs`),
+called by the **four** entry points that can start a client resize
+(`input/pointer.rs`, `handlers/xdg_shell.rs`, `input/gestures/swipe.rs`,
+`input/touch.rs`). Four, not the five this list used to claim: `adopt_relaunched`
+(`src/state/suspended.rs`) shares only the `Maximized` unset, and for an
+unrelated reason — the inherited stage entry has no fit state, so a set
+`Maximized` is one the client can never shed. It seeds no `ResizeState` and no
+resize is in flight; it is not a fifth site. The "drop an owed `pending_recenter`
+before establishing a placement" step is `DriftWm::drop_owed_recenter`
+(`src/state/recenter.rs`), called by all eight arms.
+
+The measurement that motivated the extraction: against niri (93,951 Rust lines to
+driftwm's 98,156, but 81,832 non-test to driftwm's 63,671 — driftwm carries ~29%
+less production code and a 0.54 test ratio to niri's 0.15), size was never the
+problem. Both sides of that comparison count dedicated test files only; driftwm
+also carries 11,897 lines of inline `#[cfg(test)]` modules, putting its true
+non-test total at 51,774 and its true test ratio nearer 0.90.
