@@ -19,6 +19,7 @@ mod stage_window;
 mod suspended;
 mod viewport;
 pub(crate) mod window_animation;
+mod window_animation_driver;
 pub use cluster_snapshot::{ClusterMember, ClusterResizeSnapshot};
 pub use cursor::{CursorFrames, CursorState};
 pub use errors::ErrorSource;
