@@ -751,11 +751,10 @@ impl DriftWm {
         let Some(id) = self.stage.id_of(window) else {
             return;
         };
-        let released = self
-            .window_animations
-            .on_window_commit(id, window.geometry().size);
+        let committed_size = window.geometry().size;
+        let released = self.window_animations.on_window_commit(id, committed_size);
         if let Some(generation) = released {
-            self.start_resize_crossfade(window, id, generation);
+            self.start_resize_crossfade(window, id, generation, committed_size);
         }
     }
 
@@ -826,7 +825,18 @@ impl DriftWm {
     /// of its resize crossfade. The stash is consumed either way; a generation
     /// mismatch means it belongs to a superseded request, so it is dropped
     /// rather than paired with this leg. Backend-gated.
-    fn start_resize_crossfade(&mut self, window: &Window, id: ElementId, generation: u64) {
+    ///
+    /// `committed_size` is the size the resolving commit landed, threaded down
+    /// rather than re-read: the crossfade's direction has to be decided from the
+    /// same size the leg resolved on, and a second `geometry()` read only looks
+    /// like it guarantees that.
+    fn start_resize_crossfade(
+        &mut self,
+        window: &Window,
+        id: ElementId,
+        generation: u64,
+        committed_size: Size<i32, Logical>,
+    ) {
         let Some(capture) = self.resize_captures.take_for(id, generation) else {
             return;
         };
@@ -843,6 +853,7 @@ impl DriftWm {
         let crossfade = crate::render::resize_crossfade(
             backend.renderer(),
             &capture.pixels,
+            committed_size,
             flatten_scale,
             corner_clip.as_ref(),
             capture.chrome,

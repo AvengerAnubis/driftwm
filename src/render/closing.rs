@@ -29,7 +29,7 @@ use super::{OutputRenderElements, WindowRenderAnimation, WindowTransformElement,
 const DONE_EPSILON: f64 = 0.01;
 
 /// Alpha of a closing or departing effect at `progress`: `1 - p²`. Shared by the
-/// close fade and both suspend crossfades.
+/// close fade, both suspend crossfades, and the shrinking half of a resize.
 ///
 /// Eased rather than linear so the window holds near-opaque while most of the
 /// shrink plays (0.91 at p=0.3) instead of dwelling translucent, which reads as a
@@ -40,19 +40,48 @@ fn fade_out_alpha(progress: f64) -> f32 {
     (1.0 - p * p) as f32
 }
 
-/// Alpha of the outgoing half of a resize crossfade at `progress`: `(1 - p)²`.
+/// Alpha of the outgoing half of a resize crossfade at `progress`, picked by the
+/// leg's direction: front-loaded `(1 - p)²` for a grow, [`fade_out_alpha`]'s
+/// back-loaded `1 - p²` for a shrink.
 ///
-/// Front-loaded rather than eased like [`fade_out_alpha`], because this is a
-/// morph and not a departure. Both pictures are stretched into the same
-/// interpolated rect, so the old one distorts further the longer it stays, and
-/// the chase covers most of the shape change in its first frames. This leaves a
-/// quarter of the old picture at the halfway point, against half of it under a
-/// linear ramp. Handing over early is safe because the new buffer is already
-/// committed underneath: the outgoing picture is strictly an overlay, so a
-/// faster fade reveals real content sooner and can never expose a gap.
-fn crossfade_out_alpha(progress: f64) -> f32 {
+/// This is a morph, not a departure: both pictures are drawn into the *same*
+/// interpolated rect, so at every frame the old is scaled by `rect / old` and
+/// the new by `rect / new`. Whichever native is smaller is therefore the more
+/// magnified — and so the softer — of the two at every frame, whatever the rect
+/// is doing and whatever the zoom. The fade belongs on that one.
+///
+/// A grow makes the old picture the softer one, so it goes early: `(1 - p)²`
+/// leaves a quarter of it at the halfway point, against half under a linear
+/// ramp. A shrink makes the new picture the softer one, so the old is held and
+/// handed over late instead.
+///
+/// Handing over is safe at any point because the new buffer is already committed
+/// underneath: the outgoing picture is strictly an overlay, so the fade reveals
+/// real content and can never expose a gap.
+fn crossfade_out_alpha(progress: f64, grew: bool) -> f32 {
+    if !grew {
+        return fade_out_alpha(progress);
+    }
     let remaining = 1.0 - progress.clamp(0.0, 1.0);
     (remaining * remaining) as f32
+}
+
+/// Whether a resize leg from `old` to `new` is a grow: whether the leg's target
+/// has more area than the captured picture. Area rather than per-axis because a
+/// leg can grow one axis while shrinking the other; a tie is harmless either
+/// way, it just has to pick one.
+///
+/// Deliberately compares the two *natives* rather than the leg's own rects. A
+/// rect-based criterion looks equivalent and is not: fullscreen entry seeds its
+/// `from` rect as the windowed size times the saved zoom, against a
+/// viewport-sized target, so at zoom 4 an 800x600 window going fullscreen on a
+/// 1920x1080 output plays as a 3200x2400 → 1920x1080 *shrinking* rect. Reading
+/// that as a shrink would back-load the fade and hold a 4x-magnified old picture
+/// through the whole grow. The natives are what the two textures actually are,
+/// so they answer the same at any zoom.
+fn leg_grew(old: Size<i32, Logical>, new: Size<i32, Logical>) -> bool {
+    let area = |s: Size<i32, Logical>| s.w as i64 * s.h as i64;
+    area(new) > area(old)
 }
 
 /// One surface of a captured window tree: an Rc-cloned GL texture and where it
@@ -267,6 +296,10 @@ pub(crate) struct ResizeCrossfade {
     buffer: TextureBuffer<GlesTexture>,
     /// Texel extent of `buffer`, which is wrapped at scale 1 — see [`texel_src`].
     texels: Size<i32, Physical>,
+    /// Which way the leg is going, and so which fade curve to hand over on — see
+    /// [`crossfade_out_alpha`]. Fixed at construction: the leg can be retargeted
+    /// underneath, but the two pictures this overlay exchanges never change.
+    grew: bool,
     /// The overlay's OWN progress. Advanced by the same per-frame factor as the
     /// leg but never seeded from it: a position-only retarget re-seeds the leg
     /// from 0, and reading that would re-opaque a half-faded overlay.
@@ -298,7 +331,7 @@ impl ResizeCrossfade {
         let texture = TextureRenderElement::from_texture_buffer(
             loc,
             &self.buffer,
-            Some(crossfade_out_alpha(self.progress) * opacity as f32),
+            Some(crossfade_out_alpha(self.progress, self.grew) * opacity as f32),
             Some(super::texel_src(self.texels)),
             Some(size),
             Kind::Unspecified,
@@ -327,6 +360,7 @@ impl ResizeCrossfade {
 pub(crate) fn resize_crossfade(
     renderer: &mut GlesRenderer,
     pixels: &ClosePixels,
+    new_size: Size<i32, Logical>,
     flatten_scale: f64,
     corner_clip: Option<&GlesTexProgram>,
     chrome: BakeChrome,
@@ -365,6 +399,7 @@ pub(crate) fn resize_crossfade(
     Some(ResizeCrossfade {
         buffer,
         texels,
+        grew: leg_grew(pixels.geometry.size, new_size),
         progress: 0.0,
     })
 }
@@ -914,6 +949,41 @@ mod resize_capture_tests {
         captures.stash(id, capture(), chrome(), 7);
         captures.stash(id, capture(), chrome(), 7);
         assert_eq!(captures.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod resize_crossfade_direction_tests {
+    use super::*;
+
+    fn size(w: i32, h: i32) -> Size<i32, Logical> {
+        Size::from((w, h))
+    }
+
+    /// Mirrors [`crossfade_out_alpha`]'s grow/shrink split. Both curves still
+    /// start opaque and end clear, so neither end pops.
+    #[test]
+    fn a_grow_hands_the_old_picture_over_earlier_than_a_shrink() {
+        for p in [0.25, 0.5, 0.75] {
+            let grow = crossfade_out_alpha(p, true);
+            let shrink = crossfade_out_alpha(p, false);
+            assert!(grow < shrink, "progress {p}: grow {grow}, shrink {shrink}");
+        }
+        for grew in [true, false] {
+            assert_eq!(crossfade_out_alpha(0.0, grew), 1.0);
+            assert_eq!(crossfade_out_alpha(1.0, grew), 0.0);
+        }
+    }
+
+    /// A tie lands on the shrink curve — arbitrary, but pinned so it stays
+    /// decided.
+    #[test]
+    fn a_mixed_axis_leg_is_decided_by_area() {
+        assert!(leg_grew(size(400, 300), size(800, 600)));
+        assert!(!leg_grew(size(800, 600), size(400, 300)));
+        assert!(leg_grew(size(400, 300), size(200, 700)), "140k > 120k");
+        assert!(!leg_grew(size(400, 300), size(600, 150)), "90k < 120k");
+        assert!(!leg_grew(size(400, 300), size(300, 400)), "a tie holds");
     }
 }
 
