@@ -13,6 +13,7 @@
 mod client;
 mod fixture;
 mod headless;
+mod input_backend;
 mod real;
 mod server;
 
@@ -33,6 +34,7 @@ mod gesture_resize;
 mod hot_corners;
 mod hotplug;
 mod hover_focus;
+mod input_dispatch;
 mod interact_min;
 mod opacity;
 mod popups;

@@ -360,6 +360,38 @@ Source: `src/backend/drm/compositor/mod.rs` (`use_mode`), `src/backend/drm/surfa
 
 So it never races an in-flight page flip — the kernel serializes atomic commits per CRTC, and the pending frame's fb holds its own reference. niri calls `use_mode` unconditionally at config-apply time with no deferral (`tty.rs`, `on_output_config_changed`) and only handles the `Err`. Deferring/queueing around `frames_pending` before calling it is unnecessary.
 
+## InputBackend (synthetic input)
+
+Source: `src/backend/input/mod.rs`, `src/backend/input/tablet.rs`.
+
+`InputBackend` is **25 associated types and zero methods** — a pure type-level
+description of what a backend can emit. Implementing it costs nothing but the
+event types you actually produce:
+
+- **`pub enum UnusedEvent {}`** is uninhabited and carries a blanket impl of
+  *every* event trait (each method is `match *self {}`). Any associated type you
+  don't emit is `= UnusedEvent` with no code written. `SpecialEvent` has no trait
+  bound at all.
+- **`Device: PartialEq + Eq + Hash`** — `id() -> String`, `name() -> String`,
+  `has_capability(DeviceCapability) -> bool`, `usb_id() -> Option<(u32, u32)>`,
+  `syspath() -> Option<PathBuf>`. `DeviceCapability` is `Copy + Eq` but **not
+  `Hash`**, so a device holding a capability list can't derive `Hash` — hash the
+  id instead.
+- **`Event<B>::time()` is MICROseconds**; `time_msec()` is provided and divides
+  by 1000. `device()` returns `B::Device` **by value**, so the device type is
+  usually `Clone`.
+- Marker traits over shared supertraits: `PointerMotionAbsoluteEvent<B>` and
+  `TouchDownEvent<B>` add nothing to `AbsolutePositionEvent<B>` (`x`, `y`,
+  `x_transformed(width)`, `y_transformed(height)`, plus provided `position` /
+  `position_transformed`) and `TouchEvent<B>` (`slot() -> TouchSlot`) — impl the
+  supertrait, then `impl Marker for T {}`.
+- `PointerButtonEvent<B>` needs only `button_code() -> u32` and
+  `state() -> ButtonState`; `button() -> Option<MouseButton>` is provided.
+- `InputEvent<B>` derives `Debug`, which bounds on `B: Debug` — a backend that
+  isn't `Debug` still works, its events just can't be printed.
+
+driftwm's synthetic backend for tests lives in `src/tests/input_backend.rs`.
+
 ## Gotchas
 
 ### Compositor / Protocol Essentials
@@ -400,6 +432,7 @@ So it never races an in-flight page flip — the kernel serializes atomic commit
 - **`LayerMap` guard (MutexGuard) must be dropped before calling `keyboard.set_focus()`** — `set_focus` triggers `SeatHandler::focus_changed()` which may need `&mut self`.
 - **Layer surface exclusive focus must be guarded** — only grab keyboard focus when it's not already on this surface. Otherwise every commit from an Exclusive layer surface steals focus back.
 - **`pointer_over_layer` must be reset on layer destroy and fullscreen enter** — stale flag breaks all input until next motion event.
+- **`TouchHandle::is_grabbed()` is true after any `down()`** — smithay's touch `DefaultGrab::down` installs its own `TouchDownGrab`, so `is_grabbed()` can't distinguish "the compositor set a grab" from "a finger is down". Assert on `grab_start_data()` or on compositor-side state instead.
 
 ### Trait Impls / Method Clashes
 
