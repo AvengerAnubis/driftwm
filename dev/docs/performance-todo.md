@@ -8,54 +8,33 @@ Non-perf items live at the bottom under
 [Correctness backlog](#correctness-backlog) and
 [Structural backlog](#structural-backlog).
 
-## Blur (B5 + S1 + edge-fade + fullscreen cull)
+## Blur (B5b + S1)
 
 The only substantive perf work left; deferred behind touchscreen + session
-restoration (GH #125). B5 + S1 + edge-fade are one FBO/crop/mask rework; the
-fullscreen cull is a separable window-loop early-skip in the same code. So the
-blur wins span three contexts: during a pan, on zoom (S1), and under fullscreen.
+restoration (GH #125). The rest of the original blur cluster has since shipped:
+B5's multi-output cache churn (the cache is keyed per `(output, surface)` now),
+the edge-fade artifact (padded crop + mirrored edge sampling), and the fullscreen
+occlusion-cull (the window loop skips occluded windows before they can even
+enqueue a blur request).
 
-**B5 — multi-output churn + FBO retention.**
-
-- `src/render/mod.rs` — `blur_cache` is global but `compose_frame` retains per
-  output: two outputs showing different blurred windows evict each other every
-  frame → `BlurCache::new` re-allocates 3 window-sized textures + full recompute
-  per blurred window per frame (~25 MB/frame at 1080p). Fix: retain against the
-  union of blur requests across outputs.
-- `src/render/blur.rs` — `blur_bg_fbo` is one slot keyed by size; different-sized
-  outputs evict each other per frame (~33 MB alloc/free at 4K). Fix: key per
-  output name, free in `remove_output`. Also drop the slot when no blur requests
-  remain (currently retained forever after the last blurred window closes).
+**B5b — `blur_bg_fbo` single slot.** `src/render/blur.rs` — one slot keyed by
+size; different-sized outputs evict each other per frame (~33 MB alloc/free at
+4K). Fix: key per output name, free in `remove_output` — `state/render_cache.rs`
+clears every other blur cache there but not this one. Also drop the slot when no
+blur requests remain: `process_blur_requests` only runs when requests exist, so
+after the last blurred window closes nothing is left to free it.
 
 **S1 — blur fully recomputes every frame of a pan _or zoom_.** The cache hash
 includes the window's screen-space position (`src/render/blur.rs` hashes
 `window_rect.loc`), so any camera motion marks every blurred window dirty every
-frame: full-output offscreen FBO repaint, crop, 2×radius Kawase passes, a second
-full render for the alpha mask, masking pass. Screen-fixed blur on other monitors
-also recomputes (`blur_camera_generation` is a global counter, `src/state/mod.rs`).
+frame: full-output offscreen FBO repaint, padded crop, 2×radius Kawase passes, a
+second full render for the alpha mask, masking pass. Zoom additionally changes
+`win_size`, reallocating the cache textures on top. The one mitigation in place —
+the pan-in-flight hold — is gated on `animated_bg && occluded_by_lower`, so a
+canvas window over a static wallpaper still pays full price every frame.
 Fix options: translate the cached blur texture by the camera delta during
 camera-only motion (blur is low-frequency); recompute at half rate while panning;
 or key on (quantized position, behind-element commits).
-
-**Edge-fade artifact.** Behind-content is cropped to exactly `win_size`, so the
-Kawase kernel clamps at window edges and the blur tapers inward. Fix: blur a
-radius-padded region and crop back — same surface as B5/S1. Cost caveat is at the
-`blur` field in `config.reference.toml` (rendered in `docs/config.md#window-rules`).
-
-**Fullscreen occlusion-cull.** `compose_frame` does not short-circuit for a
-fullscreen output — it runs the full window loop (`src/render/mod.rs:585`, only
-viewport-visibility culled at `:650`) and `process_blur_requests` (`:1180`); only
-the background (`:1088`) and Top/Bottom layer-shell (`:1123-1132`) are skipped. So
-a blurred window behind a fullscreen opaque window still pays its Kawase passes
-every frame, _before_ smithay's render-time occlusion cull + direct scanout
-(`src/backend/udev.rs:1507`) drop the composited result — wasted GPU that competes
-with the fullscreen client, and compounds under screen-share (the capture path
-re-composites the whole scene and defeats direct scanout). Only bites when a
-blurred window is actually behind fullscreen (empty `blur_requests` → already
-fast-skipped). Fix: skip blur for normal windows occluded by the fullscreen
-window — but preserve pinned-to-screen windows (they render above fullscreen), the
-fullscreen window's own popups, and the Overlay layer, and guard a transparent
-fullscreen window.
 
 ## Lower-priority backlog (do only if a profile flags it)
 
@@ -74,8 +53,10 @@ fullscreen window.
   refresh rate. Mark only the active/cursor output. _Single-output-marginal — same
   shape as the skipped B1; likely not worth it._
 - **B14 (remaining half)** Pointer motion does up to ~6 sequential linear window
-  scans with repeated `with_states` locks per event (`src/input/mod.rs`). Moderate;
-  only scales with window count. (The `min_zoom`-per-pinch half shipped.)
+  scans with repeated `with_states` locks per event (`src/input/mod.rs`), and each
+  scan's inner `is_pinned`/`position_of` lookups resolve through `Stage::entry`,
+  itself a linear find — so the real shape is O(n²) in window count. Harmless at
+  today's n, but it is the wrong curve. (The `min_zoom`-per-pinch half shipped.)
 - **Latent frame spikes** (config-dependent): synchronous shader-chunk bakes
   mid-frame (`src/render/shader_chunks.rs` — pre-bake a margin ring, pool the FBO);
   gigapixel-TIFF tile uploads up to ~25 ms/frame on the render thread
@@ -83,21 +64,26 @@ fullscreen window.
   evaluates ERF quadrature over the full window+pad quad (`src/shaders/shadow.glsl`
   — early-out interior fragments).
 - **Redundant EmptyFrame composites in non-integer refresh:content beats.**
-  `post_render` runs after every `render_frame`, including the `EmptyFrame`
-  branch (`src/backend/udev.rs:1604`), and the VBlank handler re-renders directly
-  (`:651-653`), bypassing the `render_if_needed` gate (`:305-308`). At ratios like
-  144Hz/60fps video a second client commit can land mid-cycle and force a full
-  `compose_frame` that smithay then drops as `EmptyFrame` — GPU compositing with no
-  page flip. Bounded by the estimated-vblank timer (can't spin) and only during
-  active rendering, not idle. niri avoids it via `RedrawState` (one render/cycle;
+  `compose_frame` runs before the frame is queued (`src/backend/udev.rs:1346`) and
+  `post_render` runs unconditionally after it (`:1454`), outside the match that
+  catches `EmptyFrame` (`:1407`). At ratios like 144Hz/60fps video a second client
+  commit can land mid-cycle and force a full `compose_frame` that smithay then
+  drops as `EmptyFrame` — GPU compositing with no page flip, plus a callback send.
+  Bounded by the estimated-vblank timer (can't spin) and only during active
+  rendering, not idle. niri avoids it via `RedrawState` (one render/cycle;
   callbacks sent at defined sequence boundaries, never from an empty-render branch
   — `niri/src/niri.rs:492-504`). Fix: skip the `compose_frame`/callback-send on the
-  `EmptyFrame` path, and/or route the VBlank-handler render through the gate.
-  Surfaced during the #157 frame-callback dedup-guard removal.
+  `EmptyFrame` path. Note the VBlank handler's direct `render_frame` (`:681`) is
+  _not_ worth routing through the `render_if_needed` gate (`:343-345`): it clears
+  `frames_pending` and the estimated timer just above (`:676-680`), so all three
+  gate conditions already hold there. It only skips the DPMS check and the
+  animation tick. Surfaced during the #157 frame-callback dedup-guard removal.
 - **niri patterns** not yet adopted: animations sampled at predicted
   presentation time (`niri/src/niri.rs:4601-4604` — small judder source vs
   driftwm's `Instant::now()`); on-demand VRR by window visibility
-  (`niri/src/niri.rs:4720-4749` — gaming pass).
+  (`niri/src/niri.rs:4720-4749` — gaming pass). The VRR one is a bigger job than
+  it reads: driftwm has no VRR at all, only a `// VRR not supported` stub in
+  `src/protocols/output_management.rs`, so the feature comes first.
 
 ## Correctness backlog
 
@@ -117,6 +103,9 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   `self.pending_recenter.remove(&wl_surface.id());` in that branch, mirroring
   `unfit_window`. Left out of the release only because doing it properly wants
   its own test, and the fit-side chain was the one with a demonstrated repro.
+  The same arm is missing on the IPC side: `src/ipc/mod.rs`'s `move` clears fill
+  and calls `map_window` but never drops an owed recenter, unlike its keybind
+  twin in `input/actions.rs`. Fix both together.
 - **A stand-in is adopted out from under a live grab.**
   `element_under_interactive_grab`'s contract is that nothing may reposition an
   element under a grab, but the activation path only asks about
@@ -164,23 +153,25 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
 
 ## Structural backlog
 
-Not bugs. Measured against niri (93,951 Rust lines to driftwm's 97,581, but
-81,832 non-test to driftwm's 63,516 — driftwm carries ~29% less production code
+Not bugs. Measured against niri (93,951 Rust lines to driftwm's 98,156, but
+81,832 non-test to driftwm's 63,671 — driftwm carries ~29% less production code
 and a 0.54 test ratio to niri's 0.15), size is not the problem. Duplication is.
+Both sides of that comparison count dedicated test files only; driftwm also
+carries 11,897 lines of inline `#[cfg(test)]` modules, putting its true non-test
+total at 51,774 and its true test ratio nearer 0.90.
 
 - **One invariant, N hand-maintained copies.** The
   *clear fit → clear fill → seed `ResizeState` → set `Resizing` → unset
   `Maximized`* sequence exists at five independent sites (`input/pointer.rs`,
   `handlers/xdg_shell.rs`, `input/gestures/swipe.rs`, `input/touch.rs`,
   `state/suspended.rs`), and the "drop an owed `pending_recenter` before
-  establishing a placement" step at seven (`state/fit.rs`, `state/fill.rs`,
+  establishing a placement" step at eight (`state/fit.rs` ×2, `state/fill.rs`,
   `state/fullscreen.rs`, `state/suspended.rs`, `input/actions.rs` ×3). Both have
   now been caught mid-drift — a sweep found four of the five `Maximized` arms
   and missed adoption, which left clients permanently stuck maximized. This is
   the codebase's most productive bug class by a wide margin. Fix: make the
   sequence a single constructor the arms call, so a new arm cannot forget a step.
-  The `state/mod.rs` split has since removed the *distance* between these arms
-  without removing the duplication: the five `Maximized` sites are unchanged, and
-  the `pending_recenter` sites now sit across `state/fit.rs`, `state/fill.rs`,
-  `state/fullscreen.rs`, `state/suspended.rs` and `input/actions.rs` ×3. Extract
-  the constructor before adding a sixth arm.
+  The `state/mod.rs` split scattered the `pending_recenter` arms across one file
+  each without deduplicating any of them, so the count above is post-split and
+  the distance between arms is now larger, not smaller. Extract the constructor
+  before adding a ninth.
