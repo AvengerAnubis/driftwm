@@ -8,6 +8,8 @@ Thanks for your interest! driftwm is experimental and primarily an AI-assisted l
 
 **Read the internal docs in [`dev/docs/`](dev/docs/) before touching code** — architectural rules ([`caveats.md`](dev/docs/caveats.md)) and testing conventions ([`testing.md`](dev/docs/testing.md)) especially.
 
+**Using an AI coding agent?** [`AGENTS.md`](AGENTS.md) is the single source of agent instructions. It follows the [agents.md](https://agents.md) convention, so Codex, Copilot, Cursor, Gemini CLI, Antigravity, Zed and others read it with no setup. Claude Code looks for `CLAUDE.md`, which is a one-line import of the same file. If your tool wants a different path, add a stub that points at `AGENTS.md` — copies drift, pointers don't.
+
 ## Pull requests
 
 **Keep PRs small and focused on one concern.** One PR = one logical change. If your description says "this does X and Y", that's two PRs.
