@@ -103,10 +103,13 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   silently lands off by the pre/post-exit size difference and nothing corrects
   it. The keybind twin carries the same stale read for fit and fill exits —
   `move_bookmark_restore_rect` is `Some` only for a fullscreen exit, and
-  `input/actions.rs` falls back to the same `geometry().size`. Note
-  `configured_window_size` is *not* the fix: it reads pending state that goes
-  stale on any client-initiated resize (`src/state/fit.rs` documents this),
-  trading a one-frame race for a permanent error on mpv, terminals and browsers.
+  `input/actions.rs` falls back to the same `geometry().size`. `rule_to_internal`
+  (`src/canvas.rs`) subtracts `size/2`, so the landing error is *half* the
+  pre/post-exit size difference on each axis, not the whole of it. Note
+  `configured_window_size` (defined in `src/state/window_frame.rs`, reasoned
+  about at its `src/state/fit.rs` call sites) is *not* the fix: it reads pending
+  state that goes stale on any client-initiated resize, trading a one-frame race
+  for a permanent error on mpv, terminals and browsers.
   `cmd_move`'s single `geometry().size` read also feeds both the read and the
   write arm, so a fix has to decide whether `driftwm msg move` *reporting*
   changes with it, or accept read-then-write being non-idempotent mid-settle.
@@ -138,6 +141,30 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   client with no reason to commit (`src/grabs/resize_grab.rs`). Until its next
   repaint the window reads as under an interactive grab, which silently skips
   its next geometry animation and makes relaunch adoption bail. Self-clears.
+- **A fullscreen exit establishes a placement without dropping the recenter
+  owed on it.** `exit_fullscreen_on` (`src/state/fullscreen.rs`) maps the window
+  to `entry.saved_location` and then only *skips* inserting its own recenter when
+  `current_size == entry.saved_size` — it never calls `drop_owed_recenter`,
+  though establishing a placement is exactly what that helper's contract says
+  must drop the promise. Reachable without a keybind: fit, let the client ack,
+  fullscreen, then have the client send `unset_maximized` before acking (the
+  unfit inserts a recenter against the fit-era size) and `unset_fullscreen`
+  before acking (`saved_size` is that same fit-era size, so the exit takes the
+  equal-size skip arm). Verified in the fixture: the recenter survives the exit,
+  lies inert while the committed size is unchanged, then fires on the next
+  differing-size commit and discards both the exit's placement and any drag since
+  — a right-edge resize after a 100×30 drag landed the window 410×210 away.
+- **A fill dispatched between a resize release and the settle commit loses its
+  placement.** `handle_resize_commit` (`src/handlers/compositor.rs`) maps the
+  window back to the grab's `initial_window_location`, discarding the
+  `map_window` the fill did in between, so a filled window settles at the
+  pre-resize corner instead of the gap-inset one the fill computed (verified: fill
+  places 12,12 with `snap_gap = 12`, the settle puts it back at 0,0). The cached
+  snap rect does *not* disagree — the settle's own `refresh_stable_snap_rect`
+  re-derives it from the wrong position — which is precisely why nothing
+  downstream notices. Pre-existing;
+  `unfill_after_fullscreen_exit_drops_the_stale_recenter_so_the_next_resize_does_not_teleport`
+  walks straight through it.
 - **Adopt and dismiss read the stage position, not the in-flight visual.**
   Both take `stage.position_of` — the destination — ignoring
   `geometry_visual_rect`, while `animate_element_move_from` is careful to seed
@@ -148,8 +175,20 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
 
 ## Structural backlog
 
-Empty — the duplication it tracked is extracted, and both extractions are worth
-recording so a new arm grows through them rather than beside them.
+**The fit / fill / fullscreen exit tails are three hand-maintained copies of one
+sequence.** *capture `pre_exit_size` → animate → configure → map → equal-size
+branch or insert a `PendingRecenter`*. `unfit_window` (`src/state/fit.rs`) and
+`unfill_window` (`src/state/fill.rs`) are now structurally identical, differing
+only in where the preserved center comes from (a derived `new_loc` vs the
+recorded `saved_pos`) and which configure they send (`exit_fit_configure` vs
+`send_size_configure`); `exit_fullscreen_on` (`src/state/fullscreen.rs`) is a
+third copy that diverged — it has the skip but not the drop (see the correctness
+item above). This is not theoretical drift: the fill copy was missing the
+equal-size branch's `drop_owed_recenter` for months, and the fullscreen one still
+is. Extract before adding a fourth exit.
+
+The duplication this list used to track *is* extracted, and both extractions are
+worth recording so a new arm grows through them rather than beside them.
 
 The *clear fit → clear fill → seed `ResizeState` → set `Resizing` → unset
 `Maximized`* sequence is `DriftWm::begin_client_resize` (`src/state/resize.rs`),
@@ -161,7 +200,8 @@ unrelated reason — the inherited stage entry has no fit state, so a set
 `Maximized` is one the client can never shed. It seeds no `ResizeState` and no
 resize is in flight; it is not a fifth site. The "drop an owed `pending_recenter`
 before establishing a placement" step is `DriftWm::drop_owed_recenter`
-(`src/state/recenter.rs`), called by all eight arms.
+(`src/state/recenter.rs`), called by all **nine** arms — the ninth being
+`unfill_window`'s equal-size branch (`src/state/fill.rs`).
 
 The measurement that motivated the extraction: against niri (93,951 Rust lines to
 driftwm's 98,156, but 81,832 non-test to driftwm's 63,671 — driftwm carries ~29%
