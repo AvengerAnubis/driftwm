@@ -37,8 +37,8 @@ use crate::grabs::{ResizeGrab, ResizeState, SizeConstraints};
 use crate::state::{ClusterMember, ClusterResizeSnapshot, FocusTarget, StageWindow};
 
 use super::{
-    Fixture, adopt_last_configure, client_sees_maximized, fit_and_frame, map_window,
-    server_surface, window_by_app_id,
+    Fixture, adopt_last_configure, assert_resize_entered, client_sees_maximized, fit_and_frame,
+    map_window, seed_fit_and_fill, server_surface, window_by_app_id,
 };
 
 fn pt(x: f64, y: f64) -> Point<f64, Logical> {
@@ -934,4 +934,206 @@ fn a_pinned_move_on_an_unpinned_window_reports_failure() {
         !f.state().seat.get_pointer().unwrap().is_grabbed(),
         "no grab was installed"
     );
+}
+
+/// Press the left button over `window` at `loc`, which installs smithay's
+/// `ClickGrab` with the window's surface as its focus — the pointer grab
+/// `check_grab` gates a client's own `xdg_toplevel.resize` on.
+fn press_over(f: &mut Fixture, window: &Window, loc: Point<f64, Logical>) {
+    let ssurface = server_surface(window);
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let focus = Some((FocusTarget(ssurface), Point::from((0.0, 0.0))));
+    pointer.motion(
+        f.state(),
+        focus,
+        &MotionEvent {
+            location: loc,
+            serial: SERIAL_COUNTER.next_serial(),
+            time: 0,
+        },
+    );
+    pointer.button(
+        f.state(),
+        &ButtonEvent {
+            button: BTN_LEFT,
+            state: ButtonState::Pressed,
+            serial: SERIAL_COUNTER.next_serial(),
+            time: 0,
+        },
+    );
+}
+
+/// Config pinning `pin` to the screen at a known size, so the pinned half of
+/// the entry-point tests has a pin site to anchor against.
+fn config_pinned() -> Config {
+    Config::from_toml(
+        r#"
+[[window_rules]]
+app_id = "pin"
+pinned_to_screen = true
+size = [400, 300]
+"#,
+    )
+    .unwrap()
+}
+
+/// The whole invariant the pointer entry point establishes, plain and pinned.
+/// The four entry points each hand-roll it, so each one is pinned in full here
+/// or in `gesture_resize.rs` — `initial_screen_pos` above all, the field that
+/// decides whether the commit-time reposition moves a canvas location or a pin
+/// site.
+#[test]
+fn pointer_resize_entry_establishes_the_whole_resize_invariant() {
+    {
+        let mut f = Fixture::new();
+        f.add_output(1, (1920, 1080));
+        origin_view(&mut f);
+        let id = f.add_client();
+        map_window(&mut f, id, "c", (400, 300));
+        let window = window_by_app_id(&mut f, "c").unwrap();
+        f.state().map_window(
+            StageWindow::Client(window.clone()),
+            Point::from((400, 300)),
+            true,
+        );
+        // Both memberships set, so clearing either is observable.
+        seed_fit_and_fill(&mut f, &window);
+
+        let pointer = f.state().seat.get_pointer().unwrap();
+        let serial = SERIAL_COUNTER.next_serial();
+        assert!(f.state().start_compositor_resize_with_edge(
+            &pointer,
+            &window,
+            pt(790.0, 450.0),
+            BTN_LEFT,
+            serial,
+            Some(xdg_toplevel::ResizeEdge::Right),
+            false,
+        ));
+
+        assert_resize_entered(
+            &mut f,
+            &window,
+            xdg_toplevel::ResizeEdge::Right,
+            Point::from((400, 300)),
+            Size::from((400, 300)),
+            None,
+        );
+        release(&mut f);
+    }
+
+    {
+        let mut f = Fixture::with_config(config_pinned());
+        f.add_output(1, (1920, 1080));
+        origin_view(&mut f);
+        let id = f.add_client();
+        map_window(&mut f, id, "pin", (400, 300));
+        let window = window_by_app_id(&mut f, "pin").unwrap();
+        let site = f.state().stage.pin_of(&window).unwrap().screen_pos;
+        let loc = f
+            .state()
+            .stage
+            .position_of(&StageWindow::Client(window.clone()))
+            .unwrap();
+        seed_fit_and_fill(&mut f, &window);
+
+        let pointer = f.state().seat.get_pointer().unwrap();
+        let serial = SERIAL_COUNTER.next_serial();
+        assert!(f.state().start_compositor_resize_with_edge(
+            &pointer,
+            &window,
+            pt(site.x as f64 + 390.0, site.y as f64 + 150.0),
+            BTN_LEFT,
+            serial,
+            Some(xdg_toplevel::ResizeEdge::Right),
+            false,
+        ));
+
+        assert_resize_entered(
+            &mut f,
+            &window,
+            xdg_toplevel::ResizeEdge::Right,
+            loc,
+            Size::from((400, 300)),
+            Some(site),
+        );
+        release(&mut f);
+    }
+}
+
+/// The same invariant through the client's own `xdg_toplevel.resize`. This arm
+/// interleaves the pieces differently from the other three — the pin lookup
+/// sits between the membership clear and the `ResizeState` seed — so what it
+/// ends up writing is worth pinning independently.
+#[test]
+fn client_resize_request_establishes_the_whole_resize_invariant() {
+    {
+        let mut f = Fixture::new();
+        f.add_output(1, (1920, 1080));
+        origin_view(&mut f);
+        let id = f.add_client();
+        let csurface = map_window(&mut f, id, "c", (400, 300));
+        let window = window_by_app_id(&mut f, "c").unwrap();
+        f.state().map_window(
+            StageWindow::Client(window.clone()),
+            Point::from((400, 300)),
+            true,
+        );
+        // Both memberships set, so clearing either is observable.
+        seed_fit_and_fill(&mut f, &window);
+
+        press_over(&mut f, &window, pt(790.0, 450.0));
+        f.client(id).window(&csurface).resize(
+            wayland_protocols::xdg::shell::client::xdg_toplevel::ResizeEdge::Right,
+            1,
+        );
+        f.double_roundtrip(id);
+
+        assert_resize_entered(
+            &mut f,
+            &window,
+            xdg_toplevel::ResizeEdge::Right,
+            Point::from((400, 300)),
+            Size::from((400, 300)),
+            None,
+        );
+        release(&mut f);
+    }
+
+    {
+        let mut f = Fixture::with_config(config_pinned());
+        f.add_output(1, (1920, 1080));
+        origin_view(&mut f);
+        let id = f.add_client();
+        let csurface = map_window(&mut f, id, "pin", (400, 300));
+        let window = window_by_app_id(&mut f, "pin").unwrap();
+        let site = f.state().stage.pin_of(&window).unwrap().screen_pos;
+        let loc = f
+            .state()
+            .stage
+            .position_of(&StageWindow::Client(window.clone()))
+            .unwrap();
+        seed_fit_and_fill(&mut f, &window);
+
+        press_over(
+            &mut f,
+            &window,
+            pt(site.x as f64 + 390.0, site.y as f64 + 150.0),
+        );
+        f.client(id).window(&csurface).resize(
+            wayland_protocols::xdg::shell::client::xdg_toplevel::ResizeEdge::Right,
+            1,
+        );
+        f.double_roundtrip(id);
+
+        assert_resize_entered(
+            &mut f,
+            &window,
+            xdg_toplevel::ResizeEdge::Right,
+            loc,
+            Size::from((400, 300)),
+            Some(site),
+        );
+        release(&mut f);
+    }
 }

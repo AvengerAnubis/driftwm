@@ -15,6 +15,7 @@ use smithay::input::touch::{
     GrabStartData as TouchGrabStartData, MotionEvent as TouchMotionEvent, UpEvent,
 };
 use smithay::output::Output;
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
 use smithay::wayland::compositor::with_states;
@@ -23,8 +24,8 @@ use crate::grabs::ResizeState;
 use crate::state::StageWindow;
 
 use super::{
-    Fixture, adopt_last_configure, client_sees_maximized, config, fit_and_frame, map_window,
-    server_surface, window_by_app_id,
+    Fixture, adopt_last_configure, assert_resize_entered, client_sees_maximized, config,
+    fit_and_frame, map_window, seed_fit_and_fill, server_surface, window_by_app_id,
 };
 
 fn pt(x: f64, y: f64) -> Point<f64, Logical> {
@@ -796,4 +797,114 @@ fn gesture_resizes_arm_the_relaunch_adoption_guard() {
         );
         f.state().dismiss_suspended(sid);
     }
+}
+
+/// The whole invariant the touch entry point establishes, plain and pinned.
+/// The pinned half calls `build_touch_resize_grab` the way the touch gesture
+/// grab's own pinned branch does — the canvas picker declines pinned windows,
+/// so the gesture helper above can't reach it.
+#[test]
+fn touch_resize_entry_establishes_the_whole_resize_invariant() {
+    {
+        let mut f = Fixture::new();
+        let out = f.add_output(1, (1920, 1080));
+        origin_view(&mut f);
+        let id = f.add_client();
+        map_window(&mut f, id, "c", (400, 300));
+        let window = window_by_app_id(&mut f, "c").unwrap();
+        f.state()
+            .map_window(StageWindow::Client(window.clone()), INITIAL, true);
+        // Both memberships set, so clearing either is observable.
+        seed_fit_and_fill(&mut f, &window);
+
+        assert!(start_touch_gesture_resize(&mut f, grab_point(), out));
+
+        assert_resize_entered(
+            &mut f,
+            &window,
+            xdg_toplevel::ResizeEdge::Right,
+            INITIAL,
+            initial_size(),
+            None,
+        );
+        lift_finger(&mut f);
+    }
+
+    {
+        let mut f = Fixture::with_config(config(
+            r#"
+[[window_rules]]
+app_id = "pin"
+pinned_to_screen = true
+size = [400, 300]
+"#,
+        ));
+        let out = f.add_output(1, (1920, 1080));
+        origin_view(&mut f);
+        let id = f.add_client();
+        map_window(&mut f, id, "pin", (400, 300));
+        let window = window_by_app_id(&mut f, "pin").unwrap();
+        let site = f.state().stage.pin_of(&window).unwrap().screen_pos;
+        let element = StageWindow::Client(window.clone());
+        let loc = f.state().stage.position_of(&element).unwrap();
+        seed_fit_and_fill(&mut f, &window);
+
+        let start = TouchGrabStartData {
+            focus: None,
+            slot: slot(),
+            location: pt(site.x as f64 + 390.0, site.y as f64 + 150.0),
+        };
+        assert!(
+            f.state()
+                .build_touch_resize_grab(
+                    &element,
+                    xdg_toplevel::ResizeEdge::Right,
+                    start,
+                    out,
+                    1,
+                    false,
+                )
+                .is_some(),
+            "the pinned branch builds a grab"
+        );
+
+        assert_resize_entered(
+            &mut f,
+            &window,
+            xdg_toplevel::ResizeEdge::Right,
+            loc,
+            initial_size(),
+            Some(site),
+        );
+    }
+}
+
+/// The whole invariant the trackpad entry point establishes. Only the canvas
+/// arm writes it: a pinned window is handed to the pointer path instead, which
+/// `gesture_resize_on_a_pinned_window_takes_the_screen_space_path` pins — so
+/// this arm's `initial_screen_pos` is `None` by construction.
+#[test]
+fn swipe_resize_entry_establishes_the_whole_resize_invariant() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let id = f.add_client();
+    map_window(&mut f, id, "c", (400, 300));
+    let window = window_by_app_id(&mut f, "c").unwrap();
+    f.state()
+        .map_window(StageWindow::Client(window.clone()), INITIAL, true);
+    // Both memberships set, so clearing either is observable.
+    seed_fit_and_fill(&mut f, &window);
+
+    assert!(f.state().try_start_gesture_resize(grab_point(), false));
+
+    assert_resize_entered(
+        &mut f,
+        &window,
+        xdg_toplevel::ResizeEdge::Right,
+        INITIAL,
+        initial_size(),
+        None,
+    );
+    end_swipe(&mut f);
 }

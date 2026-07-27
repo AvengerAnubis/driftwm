@@ -270,6 +270,94 @@ fn fit_and_frame(
     ))
 }
 
+/// Put `window` into the fit and fill membership a resize entry has to clear,
+/// plus the client-visible `Maximized` a fit sets — directly, without the camera
+/// move and reposition a real fit action makes, which would shift the very
+/// anchors [`assert_resize_entered`] checks.
+fn seed_fit_and_fill(f: &mut Fixture, window: &Window) {
+    use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
+
+    let loc = f.state().stage.position_of(window).expect("staged");
+    let size = window.geometry().size;
+    f.state().stage.set_fit(window, size);
+    f.state().stage.set_fill(window, loc, size);
+    window
+        .toplevel()
+        .expect("toplevel")
+        .with_pending_state(|s| s.states.set(xdg_toplevel::State::Maximized));
+}
+
+/// Assert the whole invariant a resize entry point establishes: fit and fill
+/// membership gone, the `ResizeState` `handle_resize_commit` repositions from
+/// seeded field for field, and the toplevel told it is resizing and no longer
+/// maximized. Shared by all four entry points, so none can quietly drop a piece
+/// of it. `screen_pos` is `Some` exactly for a screen-pinned resize.
+fn assert_resize_entered(
+    f: &mut Fixture,
+    window: &Window,
+    edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
+    location: smithay::utils::Point<i32, smithay::utils::Logical>,
+    size: smithay::utils::Size<i32, smithay::utils::Logical>,
+    screen_pos: Option<smithay::utils::Point<i32, smithay::utils::Logical>>,
+) {
+    use crate::grabs::ResizeState;
+    use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
+    use smithay::wayland::compositor::with_states;
+    use std::cell::RefCell;
+
+    assert_eq!(
+        f.state().stage.fit_saved_size(window),
+        None,
+        "the resize entry took the window out of fit"
+    );
+    assert!(
+        !f.state().stage.is_fill(window),
+        "the resize entry took the window out of fill"
+    );
+
+    let state = with_states(&server_surface(window), |states| {
+        *states
+            .data_map
+            .get::<RefCell<ResizeState>>()
+            .expect("the resize entry seeded a ResizeState")
+            .borrow()
+    });
+    let ResizeState::Resizing {
+        edges: got_edges,
+        initial_window_location,
+        initial_window_size,
+        initial_screen_pos,
+        last_committed_size,
+    } = state
+    else {
+        panic!("the resize entry left the surface Resizing");
+    };
+    assert_eq!(got_edges, edges, "the seeded edge");
+    assert_eq!(
+        initial_window_location, location,
+        "the seeded canvas anchor"
+    );
+    assert_eq!(initial_window_size, size, "the seeded size");
+    assert_eq!(
+        initial_screen_pos, screen_pos,
+        "the seeded screen anchor — `Some` only for a pinned resize"
+    );
+    assert_eq!(
+        last_committed_size, size,
+        "the settle starts from the size the window already has"
+    );
+
+    let toplevel = window.toplevel().expect("toplevel");
+    assert!(
+        toplevel.with_pending_state(|s| s.states.contains(xdg_toplevel::State::Resizing)),
+        "the client was told it is resizing"
+    );
+    assert!(
+        !toplevel.with_pending_state(|s| s.states.contains(xdg_toplevel::State::Maximized)),
+        "the fit clear was mirrored to the client, or its restore button is dead"
+    );
+}
+
 /// Whether `window`'s toplevel currently carries the xdg `Activated` state
 /// (the "focused window" chrome hint the compositor sets exclusively).
 fn is_activated(window: &Window) -> bool {

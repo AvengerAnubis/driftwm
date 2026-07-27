@@ -1,7 +1,7 @@
 //! Exact configure sequences as the client sees them — the desync class where
 //! a toolkit acks one configure while the compositor already believes another.
 
-use driftwm::config::{Action, Config, DecorationMode};
+use driftwm::config::{Action, Config, DecorationMode, Direction};
 use smithay::input::pointer::MotionEvent;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
@@ -1204,5 +1204,194 @@ fn background_window_fullscreen_configure_is_activated() {
     assert!(
         fs_line.contains("Activated"),
         "b's fullscreen configure must carry Activated, got:\n{configures}"
+    );
+}
+
+/// Fullscreen `surface`'s window, let the client adopt the viewport-sized
+/// buffer, then exit and never ack the restore configure — leaving the exit
+/// recenter registered and outstanding. Returns the surface's id, the
+/// `pending_recenter` key.
+fn owe_an_exit_recenter(
+    f: &mut Fixture,
+    id: super::client::ClientId,
+    surface: &wayland_client::protocol::wl_surface::WlSurface,
+    window: &smithay::desktop::Window,
+) -> smithay::reexports::wayland_server::backend::ObjectId {
+    f.client(id).window(surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    adopt_last_configure(f, id, surface);
+    f.client(id).window(surface).unset_fullscreen();
+    f.double_roundtrip(id);
+
+    let key = super::server_surface(window).id();
+    assert!(
+        f.state().pending_recenter.contains_key(&key),
+        "precondition: the fullscreen exit left a recenter owed"
+    );
+    key
+}
+
+/// Two windows, both mid fullscreen-exit settle, and a placement action on one
+/// of them. Returns `(a, a_key, b_key)` — the action's target, its
+/// `pending_recenter` key, and the bystander's.
+///
+/// Every arm that establishes a new placement drops the target's owed recenter;
+/// none of them may reach the bystander's. A one-window scenario cannot tell
+/// "removed the right key" from "removed every key", and a wrong key is the
+/// whole hazard.
+fn two_owed_recenters(
+    f: &mut Fixture,
+    id: super::client::ClientId,
+) -> (
+    smithay::desktop::Window,
+    smithay::reexports::wayland_server::backend::ObjectId,
+    smithay::reexports::wayland_server::backend::ObjectId,
+) {
+    let a_surface = map_settled(f, id, "a", (400, 300));
+    let b_surface = map_settled(f, id, "b", (400, 300));
+    let a = window_by_app_id(f, "a").unwrap();
+    let b = window_by_app_id(f, "b").unwrap();
+
+    let a_key = owe_an_exit_recenter(f, id, &a_surface, &a);
+    let b_key = owe_an_exit_recenter(f, id, &b_surface, &b);
+    assert!(
+        f.state().pending_recenter.contains_key(&a_key),
+        "precondition: a's entry survived b's fullscreen round-trip"
+    );
+
+    // Park them apart and pin the camera, so the placement actions below have
+    // room to work with and neither window obstructs the other.
+    f.state().set_camera(Point::from((0.0, 0.0)));
+    f.state().map_window(a.clone(), Point::from((0, 0)), false);
+    f.state()
+        .map_window(b.clone(), Point::from((4000, 4000)), false);
+    (a, a_key, b_key)
+}
+
+/// A fit establishes its own placement, so it drops the recenter its window
+/// owes — and only that window's.
+#[test]
+fn fit_drops_the_fitted_windows_owed_recenter_alone() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    // Fullscreen and fit move the camera, which seeds a per-output blur
+    // generation that only clears on output disconnect.
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+    let (a, a_key, b_key) = two_owed_recenters(&mut f, id);
+
+    f.state().fit_window(&a);
+
+    assert!(
+        !f.state().pending_recenter.contains_key(&a_key),
+        "the fit dropped the recenter that would have yanked it off the fit"
+    );
+    assert!(
+        f.state().pending_recenter.contains_key(&b_key),
+        "the other window's owed recenter is none of the fit's business"
+    );
+}
+
+/// A fill places the window absolutely, so it drops the recenter its window
+/// owes — and only that window's.
+#[test]
+fn fill_drops_the_filled_windows_owed_recenter_alone() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+    let (a, a_key, b_key) = two_owed_recenters(&mut f, id);
+
+    f.state().fill_window(&a);
+    assert!(f.state().stage.is_fill(&a), "precondition: the fill ran");
+
+    assert!(
+        !f.state().pending_recenter.contains_key(&a_key),
+        "the fill dropped the recenter that would have dragged it off the fill"
+    );
+    assert!(
+        f.state().pending_recenter.contains_key(&b_key),
+        "the other window's owed recenter is none of the fill's business"
+    );
+}
+
+/// A nudge is the window's new position, so it drops the recenter that would
+/// undo it — and only that window's.
+#[test]
+fn nudge_drops_the_nudged_windows_owed_recenter_alone() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+    let (a, a_key, b_key) = two_owed_recenters(&mut f, id);
+
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&a, serial);
+    f.state()
+        .execute_action(&Action::NudgeWindow(Direction::Right));
+
+    assert!(
+        !f.state().pending_recenter.contains_key(&a_key),
+        "the nudge dropped the recenter that would have undone it"
+    );
+    assert!(
+        f.state().pending_recenter.contains_key(&b_key),
+        "the other window's owed recenter is none of the nudge's business"
+    );
+}
+
+/// A bookmark move is the window's new position, so it drops the recenter that
+/// would drag it back — and only that window's.
+#[test]
+fn move_to_bookmark_drops_the_moved_windows_owed_recenter_alone() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+    let (a, a_key, b_key) = two_owed_recenters(&mut f, id);
+
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&a, serial);
+    f.state().bookmarks.insert("b".into(), [300.0, -200.0]);
+    f.state()
+        .execute_action(&Action::MoveToBookmark("b".into()));
+
+    assert!(
+        !f.state().pending_recenter.contains_key(&a_key),
+        "the bookmark move dropped the recenter that would have dragged it back"
+    );
+    assert!(
+        f.state().pending_recenter.contains_key(&b_key),
+        "the other window's owed recenter is none of the bookmark move's business"
+    );
+}
+
+/// Pinning decides where the window lives from now on, so it drops the recenter
+/// that would re-place it afterwards — and only that window's.
+#[test]
+fn pin_toggle_drops_the_pinned_windows_owed_recenter_alone() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+    let (a, a_key, b_key) = two_owed_recenters(&mut f, id);
+
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&a, serial);
+    f.state().execute_action(&Action::TogglePinToScreen);
+    assert!(f.state().is_pinned(&a), "precondition: the pin took");
+
+    assert!(
+        !f.state().pending_recenter.contains_key(&a_key),
+        "the pin dropped the recenter that would have re-placed the window"
+    );
+    assert!(
+        f.state().pending_recenter.contains_key(&b_key),
+        "the other window's owed recenter is none of the pin's business"
     );
 }
