@@ -670,6 +670,17 @@ pub struct DriftWm {
         smithay::reexports::wayland_server::backend::ObjectId,
         driftwm::layout::snap::SnapRect,
     >,
+    /// Adopted windows still owing the stable snap rect their adopt would have
+    /// written, holding the size the adopt configured. Seeding at adopt time
+    /// asserts a footprint the client has not committed: one that acks the
+    /// configure before it redraws keeps committing its pre-adopt (larger) size,
+    /// which `reflow_grown_snapped_window` reads as a grow past the settled
+    /// footprint and answers by relocating the window beside a neighbor. The
+    /// entry is consumed by the first commit that carries the adopt size; a
+    /// client that never commits it keeps its window out of the reflow (and out
+    /// of `markless_suspend_rect`'s shrink protection) until unmap clears it.
+    pub(crate) pending_adopt_settle:
+        HashMap<smithay::reexports::wayland_server::backend::ObjectId, Size<i32, Logical>>,
 
     /// Windows whose close was requested via `suspend-window`: their next
     /// `toplevel_destroyed` converts into a suspended window. Keyed by surface
@@ -1123,6 +1134,7 @@ impl DriftWm {
             ("auto_anchor_snapshot", self.auto_anchor_snapshot.len()),
             ("pending_recenter", self.pending_recenter.len()),
             ("stable_snap_rects", self.stable_snap_rects.len()),
+            ("pending_adopt_settle", self.pending_adopt_settle.len()),
             ("suspend_marks", self.suspend_marks.len()),
             ("real_close_marks", self.real_close_marks.len()),
             ("window_animations", self.window_animations.len()),

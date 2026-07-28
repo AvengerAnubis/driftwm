@@ -353,6 +353,7 @@ impl DriftWm {
             suppress_auto_anchor: false,
             pending_recenter: HashMap::new(),
             stable_snap_rects: HashMap::new(),
+            pending_adopt_settle: HashMap::new(),
             suspend_marks: HashMap::new(),
             real_close_marks: HashMap::new(),
             unmap_snapshots: HashMap::new(),

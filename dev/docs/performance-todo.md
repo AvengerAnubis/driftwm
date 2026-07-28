@@ -227,6 +227,18 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   chokepoints cancel only at install. Only the resize arm is wrong; a held border
   is not a handle on the window. The fix is to re-anchor `ResizeGrab`'s
   `start_data.location` by the camera delta, not to gate the producers.
+- **`reflow_grown_snapped_window`'s stale-frame guard reads *unacked* configures,
+  so an early-acking client goes unguarded.** The owed-resize bail
+  (`src/handlers/compositor.rs`) scans `pending_configures()`, which empties the
+  moment a client acks — and toolkits routinely ack before they redraw, so the
+  stale frames that follow read as a grow past the settled footprint and get the
+  window relocated beside a neighbour. Every defence against it so far is
+  per-path: the fit/fill/fullscreen exits survive only because they leave a
+  `pending_recenter` that gates the reflow, and the relaunch adopt because it owes
+  its stable snap rect until the client commits the size it configured
+  (`pending_adopt_settle`). Comparing committed geometry against the *last sent*
+  configure instead would cover the class at once and let both retire; not taken
+  where it was found because every window in the compositor rides that comparison.
 
 ## Structural backlog
 

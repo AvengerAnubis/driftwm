@@ -767,6 +767,8 @@ impl CompositorHandler for DriftWm {
                     }
                 }
 
+                self.settle_adopted_stable_rect(&window, &root);
+
                 self.reflow_grown_snapped_window(&window, &root);
             }
         }
@@ -1068,6 +1070,30 @@ impl DriftWm {
                     });
             });
         }
+    }
+
+    /// Pay off the stable snap rect an adopt deferred, on the first commit whose
+    /// geometry is the size the adopt configured. Until then the window has no
+    /// stable rect at all, which is what keeps `reflow_grown_snapped_window`
+    /// (whose whole premise is a footprint that grew past a settled one) off a
+    /// client still drawing its pre-adopt size.
+    fn settle_adopted_stable_rect(
+        &mut self,
+        window: &smithay::desktop::Window,
+        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    ) {
+        let Some(&adopt_size) = self.pending_adopt_settle.get(&surface.id()) else {
+            return;
+        };
+        // Same slack the reflow's grow test uses, so a size it would never act
+        // on still counts as settled.
+        const EPS: i32 = 1;
+        let size = window.geometry().size;
+        if (size.w - adopt_size.w).abs() > EPS || (size.h - adopt_size.h).abs() > EPS {
+            return;
+        }
+        self.pending_adopt_settle.remove(&surface.id());
+        self.refresh_stable_snap_rect(&StageWindow::Client(window.clone()));
     }
 
     /// A snapped window that resizes *itself* larger — not via a resize grab —

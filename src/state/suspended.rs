@@ -501,25 +501,7 @@ impl DriftWm {
         let suspended = StageWindow::Suspended(s.clone());
         let pos = self.stage.position_of(&suspended).unwrap_or_default();
         let body_size = s.size.get();
-        // The stand-in was a full snap/cluster citizen; capture its footprint so
-        // the adopted window inherits it as a stable snap rect (below) and keeps
-        // its cluster membership across the adopt, ahead of the body-size
-        // configure the client hasn't acked yet. Inflate with the ADOPTED
-        // window's rule border — not the stand-in's global default — so a
-        // pre-settle close deflates back to the exact body size, since
-        // `markless_suspend_rect` deflates with the live window's rule border.
-        // The bar stays the stand-in's: the adopted window's decoration entry
-        // isn't populated yet on the first-commit adopt path, and the stand-in's
-        // bar faithfully carries what the relaunched window will draw.
         let bar_i = self.window_ssd_bar(&suspended);
-        let bar = bar_i as f64;
-        let bw = self.window_border_width(root) as f64;
-        let standin_rect = Some(driftwm::layout::snap::SnapRect {
-            x_low: pos.x as f64 - bw,
-            x_high: pos.x as f64 + body_size.w as f64 + bw,
-            y_low: pos.y as f64 - bar - bw,
-            y_high: pos.y as f64 + body_size.h as f64 + bw,
-        });
 
         // A CSD-origin stand-in shrank its body under the bar at conversion, so
         // hand the app back the full window: positioned above the body by the
@@ -598,13 +580,13 @@ impl DriftWm {
         // The adopted window restores (fit/fullscreen round-trips) to its
         // reassembled size.
         self.stage.set_restore_size_if_missing(window, adopt_size);
-        // Seed the stable snap rect from the stand-in's so the window is a
-        // cluster member from the instant it adopts the slot, not only after its
-        // first settle (the first-commit path skips adopted windows because
-        // their live geometry is still pre-configure).
-        if let Some(rect) = standin_rect {
-            self.stable_snap_rects.insert(root.id(), rect);
-        }
+        // Owe the stable snap rect rather than assert one now: the client is
+        // still committing whatever size it mapped with, so any rect written
+        // here is a footprint it has not drawn. An entry left over from the
+        // window's pre-adopt slot is just as stale, so it goes too — the commit
+        // handler seeds off the first frame that actually carries `adopt_size`.
+        self.stable_snap_rects.remove(&root.id());
+        self.pending_adopt_settle.insert(root.id(), adopt_size);
 
         // Fill the reassembled window rect. The caller decides when the
         // configure is sent (first-commit path folds it into the initial
