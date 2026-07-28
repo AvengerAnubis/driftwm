@@ -637,6 +637,269 @@ fn unfill_after_a_plain_fullscreen_exit_drops_the_stale_recenter() {
     );
 }
 
+/// The fullscreen twin of the two tests above: `exit_fullscreen_on`'s
+/// equal-size branch must drop a recenter already owed, not merely skip
+/// inserting its own.
+///
+/// No keybind is involved. A fit the client acks, then fullscreen — the entry
+/// saves the fit-era size. The client unmaximizes before acking the fullscreen
+/// configure, and that unfit is a differing-size exit, so it registers a
+/// recenter, aimed at the center of the *fullscreen* rect the window currently
+/// occupies. The client then unfullscreens, still without acking: the geometry
+/// it commits is the fit-era size the entry saved, so the exit takes the
+/// equal-size branch and restores the position outright. Left untouched, the
+/// unfit's recenter survives, lies inert while the committed size is unchanged,
+/// then fires on the next differing-size commit — a resize — and discards both
+/// the exit's placement and the drag in between.
+#[test]
+fn fullscreen_exit_drops_the_stale_recenter_so_the_next_resize_does_not_teleport() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    // Fullscreen below moves the camera, which seeds a per-output blur
+    // generation that only clears on output disconnect, so it can never
+    // return to the pre-output baseline.
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let surface = map_settled(&mut f, id, "a", (800, 600));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((400, 300)), false);
+
+    // Fit, and adopt the fit size as a real client would — enter_fullscreen
+    // below reads the fit-era geometry as its own return size.
+    f.state().toggle_fit_window(&window);
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    assert!(f.state().stage.is_fit(&window), "precondition: fit");
+
+    // Fullscreen, never acked: the committed geometry stays fit-era.
+    let cw = f.client(id).window(&surface);
+    cw.set_fullscreen(None);
+    f.double_roundtrip(id);
+    assert!(
+        f.state().stage.is_fullscreen(&window),
+        "precondition: fullscreen"
+    );
+
+    // Unmaximize, still without acking. Fit membership survives fullscreen, so
+    // this runs a real unfit, and the pre-fit size it restores differs from the
+    // fit-era geometry the client still commits — a recenter is left owed.
+    let cw = f.client(id).window(&surface);
+    cw.unset_maximized();
+    f.double_roundtrip(id);
+    let root = super::server_surface(&window);
+    assert!(
+        !f.state().stage.is_fit(&window),
+        "precondition: the unfit ran"
+    );
+    assert!(
+        f.state().pending_recenter.contains_key(&root.id()),
+        "precondition: the unfit left a recenter owed"
+    );
+
+    // Unfullscreen, still without acking: the fit-era geometry the client
+    // commits is the size the entry saved, so this is the equal-size branch.
+    let cw = f.client(id).window(&surface);
+    cw.unset_fullscreen();
+    f.double_roundtrip(id);
+    assert!(!f.state().stage.is_fullscreen(&window));
+    assert!(
+        !f.state().pending_recenter.contains_key(&root.id()),
+        "the exit restored the window's position outright, so it must drop the \
+         recenter that would later undo it"
+    );
+    adopt_last_configure(&mut f, id, &surface);
+
+    // The user drags the window elsewhere.
+    let pos = f.state().stage.position_of(&window).unwrap();
+    let center = pt(pos.x as f64 + 948.0, pos.y as f64 + 528.0);
+    assert!(f.state().try_start_gesture_move(center, false));
+    motion(&mut f, center + pt(100.0, 30.0));
+    end_swipe(&mut f);
+    let dragged_to = f.state().stage.position_of(&window).unwrap();
+    assert_eq!(
+        dragged_to,
+        pos + Point::from((100, 30)),
+        "precondition: the drag landed at its natural destination"
+    );
+
+    // The user then resizes it from its right edge.
+    let grab_at = pt(dragged_to.x as f64 + 1890.0, dragged_to.y as f64 + 528.0);
+    assert!(f.state().try_start_gesture_resize(grab_at, false));
+    motion(&mut f, grab_at + pt(100.0, 0.0));
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    end_swipe(&mut f);
+
+    assert_eq!(
+        f.state().stage.position_of(&window),
+        Some(dragged_to),
+        "the resize must not teleport the window back toward the unfit's stale center"
+    );
+}
+
+/// The fit and fill exits refresh the cached snap rect their own entries
+/// overwrote. The fullscreen exit has nothing to refresh: `enter_fullscreen`
+/// never caches a rect, so the cached one is still the pre-fullscreen rect the
+/// exit hands the window back. Moving the window without settling it is what
+/// makes that no-op observable — re-deriving the entry from the restored
+/// position is not the exit's business.
+#[test]
+fn fullscreen_exit_leaves_the_cached_snap_rect_alone() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    // Fullscreen below moves the camera, which seeds a per-output blur
+    // generation that only clears on output disconnect.
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let surface = map_settled(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    let root = super::server_surface(&window);
+
+    // Move without settling: the cache keeps the rect from the initial map.
+    f.state()
+        .map_window(window.clone(), Point::from((700, 500)), false);
+    let cached = *f.state().stable_snap_rects.get(&root.id()).unwrap();
+    let live = f
+        .state()
+        .visual_frame_rect(&StageWindow::Client(window.clone()))
+        .unwrap();
+    assert_ne!(
+        (cached.x_low, cached.y_low),
+        (live.x_low, live.y_low),
+        "precondition: the cached rect is stale against the live position"
+    );
+
+    // Fullscreen and back without ever acking: the geometry the client commits
+    // is the size the entry saved, so the exit restores the position outright.
+    let cw = f.client(id).window(&surface);
+    cw.set_fullscreen(None);
+    f.double_roundtrip(id);
+    assert!(
+        f.state().stage.is_fullscreen(&window),
+        "precondition: fullscreen"
+    );
+    let cw = f.client(id).window(&surface);
+    cw.unset_fullscreen();
+    f.double_roundtrip(id);
+    assert!(!f.state().stage.is_fullscreen(&window));
+
+    let after = *f.state().stable_snap_rects.get(&root.id()).unwrap();
+    assert_eq!(
+        (after.x_low, after.y_low, after.x_high, after.y_high),
+        (cached.x_low, cached.y_low, cached.x_high, cached.y_high),
+        "the fullscreen exit must leave the cached snap rect as it found it"
+    );
+}
+
+/// The other side of the test above: a snapped fit *does* cache a rect of its
+/// own, so its exit has to put the cache back in agreement with the window it
+/// restored. Left alone, the window's cluster identity stays the viewport-sized
+/// fit rect it no longer occupies.
+#[test]
+fn unfit_refreshes_the_snap_rect_its_fit_cached() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    // Fit moves the camera, which seeds a per-output blur generation that only
+    // clears on output disconnect.
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let _surface = map_settled(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    let root = super::server_surface(&window);
+    let element = StageWindow::Client(window.clone());
+
+    // Snapped fit, never acked: the cache now holds the fit rect while the
+    // window still commits — and still occupies — its pre-fit size.
+    f.state().fit_window_snapped(&window);
+    let cached = *f.state().stable_snap_rects.get(&root.id()).unwrap();
+    let live = f.state().visual_frame_rect(&element).unwrap();
+    assert_ne!(
+        (cached.x_high - cached.x_low, cached.y_high - cached.y_low),
+        (live.x_high - live.x_low, live.y_high - live.y_low),
+        "precondition: the fit cached a rect of its own"
+    );
+
+    // Unfit, still unacked: the pre-fit size the exit restores is the size the
+    // client has all along, so it settles in place.
+    f.state().unfit_window_snapped(&window);
+
+    let after = *f.state().stable_snap_rects.get(&root.id()).unwrap();
+    let live = f.state().visual_frame_rect(&element).unwrap();
+    assert_eq!(
+        (after.x_low, after.y_low, after.x_high, after.y_high),
+        (live.x_low, live.y_low, live.x_high, live.y_high),
+        "the fit exit must leave the cached rect agreeing with the restored window"
+    );
+}
+
+/// `unfit_window` maps the window to a location truncated out of the visual
+/// center it preserves, and records that center *un-truncated* for the settle
+/// to finish on. Re-deriving the recorded center from the mapped location
+/// instead loses up to half a pixel per axis, which the settle's own truncation
+/// then turns into a whole one: with an odd restore width the two disagree by
+/// 1 px.
+#[test]
+fn unfit_settles_on_the_untruncated_center() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    // Fit moves the camera, which seeds a per-output blur generation that only
+    // clears on output disconnect.
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    // Odd width: the location the unfit restores to is half a pixel off the
+    // center it restores around.
+    let surface = map_settled(&mut f, id, "a", (801, 600));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((400, 300)), false);
+
+    // Fit and adopt: the center the unfit preserves is the fit rect's.
+    f.state().toggle_fit_window(&window);
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    let fit_pos = f.state().stage.position_of(&window).unwrap();
+    let (fit_w, fit_h) = f
+        .client(id)
+        .window(&surface)
+        .configures_received
+        .last()
+        .unwrap()
+        .1
+        .size;
+    let center_x = fit_pos.x as f64 + fit_w as f64 / 2.0;
+    let center_y = fit_pos.y as f64 + fit_h as f64 / 2.0;
+
+    // Unfit — the fit-era size the client still commits differs from the 801
+    // restore, so a recenter is owed — then let the client settle at an even
+    // width, which fires it.
+    f.state().toggle_fit_window(&window);
+    f.double_roundtrip(id);
+    let cw = f.client(id).window(&surface);
+    cw.set_size(800, 600);
+    cw.attach_new_buffer();
+    cw.ack_last_and_commit();
+    f.double_roundtrip(id);
+
+    assert_eq!(
+        f.state().stage.position_of(&window),
+        Some(Point::from((
+            (center_x - 400.0) as i32,
+            (center_y - 300.0) as i32
+        ))),
+        "the settle must land on the center the unfit recorded, not on the one \
+         its truncated restore location describes"
+    );
+}
+
 /// Fill membership survives fullscreen deliberately, so the exit has to hand
 /// the window back the *filled* rect — position and size together. The size it
 /// saves has to come from the same era as the position it saves: a pre-fill

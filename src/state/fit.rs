@@ -5,9 +5,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use super::{
-    DriftWm, PendingRecenter, PendingView, StageWindow, ZoomAnimationAnchor, output_state,
-};
+use super::{DriftWm, PendingView, StageWindow, ZoomAnimationAnchor, output_state};
 use driftwm::config;
 use driftwm::stage::ElementId;
 use driftwm::window_ext::WindowExt;
@@ -180,9 +178,9 @@ impl DriftWm {
     }
 
     pub fn unfit_window(&mut self, window: &Window) {
-        let Some(wl_surface) = window.wl_surface() else {
+        if window.wl_surface().is_none() {
             return;
-        };
+        }
 
         let Some(saved_size) = self.stage.take_fit_saved_size(window) else {
             return;
@@ -191,39 +189,20 @@ impl DriftWm {
         // Resize in-place around the preserved visual center. Sized from the last
         // configure, so an unfit dispatched out of a fullscreen exit centers on
         // the restored (fit-sized) window, not the viewport still being reported.
-        // Either branch below settles any recenter that exit left owed.
         let center = self.window_visual_center(window).unwrap_or_default();
         let bar = self.window_ssd_bar(window);
         let new_loc = super::frame_loc_for_center(center, saved_size, bar);
 
-        // Record the current (fit-era) geometry so the commit handler can
-        // tell when the client has actually processed the exit configure,
-        // then re-center using the real post-unfit size.
-        let pre_exit_size = window.geometry().size;
-
         self.animate_window_geometry(window, saved_size, None);
         window.exit_fit_configure(saved_size);
-        self.map_window(window.clone(), new_loc, false);
-
-        if saved_size == pre_exit_size {
-            // The exit configure re-sends the size the client already has, so no
-            // commit with a changed size will arrive to trigger the recenter — the
-            // position restored above is already final. A preceding fullscreen
-            // exit can have owed one already, so drop rather than merely skip.
-            self.drop_owed_recenter(window);
-            // Refresh the cache the recenter completion would otherwise have
-            // refreshed (`unfill_window` does the same); the fit rect cached by
-            // `fit_window_snapped` is stale now.
-            self.refresh_stable_snap_rect(&StageWindow::Client(window.clone()));
-        } else {
-            self.pending_recenter.insert(
-                wl_surface.id(),
-                PendingRecenter {
-                    target_center: center,
-                    pre_exit_size,
-                },
-            );
-        }
+        // The fit rect `fit_window_snapped` cached is stale now, so refresh.
+        self.establish_exit_placement(
+            &StageWindow::Client(window.clone()),
+            new_loc,
+            saved_size,
+            center,
+            true,
+        );
     }
 
     pub fn toggle_fit_window(&mut self, window: &Window) {

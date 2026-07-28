@@ -5,7 +5,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use super::{DriftWm, PendingRecenter, StageWindow, output_state};
+use super::{DriftWm, StageWindow, output_state};
 use crate::grabs::SizeConstraints;
 use driftwm::canvas::{ScreenPos, screen_to_canvas};
 use driftwm::config;
@@ -178,9 +178,9 @@ impl DriftWm {
     }
 
     pub fn unfill_window(&mut self, window: &Window) {
-        let Some(wl_surface) = window.wl_surface() else {
+        if window.wl_surface().is_none() {
             return;
-        };
+        }
         let Some((saved_pos, saved_size)) = self.stage.take_fill_saved(window) else {
             return;
         };
@@ -190,32 +190,21 @@ impl DriftWm {
         let bar = self.window_ssd_bar(window) as f64;
         let target_center = super::visual_frame_center(saved_pos, saved_size, bar);
 
-        let pre_exit_size = window.geometry().size;
         self.animate_window_geometry(window, saved_size, None);
         self.send_size_configure(window, saved_size);
 
-        // Restore the position now, before the client acks, so the animation has a
+        // The restore below maps before the client acks, so the animation has a
         // single target and travels the filled rect → restored rect as one leg.
         // Deferring it left the chase shrinking the window anchored at the filled
-        // rect's top-left, then jumping when the settle fired.
-        self.map_window(window.clone(), saved_pos, false);
-
-        if saved_size == pre_exit_size {
-            // The exit configure re-sends the size the client already has, so no
-            // commit with a changed size will arrive to trigger the recenter — the
-            // position restored above is already final. A preceding fullscreen
-            // exit can have owed one already, so drop rather than merely skip.
-            self.drop_owed_recenter(window);
-            self.refresh_stable_snap_rect(&StageWindow::Client(window.clone()));
-        } else {
-            self.pending_recenter.insert(
-                wl_surface.id(),
-                PendingRecenter {
-                    target_center,
-                    pre_exit_size,
-                },
-            );
-        }
+        // rect's top-left, then jumping when the settle fired. The filled rect
+        // `fill_window` cached is stale now, so refresh.
+        self.establish_exit_placement(
+            &StageWindow::Client(window.clone()),
+            saved_pos,
+            saved_size,
+            target_center,
+            true,
+        );
     }
 
     pub fn toggle_fill_window(&mut self, window: &Window) {

@@ -1,13 +1,12 @@
 use smithay::{
     desktop::Window,
     output::Output,
-    reexports::wayland_server::Resource,
     utils::{Logical, Point, Rectangle, Size},
     wayland::seat::WaylandFocus,
 };
 
 use super::window_animation::{AnimSpace, ContentPolicy, GeometryRole};
-use super::{DriftWm, FocusTarget, PendingRecenter};
+use super::{DriftWm, FocusTarget};
 use driftwm::window_ext::WindowExt;
 
 impl DriftWm {
@@ -386,36 +385,16 @@ impl DriftWm {
 
         entry.window.exit_fullscreen_configure(entry.saved_size);
 
-        // Restore window position, camera, zoom on the specific output
-        self.map_window(entry.window.clone(), entry.saved_location, false);
-
-        // The client keeps committing viewport-sized frames until it acks the
-        // restore configure and resizes; those stale-sized commits would read as
-        // "grown past settled" in the reflow, so register a settle to hold the
-        // footprint until it resizes. Skip when the committed size already
-        // matches saved_size: no resized commit will arrive and the entry would
-        // gate forever (the recenter would be an identity reposition to
-        // saved_location anyway).
-        //
-        // pre_exit_size is the geometry committed at exit. An enter->exit inside
-        // one frame can leave the client's first fullscreen-sized frame in flight;
-        // if its size differs from saved_size it completes the settle early
-        // against a stale footprint. Fit/fill exits carry the same race.
-        if let Some(surface) = entry.window.wl_surface() {
-            let current_size = entry.window.geometry().size;
-            if current_size != entry.saved_size {
-                let bar = self.window_ssd_bar(&entry.window) as f64;
-                let target_center =
-                    super::visual_frame_center(entry.saved_location, entry.saved_size, bar);
-                self.pending_recenter.insert(
-                    surface.id(),
-                    PendingRecenter {
-                        target_center,
-                        pre_exit_size: current_size,
-                    },
-                );
-            }
-        }
+        // Restore the window's position; the camera and zoom follow below.
+        let bar = self.window_ssd_bar(&entry.window) as f64;
+        let target_center = super::visual_frame_center(entry.saved_location, entry.saved_size, bar);
+        self.establish_exit_placement(
+            &entry.window,
+            entry.saved_location,
+            entry.saved_size,
+            target_center,
+            false,
+        );
 
         // Re-pin if it was pinned before fullscreen, then snap its Space loc
         // back to screen_pos (update_output_from_camera's sync only fires on a
