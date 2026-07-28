@@ -1317,6 +1317,11 @@ impl DriftWm {
 
     /// The screen-pinned window under an output-relative screen position:
     /// `pinned_window_under` resolved from focus surface to window element.
+    ///
+    /// The walk up to the root follows subsurface parents only, so a point over
+    /// a pinned window's xdg *popup* resolves to no window rather than to the
+    /// popup's toplevel. Harmless in practice: an open popup holds a grab that
+    /// owns the input before any of this runs.
     pub(crate) fn pinned_element_under(&self, screen_pos: Point<f64, Logical>) -> Option<Window> {
         let (target, _) = self.pinned_window_under(screen_pos, screen_pos)?;
         let mut root = target.0;
@@ -1421,6 +1426,11 @@ impl DriftWm {
     /// correct surface-local coordinates. Only windows on the active output are
     /// considered — the pointer is always on the active output, and `screen_pos`
     /// is relative to it.
+    ///
+    /// The resize margins obey `resize_on_border` so a pinned window's chrome
+    /// answers the same as a canvas window's (`decoration_hit_for`); with the
+    /// option off there is no border to hit, and the margin must read as the
+    /// empty space it is.
     pub(crate) fn pinned_window_under(
         &self,
         screen_pos: Point<f64, smithay::utils::Logical>,
@@ -1478,14 +1488,15 @@ impl DriftWm {
                     p.screen_pos,
                     size.w,
                     bar_height,
-                ) || crate::decorations::resize_edge_at(
-                    screen_pos,
-                    p.screen_pos,
-                    size,
-                    bar_height,
-                    border_width,
-                )
-                .is_some()
+                ) || (self.config.resize_on_border
+                    && crate::decorations::resize_edge_at(
+                        screen_pos,
+                        p.screen_pos,
+                        size,
+                        bar_height,
+                        border_width,
+                    )
+                    .is_some())
                 {
                     let adjusted = screen_space_focus_loc(
                         ScreenPos(p.screen_pos.to_f64()),
@@ -1497,7 +1508,8 @@ impl DriftWm {
             } else {
                 let is_widget =
                     driftwm::config::applied_rule(&wl_surface).is_some_and(|r| r.widget);
-                if !is_widget
+                if self.config.resize_on_border
+                    && !is_widget
                     && crate::decorations::resize_edge_at(
                         screen_pos,
                         p.screen_pos,

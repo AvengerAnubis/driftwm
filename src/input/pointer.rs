@@ -38,14 +38,21 @@ impl DriftWm {
         pos: Point<f64, smithay::utils::Logical>,
     ) -> BindingContext {
         // Every canvas-space walk below skips pinned windows, so a real one under
-        // the pointer needs its own screen-space arm — mirroring the ordering in
-        // `focus_cascade` / `maybe_hover_focus`, where pinned sits above the
-        // canvas. Without it a click on a pinned window resolves OnCanvas.
-        let screen_pos = canvas_to_screen(CanvasPos(pos), self.camera(), self.zoom()).0;
+        // the pointer needs its own screen-space arm — without it a click on a
+        // pinned window resolves OnCanvas. This is a plain "is anything here"
+        // disjunction, not a cascade: the arms are independent and none of them
+        // outranks another, so their order carries no meaning.
+        //
+        // `has_pinned` gates the conversion because it costs two output-state
+        // locks and this runs per scroll notch and per gesture begin.
+        let over_pinned = self.stage.has_pinned() && {
+            let screen_pos = canvas_to_screen(CanvasPos(pos), self.camera(), self.zoom()).0;
+            self.pinned_window_under(screen_pos, pos).is_some()
+        };
         // SSD chrome and the CSD resize margin sit outside the surface bbox, so
         // `element_under` misses them; count them as OnWindow so on-window bindings
         // apply over the chrome, not just the client surface.
-        let over_window = self.pinned_window_under(screen_pos, pos).is_some()
+        let over_window = over_pinned
             || self.element_under(pos).is_some()
             || self.canvas_layer_under(pos).is_some()
             || self.decoration_under(pos).is_some();

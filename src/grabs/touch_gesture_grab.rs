@@ -414,7 +414,15 @@ impl TouchGestureGrab {
         let canvas = screen_to_canvas(ScreenPos(focus_at), camera, zoom).0;
         let serial = SERIAL_COUNTER.next_serial();
         // Pinned windows hit-test in screen space and the canvas walk skips
-        // them, so check them first — as the move and resize siblings do.
+        // them, so check them first. Unlike the move and resize siblings a
+        // pinned widget is not excluded: a tap only raises and focuses, and
+        // every other widget this function reaches gets the same treatment.
+        //
+        // `focus_at` is screen space against `self.output`, captured at grab
+        // start, while `pinned_element_under` filters pins by the *active*
+        // output. They agree because touch-down sets the active output to the
+        // one under the finger; a pointer motion to another output between the
+        // finger's down and up would break that.
         let under = data
             .pinned_element_under(focus_at)
             .or_else(|| data.element_under_raw(canvas).map(|(w, _)| w.clone()));
