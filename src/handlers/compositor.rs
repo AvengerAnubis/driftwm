@@ -688,15 +688,14 @@ impl CompositorHandler for DriftWm {
                             || self.pending_fullscreen.contains_key(&root);
                         // Adopted windows keep the suspended rect and z-slot —
                         // never navigate the camera or raise on adopt. A window
-                        // still waiting on a deferred adopt is not drawn either,
-                        // so neither a pan nor a focus may aim at it; both are
-                        // handed over at its reveal.
+                        // still waiting on a deferred adopt needs no term of its
+                        // own: the primitives below refuse to pan, raise or
+                        // focus one whatever route reaches them.
                         if !is_widget
                             && !suppress_focus_on_open
                             && !is_fullscreen
                             && !place_in_background
                             && !deferred_fit_or_fs
-                            && !hidden_for_adopt
                             && adopted_sid.is_none()
                         {
                             let reset = self.config.zoom_reset_on_new_window;

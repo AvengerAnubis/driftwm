@@ -45,6 +45,12 @@ impl DriftWm {
 
     /// Raise a window and focus it (or its innermost modal child).
     pub fn raise_and_focus(&mut self, window: &Window, serial: smithay::utils::Serial) {
+        // A window held back for a deferred adopt is not drawn, and the adopt is
+        // about to hand it a different z-slot outright — so neither half of this
+        // may land on it from any route. The reveal owes it both.
+        if self.hidden_by_deferred_adopt(window) {
+            return;
+        }
         self.raise_with_children(&StageWindow::Client(window.clone()));
         self.enforce_below_windows();
 
@@ -78,6 +84,14 @@ impl DriftWm {
         target: Option<FocusTarget>,
         serial: smithay::utils::Serial,
     ) {
+        // The keyboard may not land on a window nobody can see. The last gate
+        // rather than the only one, so a caller that resolved past
+        // `raise_and_focus` still can't seat focus on a hidden adopt.
+        if let Some(t) = &target
+            && self.root_hidden_by_deferred_adopt(&t.0)
+        {
+            return;
+        }
         self.window_focus = target.map(FocusIntent::Surface);
         // Unconditional, `None` included: only `clear_focus_to_empty_canvas` means
         // "blank slate" — a flag surviving an incidental clear would silently kill

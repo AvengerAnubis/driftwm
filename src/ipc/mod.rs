@@ -461,6 +461,13 @@ fn cmd_focus(arg: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
         let id = focused_window_info(state, &window).id;
         return Err(format!("window #{id} is a widget and cannot be focused"));
     }
+    // A window still held back for a deferred adopt is drawn nowhere: focusing
+    // it would put the keyboard somewhere the user cannot see, and it arrives on
+    // its own once the grab holding the adopt lets go.
+    if state.hidden_by_deferred_adopt(&window) {
+        let id = focused_window_info(state, &window).id;
+        return Err(format!("window #{id} is not on screen yet"));
+    }
     let info = focused_window_info(state, &window);
     // Already on screen: just raise + focus, don't move the camera. Pinned
     // windows are always on screen and have no canvas position to navigate to.
@@ -681,6 +688,14 @@ fn cmd_suspend(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
     // would silently redirect to the child instead.
     if state.topmost_modal_child(&window).is_some() {
         return Err("window has an open modal dialog".to_string());
+    }
+    // A window still held back for a deferred adopt cannot take the keyboard, so
+    // the action's focus-resolved target would be somebody else's window. It is
+    // never fullscreen or pinned while hidden (both are withheld for the
+    // duration), so the plain suspend is the whole of what the action would do.
+    if state.hidden_by_deferred_adopt(&window) {
+        state.suspend_window(&window, None);
+        return Ok(Response::Ok);
     }
     if state.focused_window().as_ref() != Some(&window) {
         state.raise_and_focus(&window, SERIAL_COUNTER.next_serial());

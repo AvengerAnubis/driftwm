@@ -601,16 +601,35 @@ impl DriftWm {
             self.pending_fullscreen.remove(root);
             self.pending_fit.remove(root);
         }
+        // An adopt lands in this same dispatch and teleports the window into the
+        // stand-in's slot, so the request waits for that: a fit measured here
+        // frames the holding placement and parks the camera on a rect the
+        // teleport then moves the window out of, and a fullscreen entered here
+        // saves the holding placement as the rect its exit restores — losing the
+        // slot the user dragged the stand-in to. The flush hands it over once
+        // the window has the slot.
+        if cause != RevealCause::Adopt {
+            self.apply_queued_geometry_request(root);
+        }
+        // The window is hit-testable again from here, under a pointer that may
+        // not have moved since it was placed. (The adopt re-runs this after its
+        // teleport, where the answer is the one that lasts.)
+        self.refresh_pointer_focus();
+    }
+
+    /// Hand over a fullscreen / maximize the client asked for while its window
+    /// was hidden and [`Self::queues_geometry_request`] queued instead of
+    /// applying. Fullscreen wins when a client asked for both.
+    fn apply_queued_geometry_request(&mut self, root: &WlSurface) {
+        let Some(window) = self.window_for_surface(root) else {
+            return;
+        };
         if let Some(client_output) = self.pending_fullscreen.remove(root) {
             let target = self.resolve_fullscreen_output(root, client_output);
             self.enter_fullscreen(&window, target);
         } else if self.pending_fit.remove(root) {
             self.decoration_fit(&window);
         }
-        // The window is hit-testable again from here, under a pointer that may
-        // not have moved since it was placed. (The adopt re-runs this after its
-        // teleport, where the answer is the one that lasts.)
-        self.refresh_pointer_focus();
     }
 
     /// Drop the stashed adopts that can never land — their pending relaunch was
@@ -719,6 +738,14 @@ impl DriftWm {
                 continue;
             }
             self.resolve_placed_adopt(&window, &root, sid, origin);
+            // The reveal held this back so the adopt could take the slot first;
+            // it applies against the rect the window actually ended up with,
+            // whether the adopt landed or a carve-out dropped the stand-in. Only
+            // a first-commit entry ever hides its window, so only that origin
+            // can have a queued request to hand over.
+            if origin == AdoptOrigin::FirstCommit {
+                self.apply_queued_geometry_request(&root);
+            }
         }
     }
 
@@ -1040,15 +1067,27 @@ impl DriftWm {
     /// pre-resolved so a no-`.desktop` window closes honestly instead of
     /// vanishing forever.
     pub fn suspend_focused_window(&mut self, restore_rect: Option<Rectangle<i32, Logical>>) {
+        let Some(window) = self.focused_window() else {
+            return;
+        };
+        self.suspend_window(&window, restore_rect);
+    }
+
+    /// [`Self::suspend_focused_window`] for a caller that already holds the
+    /// window. The IPC verb needs it: its selector can name a window the
+    /// keyboard is not allowed to reach (one still hidden for a deferred adopt),
+    /// and resolving the target through focus would suspend somebody else's.
+    pub fn suspend_window(
+        &mut self,
+        window: &Window,
+        restore_rect: Option<Rectangle<i32, Logical>>,
+    ) {
         // Dialogs and modals are ineligible — same exclusion the
         // `suspend_on_close` path applies. Suspending one would relaunch a
         // whole fresh app instance, which is nonsense for a child dialog.
-        let Some(window) = self
-            .focused_window()
-            .filter(|w| !w.is_widget() && w.parent_surface().is_none() && !w.is_modal())
-        else {
+        if window.is_widget() || window.parent_surface().is_some() || window.is_modal() {
             return;
-        };
+        }
         // The prelude only exits fullscreen on the active output; cover a
         // window fullscreen elsewhere.
         if let Some(output) = window
@@ -1059,8 +1098,8 @@ impl DriftWm {
         }
         // Land a pinned window back on the canvas first, so the stand-in is a
         // normal canvas window at the spot the user sees it.
-        if self.is_pinned(&window) {
-            self.unpin_to_canvas(&window);
+        if self.is_pinned(window) {
+            self.unpin_to_canvas(window);
         }
         let Some(surface) = window.wl_surface().map(|s| s.into_owned()) else {
             return;
@@ -1070,7 +1109,7 @@ impl DriftWm {
             tracing::info!(
                 "suspend-window: '{app_id}' resolves to no .desktop entry; closing normally"
             );
-            self.mark_real_close(&window);
+            self.mark_real_close(window);
             window.send_close();
             return;
         };
@@ -1079,7 +1118,7 @@ impl DriftWm {
         // window was fullscreen, else the current windowed geometry — the fit
         // / current visual size wins, restore size dropped.
         let rect = restore_rect.unwrap_or_else(|| {
-            let loc = self.stage.position_of(&window).unwrap_or_default();
+            let loc = self.stage.position_of(window).unwrap_or_default();
             Rectangle::new(loc, window.geometry().size)
         });
         self.suspend_marks.insert(

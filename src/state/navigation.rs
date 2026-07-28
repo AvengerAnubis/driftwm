@@ -58,6 +58,15 @@ impl DriftWm {
     /// already lives on rather than dragging the active monitor's camera
     /// across to it.
     pub fn navigate_to_window_on(&mut self, window: &Window, output: &Output, reset_zoom: bool) {
+        // Nothing is drawn for a window held back by a deferred adopt, and the
+        // placement it is holding is one the flush teleports it out of: a pan
+        // there lands the viewport on empty canvas, and the raise and focus
+        // below would hand an invisible window the keyboard. The reveal owes it
+        // all three, so the gate lives here rather than at each caller.
+        if self.hidden_by_deferred_adopt(window) {
+            return;
+        }
+
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
 
         // A fullscreen window lives in screen space, shown only on its own
@@ -88,7 +97,12 @@ impl DriftWm {
 
         let target_zoom = self.navigation_target_zoom(output, reset_zoom);
 
-        let window_loc = self.stage.position_of(window).unwrap_or_default();
+        // An element off the stage has no canvas point to aim at, and the origin
+        // is not a stand-in for one — the adopt's compound remove + replace
+        // leaves a window there for the length of two statements.
+        let Some(window_loc) = self.stage.position_of(window) else {
+            return;
+        };
         let window_size = window.geometry().size;
         let bar = self.window_ssd_bar(window);
         let vc = self.usable_center_screen_on(output);
@@ -331,6 +345,14 @@ impl DriftWm {
     /// output → just focus; any clipping → pan that output into view. A window
     /// off every screen falls back to the active output.
     pub fn activate_window_output_local(&mut self, window: &Window) {
+        // An activation aimed at a window still hidden for a deferred adopt is a
+        // no-op, not an early reveal: the window is mid-relaunch under the
+        // user's own grab and arrives on its own within the relaunch deadline.
+        // Answered ahead of the fullscreen exit below, which would otherwise
+        // drop a fullscreen window off the screen for a window nobody can see.
+        if self.hidden_by_deferred_adopt(window) {
+            return;
+        }
         let Some(home) = self.output_for_window(window) else {
             return;
         };

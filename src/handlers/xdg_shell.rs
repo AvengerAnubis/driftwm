@@ -292,9 +292,15 @@ impl XdgShellHandler for DriftWm {
                 });
 
             // When auto-navigation is off, dropping an off-screen follow target
-            // guarantees focus never lands somewhere the user can't see.
-            let follow = follow
-                .filter(|t| self.config.auto_navigate_on_close || self.window_fully_in_viewport(t));
+            // guarantees focus never lands somewhere the user can't see. A
+            // window hidden for a deferred adopt is dropped either way: it reads
+            // as off screen, so with auto-navigation on it would be kept as a
+            // target that can neither be focused nor panned to — suppressing the
+            // fallback tiers that would have found a real one.
+            let follow = follow.filter(|t| {
+                !self.hidden_by_deferred_adopt(t)
+                    && (self.config.auto_navigate_on_close || self.window_fully_in_viewport(t))
+            });
 
             let keyboard = self.seat.get_keyboard().unwrap();
             let current_focus = keyboard.current_focus();

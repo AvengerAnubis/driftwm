@@ -2973,9 +2973,9 @@ fn the_loser_of_a_two_window_race_is_revealed_where_it_stands() {
 /// A client that fullscreens itself while it is hidden must not get it there:
 /// the render skips the window and the fullscreen cull skips everything else,
 /// so the output would draw nothing at all until the drag ended. The request
-/// waits in the same queue a pre-first-commit one uses and is applied at the
-/// reveal — where being fullscreen is a place policy put the window, so the
-/// adopt stands down and the stand-in goes.
+/// waits in the same queue a pre-first-commit one uses and is applied once the
+/// adopt has taken the slot — so the rect the fullscreen exit restores is the
+/// one the user dragged the stand-in to.
 #[test]
 fn a_hidden_adopt_cannot_fullscreen_before_it_is_revealed() {
     let tmp = TempDir::new();
@@ -3007,12 +3007,11 @@ fn a_hidden_adopt_cannot_fullscreen_before_it_is_revealed() {
 
     assert!(
         f.state().is_window_fullscreen(&hidden),
-        "the reveal hands over the request the hiding held back"
+        "the flush hands over the request the hiding held back"
     );
     assert!(
         !suspended_present(&mut f),
-        "a window that came back fullscreen is where policy put it, so the \
-         adopt drops the stand-in instead of ripping it out"
+        "and the stand-in went into the adopt that ran ahead of it"
     );
 
     client_close(&mut f, cid, &surface);
@@ -3572,6 +3571,300 @@ fn ipc_suspend_of_a_hidden_adopt_still_leaves_a_stand_in() {
     for id in stand_ins {
         f.state().dismiss_suspended(id);
     }
+}
+
+/// A toolkit that mints its own activation token when it presents its first
+/// window reaches the activation path with that window still hidden, and the
+/// tail of that path raises it, hands it the keyboard and flies the camera to
+/// the holding placement the flush is about to teleport it out of — dropping the
+/// output out of fullscreen on the way, to make room for a window nobody can
+/// see. The identical request, once the window is revealed, is honored in full.
+#[test]
+fn an_activation_for_a_hidden_adopt_moves_neither_the_camera_nor_the_keyboard() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    let output = f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    // The honored activation below pans, which populates blur_camera_generation.
+    f.skip_baseline_check();
+
+    let fs = f.add_client();
+    let fs_surface = map_window(&mut f, fs, "fs", (400, 300));
+    let fs_window = window_by_app_id(&mut f, "fs").unwrap();
+    f.client(fs).window(&fs_surface).set_fullscreen(None);
+    f.double_roundtrip(fs);
+    adopt_last_configure(&mut f, fs, &fs_surface);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+    // Far off screen, so a flight to it is unmistakable.
+    seat_at(&mut f, &hidden, (9000, 9000));
+    f.state().set_camera_target(None);
+
+    // The app's own token, carrying a serial, presented on its own window.
+    let mut self_activate = |f: &mut Fixture| {
+        f.client(cid).request_activation_token(&surface, true);
+        f.roundtrip(cid);
+        f.client(cid).activate(&surface);
+        f.double_roundtrip(cid);
+    };
+    self_activate(&mut f);
+
+    assert_eq!(
+        f.state().focused_window(),
+        Some(fs_window.clone()),
+        "the keyboard stayed with the window the user is looking at"
+    );
+    assert!(
+        f.state().camera_target().is_none(),
+        "and no flight was aimed at the holding placement"
+    );
+    assert!(
+        f.state().is_output_fullscreen(&output),
+        "and the screen was not cleared to make room for a window nobody can see"
+    );
+
+    // Revealed where it stands (the stand-in is gone, so nothing teleports it),
+    // the same request is the ordinary activation it always was.
+    release_onto_a_dismissed_stand_in(&mut f, sid);
+    self_activate(&mut f);
+
+    assert_eq!(
+        f.state().focused_window(),
+        Some(hidden.clone()),
+        "the refusal above was the hiding, not a request that never arrived"
+    );
+    assert!(
+        f.state().camera_target().is_some(),
+        "and the flight it was owed lands once there is something to fly to"
+    );
+    assert!(
+        !f.state().is_output_fullscreen(&output),
+        "including the fullscreen exit the activation makes room with"
+    );
+
+    client_close(&mut f, cid, &surface);
+    client_close(&mut f, fs, &fs_surface);
+}
+
+/// The refusal belongs to the primitives, not to the routes into them: whatever
+/// resolved a hidden window — an IPC selector, a taskbar, a follow target — must
+/// not be able to raise it, seat the keyboard on it, or aim a camera at it.
+#[test]
+fn the_focus_and_camera_primitives_refuse_a_hidden_adopt() {
+    use crate::state::FocusTarget;
+    use smithay::utils::SERIAL_COUNTER;
+
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+    f.skip_baseline_check();
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+    let other = f.add_client();
+    let other_surface = map_window(&mut f, other, "other", (400, 300));
+    let other_win = window_by_app_id(&mut f, "other").unwrap();
+
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+    seat_at(&mut f, &hidden, (9000, 9000));
+    // Put the visible window on top and in the keyboard, so a raise or a focus
+    // that did land would show.
+    f.state()
+        .raise_and_focus(&other_win, SERIAL_COUNTER.next_serial());
+    f.state().set_camera_target(None);
+
+    let topmost = |f: &mut Fixture| f.state().stage.windows().next_back().cloned();
+    let on_top = StageWindow::Client(other_win.clone());
+
+    f.state().navigate_to_window(&hidden, true);
+    assert!(
+        f.state().camera_target().is_none(),
+        "no camera flight to a window nothing is drawn for"
+    );
+
+    f.state()
+        .raise_and_focus(&hidden, SERIAL_COUNTER.next_serial());
+    assert_eq!(
+        topmost(&mut f),
+        Some(on_top.clone()),
+        "and no raise into a z-slot the adopt is about to replace outright"
+    );
+
+    f.state().set_window_focus(
+        Some(FocusTarget(server_surface(&hidden))),
+        SERIAL_COUNTER.next_serial(),
+    );
+    assert_eq!(
+        f.state().focused_window(),
+        Some(other_win.clone()),
+        "and the keyboard stays where the user left it"
+    );
+
+    // Revealed, the very same three calls do what they say — so the assertions
+    // above are about the hiding, not about calls that never do anything.
+    release_onto_a_dismissed_stand_in(&mut f, sid);
+    f.state().navigate_to_window(&hidden, true);
+    assert!(f.state().camera_target().is_some());
+    assert_eq!(topmost(&mut f), Some(StageWindow::Client(hidden.clone())));
+    assert_eq!(f.state().focused_window(), Some(hidden.clone()));
+
+    client_close(&mut f, cid, &surface);
+    client_close(&mut f, other, &other_surface);
+}
+
+/// A client that restores maximized at startup asks while it is hidden, so the
+/// request waits for the flush. Handed over at the reveal — a step ahead of the
+/// adopt — the fit frames the holding placement the window is about to be
+/// teleported out of, and leaves the camera on ground the adopt then moves it
+/// off. It has to measure the slot the window actually lands in.
+#[test]
+fn a_queued_fit_frames_the_slot_the_adopt_lands_in() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+    f.skip_baseline_check();
+
+    // The slot is far from the holding placement, which lands near the camera.
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+
+    f.client(cid).window(&surface).set_maximized();
+    f.double_roundtrip(cid);
+
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+
+    assert!(
+        !suspended_present(&mut f),
+        "precondition: the adopt took the stand-in's slot"
+    );
+    let target = f.state().camera_target();
+    assert!(
+        target.is_some_and(|t| t.x > 3000.0 && t.y > 3000.0),
+        "the fit framed the slot the window landed in — a fit taken ahead of \
+         the adopt frames the holding placement instead, and then loses even \
+         that when the adopt drops the animation its pan was parked on: \
+         {target:?}"
+    );
+    assert!(
+        f.state().stage.is_fit(&hidden),
+        "and the membership survives, which a fit taken before the adopt does \
+         not — the stage surgery drops it, leaving the client told it is \
+         maximized while nothing here agrees"
+    );
+
+    client_close(&mut f, cid, &surface);
+}
+
+/// A dialog the relaunching app opened before its window was revealed can die
+/// inside the deferral, and a close's follow tiers resolve its parent through
+/// the xdg link — a window that reads as off screen, cannot be focused and
+/// cannot be panned to. Kept as the target it suppresses the tiers that would
+/// have found a real one, and the close raises and focuses nothing at all.
+#[test]
+fn a_close_does_not_follow_into_a_hidden_adopt() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+
+    let other = f.add_client();
+    let other_surface = map_window(&mut f, other, "other", (400, 300));
+    let other_win = window_by_app_id(&mut f, "other").unwrap();
+
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+
+    // The app's own dialog, parented to the window nobody can see yet.
+    let dialog = begin_window(&mut f, cid, "myapp-dialog");
+    let parent = f.client(cid).window(&surface).xdg_toplevel.clone();
+    f.client(cid).window(&dialog).set_parent(Some(&parent));
+    finish_window(&mut f, cid, &dialog, (200, 100));
+    let dialog_win = window_by_app_id(&mut f, "myapp-dialog").unwrap();
+    assert_eq!(
+        f.state().focused_window(),
+        Some(dialog_win),
+        "precondition: the dialog holds the keyboard, so its close follows"
+    );
+
+    client_close(&mut f, cid, &dialog);
+
+    assert_eq!(
+        f.state().focused_element(),
+        Some(StageWindow::Client(other_win.clone())),
+        "the close skipped its invisible parent and landed on a window the \
+         user can see"
+    );
+    assert_eq!(
+        f.state().stage.windows().next_back().cloned(),
+        Some(StageWindow::Client(other_win)),
+        "and raised it — a follow into the hidden parent raises nothing, \
+         leaving the focus to drift back through the history on its own"
+    );
+
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+    client_close(&mut f, cid, &surface);
+    client_close(&mut f, other, &other_surface);
+}
+
+/// `msg focus` can name a window still hidden for a deferred adopt, and the
+/// keyboard may not land there. It refuses rather than reporting a focus it did
+/// not make — the window arrives on its own when the grab lets go.
+#[test]
+fn ipc_focus_of_a_hidden_adopt_is_refused() {
+    use crate::ipc::protocol::{Request, WindowSelector};
+
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+    let other = f.add_client();
+    let other_surface = map_window(&mut f, other, "other", (400, 300));
+    let other_win = window_by_app_id(&mut f, "other").unwrap();
+
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+    let win_id = f
+        .state()
+        .stage
+        .id_of(&StageWindow::Client(hidden))
+        .unwrap()
+        .0;
+
+    let reply = crate::ipc::dispatch(Request::Focus(Some(WindowSelector::Id(win_id))), f.state());
+    assert!(reply.is_err(), "got {reply:?}");
+    assert_eq!(
+        f.state().focused_window(),
+        Some(other_win),
+        "and the keyboard stayed where it was"
+    );
+
+    // The selector resolves fine once the window is on screen, so the refusal
+    // was the hiding rather than a window the command could not find.
+    release_onto_a_dismissed_stand_in(&mut f, sid);
+    let reply = crate::ipc::dispatch(Request::Focus(Some(WindowSelector::Id(win_id))), f.state());
+    assert!(reply.is_ok(), "got {reply:?}");
+
+    client_close(&mut f, cid, &surface);
+    client_close(&mut f, other, &other_surface);
 }
 
 /// `msg relaunch` on a selector that names no suspended window errors instead
