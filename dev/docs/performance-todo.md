@@ -5,8 +5,7 @@ Line numbers predate the push — re-verify on pickup. Profiling tooling:
 [profiling.md](profiling.md).
 
 Non-perf items live at the bottom under
-[Correctness backlog](#correctness-backlog) and
-[Structural backlog](#structural-backlog).
+[Correctness backlog](#correctness-backlog).
 
 ## Blur (B5b + S1)
 
@@ -87,41 +86,10 @@ or key on (quantized position, behind-element commits).
 
 ## Correctness backlog
 
-Surfaced by a four-lens seam review before the post-v0.15.0 release, targeting
-feature pairs that were each reviewed on their own branch but never together.
-All four seam hypotheses came back refuted; these are what the sweep found on
-the way past. The three missed-checklist bugs it also found were fixed at the
-time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
+Open bugs, not perf work. Behaviour that reads like a bug but is settled — what
+input hit-tests, what a configured size means, the inert resize band — lives in
+[caveats.md](caveats.md).
 
-- **`driftwm msg move` read-then-write is non-idempotent mid-settle.** The write
-  arm lands where asked whatever the client is still committing — `cmd_move` and
-  the `MoveToBookmark` keybind both go through `map_window_to_rule_point`
-  (`src/state/recenter.rs`), which re-aims the owed `pending_recenter` at the
-  requested point instead of dropping it. The read arm still derives its center
-  from `window.geometry().size`, so mid-settle a `get` followed by a `move` back
-  to the reported point relocates the window. Deliberate: `msg state` and the
-  state file derive `position` from that same committed geometry
-  (`src/state/persistence.rs`, single source of truth per its own doc), so
-  changing this one arm alone would make the two disagree, and neither
-  `docs/ipc.md` nor `docs/cli.md` documents which size the center derives from.
-  Fix, if ever: move every reader onto one accessor at once.
-- **A re-aimed recenter that never settles strands both halves of what it
-  promised.** Re-aiming rather than dropping (the item above) buys the correct
-  landing at the cost `drop_owed_recenter`'s own doc warns about: an entry left
-  owed also gates `reflow_grown_snapped_window`. The settle trigger is
-  `geo.size != pre_exit_size` (`src/handlers/compositor.rs`), so a client that
-  acks the exit configure and then commits back at *exactly* its pre-exit size
-  never fires it. The window keeps the provisional placement — which was derived
-  from the size the exit *configured*, not the one the client kept, so it sits
-  half that difference off the requested point — and stays out of snap/cluster
-  reflow until it unmaps. `map_window_to_rule_point`'s own doc names the reflow
-  half; nothing bounds either.
-- **Zero-net-change resize strands `ResizeState::WaitingForLastCommit`.**
-  Grab start sets `Resizing` in *pending* state only, so a resize that ends
-  where it began leaves `send_pending_configure` with nothing to send and the
-  client with no reason to commit (`src/grabs/resize_grab.rs`). Until its next
-  repaint the window reads as under an interactive grab, which silently skips
-  its next geometry animation and makes relaunch adoption bail. Self-clears.
 - **A fill dispatched between a resize release and the settle commit loses its
   placement.** `handle_resize_commit` (`src/handlers/compositor.rs`) maps the
   window back to the grab's `initial_window_location`, discarding the
@@ -149,69 +117,6 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   bug against `restore_size` and now reads `configured_window_size` instead;
   fit was left alone because nothing forced it. Verified in the fixture: fit
   un-acked, then fullscreen, then exit, restores 800×600 at the fit position.
-- **A filled window's fullscreen exit ignores a client's own resize.** The fill
-  arm above reads `configured_window_size`, which is what closes the pre-ack
-  race, but that is pending state and no client-initiated resize updates it (see
-  the note on the IPC `move` item). So a client that resizes *itself* after being
-  filled gets its fill-configured size back on the fullscreen exit rather than
-  its current one. Narrow, and arguably right — the stage still holds the filled
-  position, so the configured size is the rect that pairs with it — but it is a
-  deliberate trade, not an oversight. The deeper issue is that a self-resize
-  leaves fill membership claiming a rect the window no longer occupies.
-- **`resize_on_border` decides whether the border resizes, not whether it is part
-  of the window — settled, and the band is uniformly the window's.** The option
-  gates `decoration_hit_for` and `pinned_decoration_under` (`src/input/mod.rs`),
-  which produce `DecorationHit::ResizeBorder` — *resize* behaviour. It does not
-  gate `surface_under` or `pinned_window_under`, which decide *membership*:
-  pointer focus, binding context, pick target. So with the option off the 8 px
-  band is still the window's, it just can't be dragged. It used to be the
-  window's only *around a pin*: binding context for a canvas window read its
-  margin through the gated decoration channel, so the same ring bound `OnWindow`
-  around a pin and `OnCanvas` around a canvas window. `pointer_context` now asks
-  `resize_margin_under`, an ungated membership walk, whenever the option is off,
-  which closes the split in the additive direction — the band gains `OnWindow`,
-  nothing starts falling through. `an_inert_resize_margin_binds_as_window_pinned_or_not`
-  and its SSD sibling (`src/tests/pinned_phantom.rs`) pin the membership half,
-  `an_inert_resize_margin_starts_no_resize` the resize half.
-
-  The opposite direction — letting the inert band fall through to whatever is
-  behind it — was rejected, and these two constraints are why. It is not a no-op:
-  `pointer_focus_under` continues past `surface_under` into `canvas_layer_under`,
-  widget windows and then `Bottom`/`Background`, so a wallpaper client would take
-  an enter/leave pair every time the cursor crossed any window's ring, and that
-  arm sets `pointer_over_layer`, which makes `maybe_hover_focus` return early —
-  `focus_follows_mouse` would be *suppressed* in the ring rather than falling
-  through to canvas. And `render/shaders.rs` draws the border
-  `border_width_logical` *outside* the window rect, i.e. inside this band, so
-  `[decorations] border_width > 0` plus a fall-through would give a visible
-  border that is click- and hover-through.
-- **Input hit-tests the animation's destination, not the drawn rect — and that is
-  by design.** Every stage read in the input path takes the destination:
-  `topmost_under`'s `position_and_pinned`, `element_under_skipping`'s,
-  `decoration_under`'s and `surface_under`'s `position_of` (`src/input/mod.rs`).
-  The render path draws at `geometry_visual_rect`, which has no consumer anywhere
-  under `src/input/`, so the two rects are disjoint for the whole animation — for
-  a fit, by `old_size/2 - usable.size/2 + gap (+bar)`, which puts an 800×600
-  window on a 1920×1080 usable area 548 px left and 204 px up of where it is
-  drawn. Recorded here because it *looks* like a bug and has been filed as one
-  twice.
-
-  The settled model: a window animation is eye candy over a state change that is
-  already complete. The window is at its destination the moment the action runs;
-  the picture is catching up. So hit-testing the destination is correct, and so
-  are the surface-local coordinates `surface_under` derives from it. A *camera*
-  animation is the opposite — the viewport genuinely is moving, so input tracks
-  it live, which is why the grab-install chokepoints below take the viewport out
-  of flight rather than freezing input.
-
-  The visible cost is that during an animation a window cannot be clicked where
-  it is drawn: at default speeds ~120 ms, reading as a missed click; obvious once
-  `[effects] animation_speed` is lowered — at 0.02 it lasts ~4 s. Going
-  visual-aware would mean threading `geometry_visual_rect(id).loc` into those four
-  reads (checking `geometry_space` first — that accessor's doc warns about Canvas
-  vs Screen), and it carries a non-obvious tax: the idle pointer-focus re-poll has
-  to be suppressed while any transition runs, or moving pixels drag enter/leave
-  across a stationary cursor. Do not reopen without revisiting the model first.
 - **A camera target armed *after* a resize grab installs still resizes the
   window.** `warp_pointer` (`src/state/viewport_animation.rs`) synthesizes real
   motion into a live grab to keep the pointer at a fixed *screen* position, so its
@@ -242,61 +147,3 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   (`pending_adopt_settle`). Comparing committed geometry against the *last sent*
   configure instead would cover the class at once and let both retire; not taken
   where it was found because every window in the compositor rides that comparison.
-
-## Structural backlog
-
-The duplication this list used to track *is* extracted, and all three extractions
-are worth recording so a new arm grows through them rather than beside them.
-
-The *map to the restored location → equal-size branch or insert a
-`PendingRecenter`* tail the fit, fill and fullscreen exits used to keep three
-hand-maintained copies of is `DriftWm::establish_exit_placement`
-(`src/state/recenter.rs`), called by `unfit_window` (`src/state/fit.rs`),
-`unfill_window` (`src/state/fill.rs`) and `exit_fullscreen_on`
-(`src/state/fullscreen.rs`). The copies drifted exactly as duplication does — the
-fill one was missing the equal-size branch's `drop_owed_recenter` for months and
-the fullscreen one never had it at all, which is the correctness item this
-extraction closed.
-
-What is deliberately *not* shared, so a fourth exit doesn't try to fold it in:
-
-- **The animate → configure order.** Fit and fill seed the geometry animation
-  *before* their configure; the fullscreen exit animates last, after the
-  configure, the map, the re-pin and the camera restore, from a screen-space seed
-  captured before any of it (and in `AnimSpace::Screen` when the window is
-  re-pinned). Pinned by `unfill_animates_straight_to_the_restored_rect` and the
-  frozen/handover fullscreen-exit family in `src/tests/window_animation.rs`.
-- **`target_center` is a parameter, not derived from the mapped location.**
-  `unfit_window` maps to a location `frame_loc_for_center` already truncated out
-  of its center and records the un-truncated one; re-deriving costs up to a pixel
-  per axis (`unfit_settles_on_the_untruncated_center`).
-- **`refresh_snap_rect` is true for fit and fill, false for fullscreen.**
-  `fit_window_snapped` and `fill_window` cache a rect of their own that the exit
-  invalidates; `enter_fullscreen` caches none, so the cached rect is still the
-  pre-fullscreen one the exit hands back. Both values are pinned
-  (`unfit_refreshes_the_snap_rect_its_fit_cached`,
-  `fullscreen_exit_leaves_the_cached_snap_rect_alone`).
-
-The *clear fit → clear fill → seed `ResizeState` → set `Resizing` → unset
-`Maximized`* sequence is `DriftWm::begin_client_resize` (`src/state/resize.rs`),
-called by the **four** entry points that can start a client resize
-(`input/pointer.rs`, `handlers/xdg_shell.rs`, `input/gestures/swipe.rs`,
-`input/touch.rs`). Four, not the five this list used to claim: `adopt_relaunched`
-(`src/state/suspended.rs`) shares only the `Maximized` unset, and for an
-unrelated reason — the inherited stage entry has no fit state, so a set
-`Maximized` is one the client can never shed. It seeds no `ResizeState` and no
-resize is in flight; it is not a fifth site. The "drop an owed `pending_recenter`
-before establishing a placement" step is `DriftWm::drop_owed_recenter`
-(`src/state/recenter.rs`), called by **seven** arms (`input/actions.rs` twice,
-`state/fullscreen.rs`, `state/fill.rs`, `state/fit.rs`, `state/suspended.rs`,
-and `establish_exit_placement`'s own equal-size branch). It was nine before the
-exit tails collapsed their two equal-size copies into the one call
-`establish_exit_placement` now makes for all three exits, and eight before the
-bookmark move stopped dropping what it can re-aim instead.
-
-The measurement that motivated the extraction: against niri (93,951 Rust lines to
-driftwm's 98,156, but 81,832 non-test to driftwm's 63,671 — driftwm carries ~29%
-less production code and a 0.54 test ratio to niri's 0.15), size was never the
-problem. Both sides of that comparison count dedicated test files only; driftwm
-also carries 11,897 lines of inline `#[cfg(test)]` modules, putting its true
-non-test total at 51,774 and its true test ratio nearer 0.90.
