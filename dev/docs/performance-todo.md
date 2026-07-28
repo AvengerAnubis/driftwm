@@ -93,26 +93,18 @@ All four seam hypotheses came back refuted; these are what the sweep found on
 the way past. The three missed-checklist bugs it also found were fixed at the
 time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
 
-- **The IPC `move` handler misplaces a window mid-settle, and two coupled bugs
-  do it.** `cmd_move` (`src/ipc/mod.rs`) clears fill and calls `map_window` but
-  never drops an owed `pending_recenter`, unlike its `MoveToBookmark` keybind
-  twin — *and* it sizes `rule_to_internal` from `window.geometry().size`, which
-  mid-settle after a fullscreen/fit/fill exit is the stale pre-exit size. Fixing
-  only the drop makes the second one worse: today the stale recenter drags the
-  window back, which at least reads as a visible no-op; without it the move
-  silently lands off by the pre/post-exit size difference and nothing corrects
-  it. The keybind twin carries the same stale read for fit and fill exits —
-  `move_bookmark_restore_rect` is `Some` only for a fullscreen exit, and
-  `input/actions.rs` falls back to the same `geometry().size`. `rule_to_internal`
-  (`src/canvas.rs`) subtracts `size/2`, so the landing error is *half* the
-  pre/post-exit size difference on each axis, not the whole of it. Note
-  `configured_window_size` (defined in `src/state/window_frame.rs`, reasoned
-  about at its `src/state/fit.rs` call sites) is *not* the fix: it reads pending
-  state that goes stale on any client-initiated resize, trading a one-frame race
-  for a permanent error on mpv, terminals and browsers.
-  `cmd_move`'s single `geometry().size` read also feeds both the read and the
-  write arm, so a fix has to decide whether `driftwm msg move` *reporting*
-  changes with it, or accept read-then-write being non-idempotent mid-settle.
+- **`driftwm msg move` read-then-write is non-idempotent mid-settle.** The write
+  arm lands where asked whatever the client is still committing — `cmd_move` and
+  the `MoveToBookmark` keybind both go through `map_window_to_rule_point`
+  (`src/state/recenter.rs`), which re-aims the owed `pending_recenter` at the
+  requested point instead of dropping it. The read arm still derives its center
+  from `window.geometry().size`, so mid-settle a `get` followed by a `move` back
+  to the reported point relocates the window. Deliberate: `msg state` and the
+  state file derive `position` from that same committed geometry
+  (`src/state/persistence.rs`, single source of truth per its own doc), so
+  changing this one arm alone would make the two disagree, and neither
+  `docs/ipc.md` nor `docs/cli.md` documents which size the center derives from.
+  Fix, if ever: move every reader onto one accessor at once.
 - **Zero-net-change resize strands `ResizeState::WaitingForLastCommit`.**
   Grab start sets `Resizing` in *pending* state only, so a resize that ends
   where it began leaves `send_pending_configure` with nothing to send and the

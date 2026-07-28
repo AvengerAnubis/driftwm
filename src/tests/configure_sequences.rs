@@ -6,6 +6,7 @@ use smithay::input::pointer::MotionEvent;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
 
+use crate::ipc::protocol::{Request, Response, WindowSelector};
 use crate::state::StageWindow;
 
 use super::{Fixture, adopt_last_configure, window_by_app_id};
@@ -1970,10 +1971,11 @@ fn nudge_drops_the_nudged_windows_owed_recenter_alone() {
     );
 }
 
-/// A bookmark move is the window's new position, so it drops the recenter that
-/// would drag it back — and only that window's.
+/// A bookmark move asks for a visual center, so instead of dropping the
+/// recenter its window owes it re-aims it at the bookmark — and touches no
+/// other window's.
 #[test]
-fn move_to_bookmark_drops_the_moved_windows_owed_recenter_alone() {
+fn move_to_bookmark_reaims_the_moved_windows_owed_recenter_alone() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
     f.skip_baseline_check();
@@ -1981,18 +1983,27 @@ fn move_to_bookmark_drops_the_moved_windows_owed_recenter_alone() {
     let id = f.add_client();
     let (a, a_key, b_key) = two_owed_recenters(&mut f, id);
 
+    let b_center = f.state().pending_recenter[&b_key].target_center;
     let serial = SERIAL_COUNTER.next_serial();
     f.state().raise_and_focus(&a, serial);
     f.state().bookmarks.insert("b".into(), [300.0, -200.0]);
     f.state()
         .execute_action(&Action::MoveToBookmark("b".into()));
 
-    assert!(
-        !f.state().pending_recenter.contains_key(&a_key),
-        "the bookmark move dropped the recenter that would have dragged it back"
+    assert_eq!(
+        f.state()
+            .pending_recenter
+            .get(&a_key)
+            .map(|p| p.target_center),
+        Some(Point::from((300.0, 200.0))),
+        "the bookmark move re-aimed the owed recenter at the bookmark"
     );
-    assert!(
-        f.state().pending_recenter.contains_key(&b_key),
+    assert_eq!(
+        f.state()
+            .pending_recenter
+            .get(&b_key)
+            .map(|p| p.target_center),
+        Some(b_center),
         "the other window's owed recenter is none of the bookmark move's business"
     );
 }
@@ -2020,5 +2031,388 @@ fn pin_toggle_drops_the_pinned_windows_owed_recenter_alone() {
     assert!(
         f.state().pending_recenter.contains_key(&b_key),
         "the other window's owed recenter is none of the pin's business"
+    );
+}
+
+/// Fit `surface`'s window, let the client adopt the fit-sized buffer, then unfit
+/// and never ack the restore configure — the fit-exit twin of
+/// [`owe_an_exit_recenter`]. Returns the `pending_recenter` key.
+fn owe_a_fit_exit_recenter(
+    f: &mut Fixture,
+    id: super::client::ClientId,
+    surface: &wayland_client::protocol::wl_surface::WlSurface,
+    window: &smithay::desktop::Window,
+) -> smithay::reexports::wayland_server::backend::ObjectId {
+    f.state().fit_window(window);
+    f.double_roundtrip(id);
+    adopt_last_configure(f, id, surface);
+    f.state().unfit_window(window);
+    f.double_roundtrip(id);
+
+    let key = super::server_surface(window).id();
+    assert!(
+        f.state().pending_recenter.contains_key(&key),
+        "precondition: the fit exit left a recenter owed"
+    );
+    key
+}
+
+/// Fill `surface`'s window, let the client adopt the filled buffer, then unfill
+/// and never ack the restore configure. Returns the `pending_recenter` key.
+fn owe_a_fill_exit_recenter(
+    f: &mut Fixture,
+    id: super::client::ClientId,
+    surface: &wayland_client::protocol::wl_surface::WlSurface,
+    window: &smithay::desktop::Window,
+) -> smithay::reexports::wayland_server::backend::ObjectId {
+    f.state().fill_window(window);
+    assert!(
+        f.state().stage.is_fill(window),
+        "precondition: the fill was not a no-op"
+    );
+    f.double_roundtrip(id);
+    adopt_last_configure(f, id, surface);
+    f.state().unfill_window(window);
+    f.double_roundtrip(id);
+
+    let key = super::server_surface(window).id();
+    assert!(
+        f.state().pending_recenter.contains_key(&key),
+        "precondition: the fill exit left a recenter owed"
+    );
+    key
+}
+
+/// The canvas location a window-rule point maps to for a window of `size` under
+/// a bar of `bar` — what the settle must land on, derived the way every other
+/// caller derives it.
+fn rule_point_loc(x: i32, y: i32, size: Size<i32, Logical>, bar: i32) -> Point<i32, Logical> {
+    crate::state::frame_loc_for_center(
+        Point::from((x as f64, -y as f64 - bar as f64 / 2.0)),
+        size,
+        bar,
+    )
+}
+
+/// Ack the outstanding restore configure and then commit a buffer at a size of
+/// the client's own choosing, which is its right — the only settle that can tell
+/// a recenter re-aimed at the request from one merely dropped, since any size the
+/// compositor could have guessed at placement time is the one it configured.
+fn settle_at(
+    f: &mut Fixture,
+    id: super::client::ClientId,
+    surface: &wayland_client::protocol::wl_surface::WlSurface,
+    size: (u16, u16),
+) {
+    f.client(id).window(surface).ack_last();
+    let window = f.client(id).window(surface);
+    window.set_size(size.0, size.1);
+    window.attach_new_buffer();
+    window.commit();
+    f.double_roundtrip(id);
+}
+
+/// `msg move` dispatched while a window is still settling out of a fullscreen
+/// exit must land it on the requested point once the client resizes. Its
+/// committed buffer is still viewport-sized, so placing against that size lands
+/// it half the size delta away on each axis; the owed recenter is re-aimed at
+/// the request rather than dropped, so the settle corrects it.
+#[test]
+fn ipc_move_mid_fullscreen_exit_settle_lands_where_asked() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let a_surface = map_settled(&mut f, id, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    let key = owe_an_exit_recenter(&mut f, id, &a_surface, &a);
+    assert_eq!(
+        a.geometry().size,
+        Size::from((1920, 1080)),
+        "precondition: the client still commits the fullscreen buffer"
+    );
+
+    let ipc_id = f.state().stage.id_of(&a).unwrap().0;
+    let reply = crate::ipc::dispatch(
+        Request::Move {
+            window: Some(WindowSelector::Id(ipc_id)),
+            to: Some((1000, -500)),
+        },
+        f.state(),
+    );
+    assert!(matches!(reply, Ok(Response::Position { x: 1000, y: -500 })));
+    assert_eq!(
+        f.state().stage.position_of(&a),
+        Some(rule_point_loc(1000, -500, Size::from((400, 300)), 0)),
+        "the provisional placement already uses the size the exit configured, \
+         not the fullscreen buffer the client is still committing"
+    );
+
+    // The client settles at a size of its own choosing, not the 400x300 the
+    // restore configure asked for.
+    settle_at(&mut f, id, &a_surface, (700, 500));
+    assert_eq!(
+        a.geometry().size,
+        Size::from((700, 500)),
+        "precondition: the settle ran against the client's own size"
+    );
+
+    assert!(
+        !f.state().pending_recenter.contains_key(&key),
+        "the settle consumed the re-aimed recenter"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&a),
+        Some(rule_point_loc(1000, -500, Size::from((700, 500)), 0)),
+        "the window landed on the point msg move asked for"
+    );
+}
+
+/// Once the settle is done nothing is owed, and now it is the size the exit
+/// configured that is stale: a client that settled at a size of its own is
+/// described only by its committed geometry. Placing against the configured size
+/// here would miss by half their difference with no settle left to correct it.
+#[test]
+fn ipc_move_after_a_client_chosen_settle_uses_committed_size() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let a_surface = map_settled(&mut f, id, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    let key = owe_an_exit_recenter(&mut f, id, &a_surface, &a);
+    settle_at(&mut f, id, &a_surface, (700, 500));
+    assert!(
+        !f.state().pending_recenter.contains_key(&key),
+        "precondition: the settle completed, so nothing is owed"
+    );
+    assert_eq!(
+        a.geometry().size,
+        Size::from((700, 500)),
+        "precondition: the client kept its own size over the configured 400x300"
+    );
+
+    let ipc_id = f.state().stage.id_of(&a).unwrap().0;
+    let reply = crate::ipc::dispatch(
+        Request::Move {
+            window: Some(WindowSelector::Id(ipc_id)),
+            to: Some((1000, -500)),
+        },
+        f.state(),
+    );
+    assert!(matches!(reply, Ok(Response::Position { x: 1000, y: -500 })));
+
+    assert_eq!(
+        f.state().stage.position_of(&a),
+        Some(driftwm::canvas::rule_to_internal(
+            1000,
+            -500,
+            Size::from((700, 500))
+        )),
+        "the move centered the window on the size it actually committed"
+    );
+}
+
+/// The same mid-settle placement with an SSD title bar: the re-aimed center has
+/// to carry the bar offset, or the settle lands the window half a bar off.
+#[test]
+fn ipc_move_mid_settle_lands_where_asked_with_ssd() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let a_surface = map_settled(&mut f, id, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    super::give_ssd(&mut f, &a);
+    let bar = f.state().window_ssd_bar(&a);
+    assert!(bar > 0, "precondition: the window carries a title bar");
+
+    owe_an_exit_recenter(&mut f, id, &a_surface, &a);
+
+    let ipc_id = f.state().stage.id_of(&a).unwrap().0;
+    let reply = crate::ipc::dispatch(
+        Request::Move {
+            window: Some(WindowSelector::Id(ipc_id)),
+            to: Some((1000, -500)),
+        },
+        f.state(),
+    );
+    assert!(matches!(reply, Ok(Response::Position { x: 1000, y: -500 })));
+    settle_at(&mut f, id, &a_surface, (700, 500));
+
+    assert_eq!(
+        f.state().stage.position_of(&a),
+        Some(rule_point_loc(1000, -500, Size::from((700, 500)), bar)),
+        "the window landed on the point msg move asked for, bar included"
+    );
+}
+
+/// The bookmark binding mid fit-exit settle. Only a *fullscreen* exit used to be
+/// compensated here, so a fit exit placed the window against the still-committed
+/// fit size and then dropped the recenter that could have corrected it.
+#[test]
+fn move_to_bookmark_mid_fit_exit_settle_lands_where_asked() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let a_surface = map_settled(&mut f, id, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    let key = owe_a_fit_exit_recenter(&mut f, id, &a_surface, &a);
+    assert_ne!(
+        a.geometry().size,
+        Size::from((400, 300)),
+        "precondition: the client still commits the fit-sized buffer"
+    );
+
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&a, serial);
+    f.state().bookmarks.insert("b".into(), [1000.0, -500.0]);
+    f.state()
+        .execute_action(&Action::MoveToBookmark("b".into()));
+
+    settle_at(&mut f, id, &a_surface, (700, 500));
+
+    assert!(
+        !f.state().pending_recenter.contains_key(&key),
+        "the settle consumed the re-aimed recenter"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&a),
+        Some(rule_point_loc(1000, -500, Size::from((700, 500)), 0)),
+        "the window landed on the bookmark it was moved to"
+    );
+}
+
+/// The bookmark binding mid fill-exit settle — the other exit the
+/// fullscreen-only compensation never covered.
+#[test]
+fn move_to_bookmark_mid_fill_exit_settle_lands_where_asked() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let a_surface = map_settled(&mut f, id, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    let key = owe_a_fill_exit_recenter(&mut f, id, &a_surface, &a);
+    assert_ne!(
+        a.geometry().size,
+        Size::from((400, 300)),
+        "precondition: the client still commits the filled buffer"
+    );
+
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&a, serial);
+    f.state().bookmarks.insert("b".into(), [1000.0, -500.0]);
+    f.state()
+        .execute_action(&Action::MoveToBookmark("b".into()));
+
+    settle_at(&mut f, id, &a_surface, (700, 500));
+
+    assert!(
+        !f.state().pending_recenter.contains_key(&key),
+        "the settle consumed the re-aimed recenter"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&a),
+        Some(rule_point_loc(1000, -500, Size::from((700, 500)), 0)),
+        "the window landed on the bookmark it was moved to"
+    );
+}
+
+/// A move re-anchors the window, so it invalidates the restore point a fill
+/// saved — an unfill afterwards would otherwise yank it back to where it was
+/// filled from.
+#[test]
+fn ipc_move_clears_the_fill_restore_point() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let a_surface = map_settled(&mut f, id, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    f.state().fill_window(&a);
+    assert!(f.state().stage.is_fill(&a), "precondition: the fill took");
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &a_surface);
+
+    let ipc_id = f.state().stage.id_of(&a).unwrap().0;
+    let reply = crate::ipc::dispatch(
+        Request::Move {
+            window: Some(WindowSelector::Id(ipc_id)),
+            to: Some((1000, -500)),
+        },
+        f.state(),
+    );
+    assert!(matches!(reply, Ok(Response::Position { x: 1000, y: -500 })));
+    assert!(
+        !f.state().stage.is_fill(&a),
+        "the move dropped the fill restore point it invalidated"
+    );
+}
+
+/// A screen-pinned or fullscreen window has no canvas position, so `msg move`
+/// refuses to write one rather than silently no-op'ing or displacing the park.
+#[test]
+fn ipc_move_refuses_pinned_and_fullscreen_windows() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let a_surface = map_settled(&mut f, id, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    f.state().set_camera(Point::from((0.0, 0.0)));
+    f.state()
+        .map_window(a.clone(), Point::from((100, 100)), false);
+    let ipc_id = f.state().stage.id_of(&a).unwrap().0;
+    let move_it = |f: &mut Fixture| {
+        crate::ipc::dispatch(
+            Request::Move {
+                window: Some(WindowSelector::Id(ipc_id)),
+                to: Some((1000, -500)),
+            },
+            f.state(),
+        )
+    };
+
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&a, serial);
+    f.state().execute_action(&Action::TogglePinToScreen);
+    assert!(f.state().is_pinned(&a), "precondition: the pin took");
+    assert!(move_it(&mut f).is_err(), "a pinned window refuses the move");
+
+    f.state().execute_action(&Action::TogglePinToScreen);
+    let cw = f.client(id).window(&a_surface);
+    cw.set_fullscreen(None);
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &a_surface);
+    assert!(
+        f.state().stage.is_fullscreen(&a),
+        "precondition: fullscreen"
+    );
+    let parked = f.state().stage.position_of(&a);
+
+    assert!(
+        move_it(&mut f).is_err(),
+        "a fullscreen window refuses the move"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&a),
+        parked,
+        "and stays parked at its camera origin"
     );
 }

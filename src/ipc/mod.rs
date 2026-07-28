@@ -568,9 +568,11 @@ fn cmd_move(window: Option<WindowSelector>, to: Option<(i32, i32)>, state: &mut 
             };
         }
     };
-    let size = window.geometry().size;
     match to {
         None => {
+            // Committed geometry, matching what `msg state` and the state file
+            // derive a position from, so the two can't disagree mid-settle.
+            let size = window.geometry().size;
             let loc = state.stage.position_of(&window).unwrap_or_default();
             let (x, y) = driftwm::canvas::internal_to_rule(loc, size);
             Ok(Response::Position { x, y })
@@ -582,13 +584,10 @@ fn cmd_move(window: Option<WindowSelector>, to: Option<(i32, i32)>, state: &mut 
             if !state.is_canvas_window(&window) {
                 return Err("pinned and fullscreen windows have no canvas position to move".into());
             }
-            let loc = driftwm::canvas::rule_to_internal(x, y, size);
-            // Moving re-anchors the window, invalidating any fill restore point.
-            state.stage.clear_fill(&window);
             // Activating is only consistent when the target already holds
             // focus; a selector can reach any window.
             let activate = state.focused_window().as_ref() == Some(&window);
-            state.map_window(window, loc, activate);
+            state.map_window_to_rule_point(&window, x, y, activate);
             Ok(Response::Position { x, y })
         }
     }

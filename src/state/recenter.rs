@@ -1,11 +1,13 @@
 //! The recenter a window owes from a fullscreen, fit or fill exit it has not
-//! acked: registering it, and discarding it.
+//! acked: registering it, discarding it, and re-aiming it.
 //!
 //! The exit registers a `pending_recenter` so the client's next
 //! differently-sized commit lands the window on its pre-exit visual center.
 //! Anything that establishes a new placement in the meantime has to discard
-//! that promise, or it fires later and undoes the placement.
+//! that promise, or it fires later and undoes the placement — unless the new
+//! placement is itself expressed as a center, which can be re-aimed instead.
 
+use smithay::desktop::Window;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Size};
 use smithay::wayland::seat::WaylandFocus;
@@ -25,6 +27,59 @@ impl DriftWm {
     pub(crate) fn drop_owed_recenter<W: WaylandFocus>(&mut self, window: &W) {
         if let Some(surface) = window.wl_surface() {
             self.pending_recenter.remove(&surface.id());
+        }
+    }
+
+    /// Place `window` so its visual center lands on the window-rule point
+    /// `(x, y)` — what `msg move` and the bookmark binding both ask for —
+    /// re-aiming any recenter the window still owes rather than dropping it.
+    ///
+    /// A rule point *is* a visual center, and the map onto one is
+    /// size-independent: `rule_to_internal` subtracts half the size per axis and
+    /// `visual_frame_center` adds the same half straight back, leaving
+    /// `(x, -y - bar/2)` whatever the size. So a request that arrives mid-settle
+    /// can re-aim the owed recenter without knowing the size the client is still
+    /// resizing into, and the settle re-derives the location from the size it
+    /// actually commits — residual error is integer truncation, under a pixel
+    /// per axis. Dropping the entry instead would strand the window half the
+    /// size delta from the request with nothing left to correct it.
+    ///
+    /// The re-aimed entry keeps gating `reflow_grown_snapped_window` until that
+    /// commit lands, the cost [`Self::drop_owed_recenter`] describes; a client
+    /// that never resizes holds it only until unmap clears it.
+    pub(crate) fn map_window_to_rule_point(
+        &mut self,
+        window: &Window,
+        x: i32,
+        y: i32,
+        activate: bool,
+    ) {
+        // Moving re-anchors the window, invalidating any fill restore point.
+        self.stage.clear_fill(window);
+
+        let owed = window
+            .wl_surface()
+            .filter(|s| self.pending_recenter.contains_key(&s.id()));
+        // Mid-settle the client is still committing its pre-exit buffer, so the
+        // size the exit configured is the authority for this provisional
+        // placement. Outside a settle committed geometry is, since a
+        // client-initiated resize never updates the size we last configured.
+        let size = if owed.is_some() {
+            super::configured_window_size(window)
+        } else {
+            window.geometry().size
+        };
+        self.map_window(
+            window.clone(),
+            driftwm::canvas::rule_to_internal(x, y, size),
+            activate,
+        );
+
+        if let Some(surface) = owed {
+            let bar = self.window_ssd_bar(window) as f64;
+            if let Some(pending) = self.pending_recenter.get_mut(&surface.id()) {
+                pending.target_center = Point::from((x as f64, -y as f64 - bar / 2.0));
+            }
         }
     }
 

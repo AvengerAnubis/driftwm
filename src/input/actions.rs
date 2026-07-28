@@ -50,13 +50,6 @@ impl DriftWm {
             .then(|| self.focused_fullscreen_restore_rect())
             .flatten();
 
-        // move-to-bookmark centers on the windowed size; the client keeps
-        // reporting the fullscreen buffer until it acks the exit below, so
-        // snapshot the pre-exit windowed rect here (same reason as suspend).
-        let move_bookmark_restore_rect = matches!(action, Action::MoveToBookmark(_))
-            .then(|| self.focused_fullscreen_restore_rect())
-            .flatten();
-
         if self.is_fullscreen() && !action.runs_during_fullscreen() {
             self.exit_fullscreen();
         }
@@ -390,16 +383,9 @@ impl DriftWm {
                             return;
                         }
                         // The prelude may have just exited fullscreen on this
-                        // window; its buffer still reads fullscreen-sized until it
-                        // acks, so center on the captured pre-exit windowed size.
-                        let size = move_bookmark_restore_rect
-                            .map(|r| r.size)
-                            .unwrap_or_else(|| window.geometry().size);
-                        let loc = canvas::rule_to_internal(rx, ry, size);
-                        self.stage.clear_fill(&window);
-                        // The bookmark is the window's new position.
-                        self.drop_owed_recenter(&window);
-                        self.map_window(window.clone(), loc, true);
+                        // window, and a fit or fill exit can be settling too; the
+                        // shared placement re-aims what that exit still owes.
+                        self.map_window_to_rule_point(&window, rx, ry, true);
                     }
                     Some(StageWindow::Suspended(s)) => {
                         // No live client — move the focused suspended stand-in in
