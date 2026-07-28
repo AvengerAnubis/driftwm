@@ -1066,17 +1066,22 @@ impl DriftWm {
     }
 
     /// True if `window` is a real canvas window — not a widget (wallpaper
-    /// layer, immovable), screen-pinned, or fullscreen. The eligibility test
-    /// for canvas operations: navigation, centering, fitting, snapping,
-    /// zoom-to-fit, etc. A fullscreen window fills its own output and is parked
-    /// at that output's camera origin, so it must never join another output's
-    /// snap/cluster/fit geometry.
+    /// layer, immovable), screen-pinned, fullscreen, or held back for a
+    /// deferred adopt. The eligibility test for canvas operations: navigation,
+    /// centering, fitting, snapping, zoom-to-fit, etc. A fullscreen window fills
+    /// its own output and is parked at that output's camera origin, so it must
+    /// never join another output's snap/cluster/fit geometry; a window awaiting
+    /// its adopt is not drawn at all, so nothing may aim the camera or a
+    /// placement at it.
     pub fn is_canvas_window<Q>(&self, window: &Q) -> bool
     where
-        Q: WindowExt,
+        Q: WindowExt + WaylandFocus,
         StageWindow: PartialEq<Q>,
     {
-        !window.is_widget() && !self.is_pinned(window) && !self.is_window_fullscreen(window)
+        !window.is_widget()
+            && !self.is_pinned(window)
+            && !self.is_window_fullscreen(window)
+            && !self.hidden_by_deferred_adopt(window)
     }
 
     pub fn load_xcursor(&mut self, name: &str) -> Option<&CursorFrames> {

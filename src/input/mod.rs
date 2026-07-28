@@ -1117,6 +1117,8 @@ impl DriftWm {
     /// phantom that spans `zoom` times the screen extent they really occupy and
     /// sits wherever the last camera move left it. Callers that need pinned
     /// coverage pair this with `pinned_window_under` / `pinned_element_under`.
+    /// A window awaiting a deferred adopt is skipped for the same reason its
+    /// render is: nothing is drawn at its rect, so nothing may be hit there.
     fn element_under_skipping(
         &self,
         point: Point<f64, Logical>,
@@ -1138,7 +1140,7 @@ impl DriftWm {
                     let Some((pos, pinned)) = self.stage.position_and_pinned(w) else {
                         continue;
                     };
-                    if pinned {
+                    if pinned || self.hidden_by_deferred_adopt(w) {
                         continue;
                     }
                     let render_location = pos - w.geometry().loc;
@@ -1217,11 +1219,15 @@ impl DriftWm {
                     let Some((loc, pinned)) = self.stage.position_and_pinned(w) else {
                         continue;
                     };
-                    // Pinned windows hit-test in screen space, and an off-output
-                    // fullscreen window isn't visible here. Both are skips, not
-                    // stops: whatever is genuinely rendered under `pos` on this
-                    // output must stay reachable.
-                    if pinned || self.fullscreen_on_other_output(&wl_surface, &active) {
+                    // Pinned windows hit-test in screen space, an off-output
+                    // fullscreen window isn't visible here, and one awaiting a
+                    // deferred adopt is not drawn at all. All three are skips,
+                    // not stops: whatever is genuinely rendered under `pos` on
+                    // this output must stay reachable.
+                    if pinned
+                        || self.fullscreen_on_other_output(&wl_surface, &active)
+                        || self.adopt_is_deferred(&wl_surface)
+                    {
                         continue;
                     }
                     let render_location = loc - w.geometry().loc;
@@ -1357,6 +1363,11 @@ impl DriftWm {
             // A window fullscreen on a different output isn't visible here; on
             // its own output the path below still hit-tests it.
             if self.fullscreen_on_other_output(&wl_surface, &active_output) {
+                continue;
+            }
+            // Nothing is drawn for a window awaiting a deferred adopt, so the
+            // pointer over its rect belongs to whatever is drawn beneath it.
+            if self.adopt_is_deferred(&wl_surface) {
                 continue;
             }
             let rule = driftwm::config::applied_rule(&wl_surface);
@@ -1772,6 +1783,12 @@ impl DriftWm {
             // it also prevents its surface from short-circuiting the loop below
             // (the occlusion `return None`) over a window beneath it on this output.
             if self.fullscreen_on_other_output(&wl_surface, &active) {
+                continue;
+            }
+            // Same shape for a window awaiting a deferred adopt: its chrome is
+            // not drawn, so it must neither answer for a click nor occlude the
+            // window that really is under one.
+            if self.adopt_is_deferred(&wl_surface) {
                 continue;
             }
             let Some(loc) = self.stage.position_of(window) else {

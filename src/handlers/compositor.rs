@@ -290,14 +290,15 @@ impl CompositorHandler for DriftWm {
                     // match would miss it and run the whole non-adopted tail:
                     // the membership arms, and `navigate_to_window`'s camera
                     // flight — the exact flight the deferral exists to avoid,
-                    // warping the pointer into the grab that is still live. The
-                    // rest of that route runs on every pass either way, since
-                    // it keys off `adopted_sid` alone: the snap-rect refresh at
-                    // the normal placement (which `adopt_relaunched` then
-                    // deletes — it owes that rect until the client draws the
-                    // size the adopt configures) and a second open animation on
-                    // an already-placed window.
-                    let defer_adopt = self.deferred_adoptions.iter().any(|d| d.root == root);
+                    // warping the pointer into the grab that is still live, and
+                    // the focus and activation a window nobody can see must not
+                    // hold. The rest of that route runs on every pass either
+                    // way, since it keys off `adopted_sid` alone: the snap-rect
+                    // refresh at the normal placement (which finds no rect to
+                    // write while the window is hidden, and which the adopt
+                    // clears in any case) and a second open animation, replayed
+                    // at the reveal.
+                    let defer_adopt = self.adopt_is_deferred(&root);
                     if defer_adopt {
                         // The client's own queued fullscreen/fit goes too, on
                         // every pass: `pending_center` is set again between
@@ -577,8 +578,12 @@ impl CompositorHandler for DriftWm {
                         // Background-placed windows never activate: keep the
                         // fullscreen window focused and on top. Activation rides
                         // the batched configure below instead of a standalone hint.
+                        // A deferred adopt is not on screen yet, so it takes the
+                        // hint at its reveal instead — same shape as
+                        // `focus_on_open = false`.
                         let activate = !place_in_background
                             && !suppress_focus_on_open
+                            && !defer_adopt
                             && applied.as_ref().is_none_or(|a| !a.widget);
                         self.map_window(window.clone(), pos.into(), false);
                         if activate {
@@ -679,12 +684,16 @@ impl CompositorHandler for DriftWm {
                         let deferred_fit_or_fs = self.pending_fit.contains(&root)
                             || self.pending_fullscreen.contains_key(&root);
                         // Adopted windows keep the suspended rect and z-slot —
-                        // never navigate the camera or raise on adopt.
+                        // never navigate the camera or raise on adopt. A window
+                        // still waiting on a deferred adopt is not drawn either,
+                        // so neither a pan nor a focus may aim at it; both are
+                        // handed over at its reveal.
                         if !is_widget
                             && !suppress_focus_on_open
                             && !is_fullscreen
                             && !place_in_background
                             && !deferred_fit_or_fs
+                            && !defer_adopt
                             && adopted_sid.is_none()
                         {
                             let reset = self.config.zoom_reset_on_new_window;
@@ -693,15 +702,7 @@ impl CompositorHandler for DriftWm {
                             // zoomed out and asked for reset).
                             let cursor_overview_rescue =
                                 placed_at_cursor && reset && self.zoom() < 1.0 - 1e-9;
-                            // A deferred adopt means a grab is still live, and a
-                            // camera flight warps the pointer into it — dragging
-                            // the grabbed element from a motionless mouse. Raise
-                            // and focus without the pan: the adopt is camera-
-                            // neutral too, but it lands the window on the
-                            // stand-in the user is dragging, which a drag keeps
-                            // under the cursor and therefore on screen.
                             if self.stage.is_pinned(&window)
-                                || defer_adopt
                                 || placed_at_cursor && !cursor_overview_rescue
                             {
                                 let serial = smithay::utils::SERIAL_COUNTER.next_serial();

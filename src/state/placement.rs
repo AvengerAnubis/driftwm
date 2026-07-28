@@ -168,7 +168,11 @@ impl DriftWm {
                 .and_then(|s| driftwm::config::applied_rule(&s))
                 .is_some_and(|r| r.widget);
             let is_fs = self.is_window_fullscreen(w);
-            if widget || is_fs || self.is_pinned(w) {
+            // A window awaiting a deferred adopt occupies no visible ground: it
+            // is not drawn where it sits and the flush moves it, so reserving
+            // that ground would push the window being placed off into free
+            // canvas for nothing.
+            if widget || is_fs || self.is_pinned(w) || self.hidden_by_deferred_adopt(w) {
                 continue;
             }
             let Some(loc) = self.stage.position_of(w) else {

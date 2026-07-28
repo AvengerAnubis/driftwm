@@ -1068,6 +1068,13 @@ impl DriftWm {
         fullscreen_output: Option<&Output>,
         alpha_only: bool,
     ) {
+        // A window awaiting a deferred adopt has never been drawn where it sits,
+        // and the capture below imports its buffers on demand rather than
+        // reusing what a frame drew — so without this the fade-out would be the
+        // first and only time the user sees it.
+        if self.adopt_is_deferred(surface) {
+            return;
+        }
         // Backend-gated (the headless fixture never accumulates render transients).
         let Some(mut backend) = self.backend.take() else {
             return;

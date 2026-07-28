@@ -868,6 +868,14 @@ pub fn compose_frame(
                 continue;
             }
         };
+        // A window awaiting a deferred adopt is placed but not shown: the flush
+        // teleports it into the stand-in's slot, and until then its rect is a
+        // holding pattern the user would see it flash through. Before every push
+        // below, not after — a partial push desyncs the element counts the blur
+        // splice indexes with.
+        if state.hidden_by_deferred_adopt(window) {
+            continue;
+        }
         let Some(loc) = state.stage.position_of(window) else {
             continue;
         };

@@ -402,6 +402,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let now = std::time::Instant::now();
         data.sweep_marks(now);
         data.sweep_pending_relaunches(now);
+        // After the relaunch sweep, so a deferral whose deadline just passed
+        // reveals its window on the same tick rather than the next one.
+        data.sweep_deferred_adoptions();
     });
 
     // Runs on both a clean Action::Quit/SIGTERM exit and a loop error, so a

@@ -81,8 +81,9 @@ impl DriftWm {
 
     /// Drop every per-surface map/cache entry keyed by `surface`. Shared by the
     /// normal and crash shutdown paths so the two can't drift apart and leak.
-    /// Pure removal — focus/fullscreen recovery stays at the call sites. Safe on
-    /// non-toplevel surfaces: the extra lookups just miss.
+    /// Removal only, apart from the deferred-adopt reveal below — focus /
+    /// fullscreen recovery stays at the call sites. Safe on non-toplevel
+    /// surfaces: the extra lookups just miss.
     pub fn cleanup_surface_state(&mut self, surface: &WlSurface) {
         let id = surface.id();
         self.decorations
@@ -121,7 +122,19 @@ impl DriftWm {
         // stash behind (the pending relaunch itself is keyed by suspended id and
         // GC'd on its own deadline).
         self.pending_adoptions.remove(surface);
-        self.deferred_adoptions.retain(|d| d.root != *surface);
+        // Drained through the reveal like every other exit from the stash, so no
+        // path can leave a window hidden for an adopt that will never come. It
+        // is inert on all three callers — each has already taken the window off
+        // the stage, or is tearing down a dead surface — but the two belong
+        // together whatever a future caller does.
+        if let Some(idx) = self
+            .deferred_adoptions
+            .iter()
+            .position(|d| d.root == *surface)
+        {
+            let entry = self.deferred_adoptions.remove(idx);
+            self.reveal_deferred_adopt(&entry.root, entry.origin);
+        }
         self.auto_anchor_snapshot.remove(surface);
         // Drop snapshots pointing at the destroyed surface as their anchor.
         // Keep `None`-anchor entries (user had no focus) and stand-in anchors

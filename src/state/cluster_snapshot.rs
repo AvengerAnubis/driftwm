@@ -394,6 +394,13 @@ impl DriftWm {
         if self.is_pinned(w) || self.is_window_fullscreen(w) {
             return None;
         }
+        // A window held back for a deferred adopt is not drawn where it sits, so
+        // it must not be snapped to, clustered with, or navigated against there
+        // either — every relation built on this rect would be a relation to
+        // something the user cannot see.
+        if self.hidden_by_deferred_adopt(w) {
+            return None;
+        }
         match w {
             StageWindow::Client(c) => {
                 window_snap_rect(&self.stage, &self.decorations, &self.config.decorations, c)

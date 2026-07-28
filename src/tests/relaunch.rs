@@ -24,7 +24,7 @@ use super::client::ClientId;
 use super::real::TempDir;
 use super::{
     Fixture, adopt_last_configure, client_sees_maximized, config, end_grab,
-    install_client_resize_grab, map_window, motion, server_surface, window_by_app_id,
+    install_client_resize_grab, is_activated, map_window, motion, server_surface, window_by_app_id,
 };
 
 /// The live client window with `app_id`, if any. Unlike `window_by_app_id`, it
@@ -1747,6 +1747,15 @@ fn an_adopt_deferred_past_the_relaunch_deadline_leaves_a_stale_stand_in() {
         .sweep_pending_relaunches(Instant::now() + Duration::from_secs(31));
     assert_eq!(f.state().debug_counters()["pending_relaunches"], 0);
 
+    // The very next tick reclaims the stash: an entry whose relaunch is gone can
+    // no longer land, and the window must not wait on a release for that.
+    f.pump(1);
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        0,
+        "the liveness sweep drained the stash without waiting for the release"
+    );
+
     f.state().disarm_interactive_move(&sid);
     f.pump(1);
 
@@ -1759,11 +1768,6 @@ fn an_adopt_deferred_past_the_relaunch_deadline_leaves_a_stale_stand_in() {
         f.state().stage.id_of(&placed),
         Some(eid),
         "the expired relaunch was not revived into an adopt"
-    );
-    assert_eq!(
-        f.state().debug_counters()["deferred_adoptions"],
-        0,
-        "the stash drained on the release instead of lingering"
     );
 
     f.state().dismiss_suspended(sid);
@@ -2420,6 +2424,547 @@ fn adopt_inheriting_focus_delivers_activated() {
         configs.contains("Activated"),
         "an adopted window inheriting focus must get an Activated configure, got:\n{configs}"
     );
+}
+
+/// Put a first-commit adopt in the stash: the app comes back while the user is
+/// dragging the stand-in it is bound for, so its window is staged and placed at
+/// 300x200 but held off the screen until the drag lets go. Leaves the grab
+/// armed; the caller ends it (or abandons the adopt) however the scenario asks.
+fn hide_under_a_stand_in_drag(f: &mut Fixture, cid: ClientId, sid: SuspendedId) -> ClientSurface {
+    f.state().relaunch_suspended(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+    f.state().arm_interactive_move(&sid);
+    let surface = begin_window(f, cid, "myapp");
+    present_token(f, cid, &surface, token);
+    finish_window(f, cid, &surface, (300, 200));
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        1,
+        "precondition: the adopt is stashed, which is what hides the window"
+    );
+    surface
+}
+
+/// Move a hidden window somewhere the scenario can aim at, without disturbing
+/// the stash.
+fn seat_at(f: &mut Fixture, window: &smithay::desktop::Window, pos: (i32, i32)) {
+    f.state()
+        .map_window(StageWindow::Client(window.clone()), Point::from(pos), false);
+}
+
+/// Abandon the deferred adopt where the window stands: dismissing the stand-in
+/// mid-drag leaves nothing to adopt into, so the window is revealed at the
+/// placement it has been holding rather than teleported into a slot.
+fn abandon_the_adopt(f: &mut Fixture, sid: SuspendedId) {
+    f.state().dismiss_suspended(sid);
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        0,
+        "precondition: the stash drained, so the window is revealed"
+    );
+}
+
+/// A window awaiting a deferred adopt is not drawn where it sits, so nothing may
+/// snap or cluster to it there: the flush is about to teleport it, and a drag or
+/// a fit that carried it along would move a window the user cannot see. Revealed,
+/// it joins the cluster from the same rect.
+#[test]
+#[allow(clippy::mutable_key_type)]
+fn a_hidden_adopt_is_no_cluster_citizen_until_it_is_revealed() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    // The dragged stand-in sits well away from the pair below.
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+
+    let nb = f.add_client();
+    let nb_surface = map_window(&mut f, nb, "nb", (400, 300));
+    let neighbor = window_by_app_id(&mut f, "nb").unwrap();
+    let nb_elem = StageWindow::Client(neighbor.clone());
+    seat_at(&mut f, &neighbor, (1000, 1000));
+
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+    let hidden_elem = StageWindow::Client(hidden.clone());
+
+    // Exactly one snap gap off the neighbor's right edge — a cluster the moment
+    // the window counts as a citizen at all.
+    let gap = f.state().config.snap_gap as i32;
+    let nb_right = f.state().snap_rect_for(&nb_elem).unwrap().x_high as i32;
+    let bw = f.state().element_border_width(&hidden_elem);
+    seat_at(&mut f, &hidden, (nb_right + gap + bw, 1000));
+
+    let clustered = |f: &mut Fixture, w: &StageWindow| {
+        let rects = f.state().all_windows_with_snap_rects();
+        driftwm::layout::cluster::cluster_of(&nb_elem, &rects, f.state().config.snap_gap)
+            .contains(w)
+    };
+    assert!(
+        !clustered(&mut f, &hidden_elem),
+        "a window nothing is drawn for must not be in the neighbor's cluster"
+    );
+
+    abandon_the_adopt(&mut f, sid);
+
+    assert!(
+        clustered(&mut f, &hidden_elem),
+        "the revealed window clusters from the very rect that was ignored while it was hidden"
+    );
+
+    client_close(&mut f, cid, &surface);
+    client_close(&mut f, nb, &nb_surface);
+}
+
+/// The placement that maps a deferred adopt takes no focus and enters no MRU
+/// history: the window is not on screen, so Alt-Tab and the keyboard must not
+/// reach it. Both are handed over at the reveal — and the adopt that follows
+/// needs the history entry, since it restores the window's slot from it.
+#[test]
+fn a_hidden_adopt_takes_no_focus_or_history_until_it_is_revealed() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    // Somebody else holds focus while the app comes back.
+    let other = f.add_client();
+    let other_surface = map_window(&mut f, other, "other", (200, 200));
+    let other_window = window_by_app_id(&mut f, "other").unwrap();
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (800, 500), (400, 300));
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+    let hidden_elem = StageWindow::Client(hidden.clone());
+
+    assert_eq!(
+        f.state().focused_window(),
+        Some(other_window),
+        "focus stayed with the window the user can actually see"
+    );
+    assert!(
+        !f.state().stage.focus_history().contains(&hidden_elem),
+        "an invisible window has no business in the Alt-Tab cycle"
+    );
+
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+
+    let adopted = mapped_client(&mut f, "myapp").expect("the adopt landed");
+    assert_eq!(
+        f.state().focused_window(),
+        Some(adopted.clone()),
+        "the reveal hands over the focus the placement withheld"
+    );
+    assert!(
+        f.state()
+            .stage
+            .focus_history()
+            .contains(&StageWindow::Client(adopted)),
+        "and the history entry the adopt reads to restore its slot"
+    );
+
+    settle_resize(&mut f, cid, &surface, (400, 300));
+    client_close(&mut f, cid, &surface);
+    client_close(&mut f, other, &other_surface);
+}
+
+/// Same for the `Activated` hint, which is the chrome half of the same thing: a
+/// window nobody can see must not be the one wearing the focused decoration.
+#[test]
+fn a_hidden_adopt_is_not_activated_until_it_is_revealed() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (800, 500), (400, 300));
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+
+    assert!(
+        !is_activated(&hidden),
+        "the placement staged no activation for a window it did not show"
+    );
+
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+
+    let adopted = mapped_client(&mut f, "myapp").expect("the adopt landed");
+    assert!(
+        is_activated(&adopted),
+        "the reveal activates it, so the slot it lands in wears the focused chrome"
+    );
+
+    settle_resize(&mut f, cid, &surface, (400, 300));
+    client_close(&mut f, cid, &surface);
+}
+
+/// Nothing is drawn for a hidden adopt, so no canvas-space walk may resolve to
+/// it: the pointer over its rect belongs to whatever really is under the cursor.
+/// All three walks answer independently — `element_under` (focus, bindings),
+/// `topmost_under` (gestures, drags) and `surface_under` (the foundation) — and
+/// each has its own skip.
+#[test]
+fn no_canvas_hit_test_walk_reaches_a_hidden_adopt() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+
+    let under = f.add_client();
+    let under_surface = map_window(&mut f, under, "under", (400, 300));
+    let below = window_by_app_id(&mut f, "under").unwrap();
+    seat_at(&mut f, &below, (1000, 1000));
+
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+    // Straight over the lower window, and covered by the hidden one on top.
+    seat_at(&mut f, &hidden, (1000, 1000));
+    let p = Point::from((1100.0, 1050.0));
+
+    assert_eq!(
+        f.state().element_under(p).map(|(w, _)| w.clone()),
+        Some(below.clone()),
+        "element_under answers with the window that is really drawn there"
+    );
+    assert_eq!(
+        f.state().topmost_client_under(p),
+        Some(below.clone()),
+        "topmost_under too — a hidden window is a skip, never a stop"
+    );
+    assert_eq!(
+        f.state().surface_under(p, None).map(|(t, _)| t.0),
+        Some(server_surface(&below)),
+        "and surface_under, the foundation the other two are checked against"
+    );
+
+    abandon_the_adopt(&mut f, sid);
+
+    assert_eq!(
+        f.state().element_under(p).map(|(w, _)| w.clone()),
+        Some(hidden.clone()),
+        "revealed in the same place, it takes the point back from the window below"
+    );
+    assert_eq!(f.state().topmost_client_under(p), Some(hidden.clone()));
+    assert_eq!(
+        f.state().surface_under(p, None).map(|(t, _)| t.0),
+        Some(server_surface(&hidden))
+    );
+
+    client_close(&mut f, cid, &surface);
+    client_close(&mut f, under, &under_surface);
+}
+
+/// The decoration channel is its own z-order walk, and its occlusion stop makes
+/// omission worse than a miss: a hidden window covering the point would end the
+/// walk with `None` and swallow the click meant for the chrome underneath it.
+#[test]
+fn a_hidden_adopt_does_not_swallow_a_click_on_the_chrome_beneath_it() {
+    use crate::decorations::DecorationHit;
+    use crate::input::DecoTarget;
+
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+
+    let under = f.add_client();
+    let under_surface = map_window(&mut f, under, "under", (400, 300));
+    let below = window_by_app_id(&mut f, "under").unwrap();
+    seat_at(&mut f, &below, (1000, 1000));
+
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+    // The hidden window's *content* covers a point in the lower window's CSD
+    // resize margin, which is outside the lower window's own rect.
+    seat_at(&mut f, &hidden, (1380, 1050));
+    let p = Point::from((1404.0, 1100.0));
+
+    assert!(
+        matches!(
+            f.state().decoration_under(p),
+            Some((DecoTarget::Client(w), DecorationHit::ResizeBorder(_))) if w == below
+        ),
+        "the resize margin still belongs to the window that draws it"
+    );
+
+    abandon_the_adopt(&mut f, sid);
+
+    assert!(
+        f.state().decoration_under(p).is_none(),
+        "revealed, its content occludes that margin — which is what makes the \
+         assertion above about the hiding and not about the geometry"
+    );
+
+    client_close(&mut f, cid, &surface);
+    client_close(&mut f, under, &under_surface);
+}
+
+/// `center-window` with nothing focused centers the nearest canvas element, and
+/// change A makes that the common arm by suppressing the deferred adopt's focus
+/// — so without the canvas-eligibility skip a single keypress flies the camera
+/// to an invisible window. The stand-in the user is dragging is the nearest
+/// element that can legitimately answer.
+#[test]
+fn center_window_never_flies_the_camera_to_a_hidden_adopt() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+    // The flight below pans the camera, which populates blur_camera_generation
+    // (it drains only on output disconnect) — end off-baseline like the
+    // camera-animation suite.
+    f.skip_baseline_check();
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+
+    // Straddling the viewport center, so distance alone would elect it.
+    let vc = f.state().viewport_center_canvas();
+    seat_at(&mut f, &hidden, (vc.x as i32 - 150, vc.y as i32 - 100));
+    assert!(
+        f.state().focused_element().is_none(),
+        "precondition: nothing is focused, so the nearest-element arm answers"
+    );
+
+    f.state().execute_action(&Action::CenterWindow);
+
+    let target = f
+        .state()
+        .camera_target()
+        .expect("the camera flew to the stand-in, the only element it may center");
+    assert!(
+        target.x > 3000.0 && target.y > 3000.0,
+        "the flight went to the far stand-in, not the invisible window over the \
+         viewport center: {target:?}"
+    );
+
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+    settle_resize(&mut f, cid, &surface, (400, 300));
+    client_close(&mut f, cid, &surface);
+}
+
+/// A hidden adopt occupies no visible ground, so it reserves none: auto
+/// placement must put a new window exactly where it would have with the hidden
+/// one absent. Reserving that ground would push new windows off into free canvas
+/// to dodge something nobody can see — and the flush is about to move it anyway.
+#[test]
+fn auto_placement_reserves_no_ground_for_a_hidden_adopt() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+
+    let anchor_cid = f.add_client();
+    let anchor_surface = map_window(&mut f, anchor_cid, "anchor", (400, 300));
+    let anchor = window_by_app_id(&mut f, "anchor").unwrap();
+    seat_at(&mut f, &anchor, (900, 500));
+    let anchor_elem = StageWindow::Client(anchor.clone());
+
+    // Same size as the hidden window, so seating it on the chosen slot blocks
+    // that slot exactly.
+    let placing_cid = f.add_client();
+    let placing_surface = map_window(&mut f, placing_cid, "placing", (300, 200));
+    let placing = window_by_app_id(&mut f, "placing").unwrap();
+
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+
+    let auto_pos = |f: &mut Fixture, placing: &smithay::desktop::Window| {
+        let s = server_surface(placing);
+        f.state()
+            .auto_anchor_snapshot
+            .insert(s, Some(anchor_elem.clone()));
+        let bar = f
+            .state()
+            .window_ssd_bar(&StageWindow::Client(placing.clone()));
+        f.state()
+            .auto_placement_pos(placing, Size::from((300, 200)), bar)
+    };
+
+    let slot = auto_pos(&mut f, &placing).expect("auto placement docks beside the anchor");
+    // Park the hidden window on exactly that slot and ask again.
+    seat_at(&mut f, &hidden, slot);
+    assert_eq!(
+        auto_pos(&mut f, &placing),
+        Some(slot),
+        "the slot is still free: nothing is drawn on it"
+    );
+
+    abandon_the_adopt(&mut f, sid);
+
+    assert_ne!(
+        auto_pos(&mut f, &placing),
+        Some(slot),
+        "revealed, it does hold the slot — which is what makes the assertion \
+         above about the hiding and not about the search order"
+    );
+
+    client_close(&mut f, cid, &surface);
+    client_close(&mut f, placing_cid, &placing_surface);
+    client_close(&mut f, anchor_cid, &anchor_surface);
+}
+
+/// A stashed adopt can outlive every grab there is — the drag may simply never
+/// end, and a client-resize deferral holds one with no grab live at all — so
+/// nothing but the per-frame liveness sweep bounds how long its window stays
+/// hidden. Once the relaunch deadline lapses the sweep drops the entry and shows
+/// the window where it stands, fully set up: hit-testable, focused, and carrying
+/// the settled snap rect its suppressed placement never wrote.
+#[test]
+fn the_liveness_sweep_reveals_an_adopt_whose_relaunch_lapsed() {
+    use smithay::reexports::wayland_server::Resource;
+
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+    seat_at(&mut f, &hidden, (1000, 1000));
+
+    // The drag is still going when the deadline passes.
+    f.state()
+        .sweep_pending_relaunches(Instant::now() + Duration::from_secs(31));
+    f.pump(1);
+
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        0,
+        "the sweep dropped an entry no release could ever land"
+    );
+    let p = Point::from((1100.0, 1050.0));
+    assert_eq!(
+        f.state().element_under(p).map(|(w, _)| w.clone()),
+        Some(hidden.clone()),
+        "the window is on screen and answers for the pointer over it"
+    );
+    assert_eq!(
+        f.state().focused_window(),
+        Some(hidden.clone()),
+        "and holds the focus its placement withheld"
+    );
+    assert!(
+        f.state()
+            .stable_snap_rects
+            .contains_key(&server_surface(&hidden).id()),
+        "the reveal wrote the settled rect nothing else on this path ever would"
+    );
+
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+    f.state().dismiss_suspended(sid);
+    client_close(&mut f, cid, &surface);
+}
+
+/// Two windows of one app can both bind to one stand-in — the second matches on
+/// the identity fallback while the first's token stash is spent — and the adopt
+/// that lands cancels the pending relaunch directly, orphaning the loser. The
+/// drain must set that window up as carefully as the winner: it keeps the
+/// placement it was given, so it needs the rect and the focus its suppressed
+/// placement pass never wrote.
+#[test]
+fn the_loser_of_a_two_window_race_is_revealed_where_it_stands() {
+    use smithay::reexports::wayland_server::Resource;
+
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (800, 500), (400, 300));
+    let susp = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let eid = f.state().stage.id_of(&susp).unwrap();
+
+    let winner_cid = f.add_client();
+    let winner_surface = hide_under_a_stand_in_drag(&mut f, winner_cid, sid);
+    let winner = mapped_client(&mut f, "myapp").expect("the token holder mapped");
+
+    // A second window of the same app, token-less: the identity fallback binds
+    // it to the same still-pending relaunch.
+    let loser_cid = f.add_client();
+    let loser_surface = begin_window(&mut f, loser_cid, "myapp");
+    finish_window(&mut f, loser_cid, &loser_surface, (300, 200));
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        2,
+        "precondition: both windows are stashed against the one stand-in"
+    );
+    let loser = f
+        .state()
+        .stage
+        .windows()
+        .filter_map(|w| w.client())
+        .find(|w| w.app_id_or_class().as_deref() == Some("myapp") && **w != winner)
+        .cloned()
+        .expect("the second window mapped");
+    seat_at(&mut f, &loser, (2000, 2000));
+
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        0,
+        "both entries drained on the one release"
+    );
+    assert_eq!(
+        f.state().stage.id_of(&StageWindow::Client(winner.clone())),
+        Some(eid),
+        "the token holder took the stand-in's slot"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&loser),
+        Some(Point::from((2000, 2000))),
+        "the orphan kept the placement it was given"
+    );
+    assert!(
+        f.state()
+            .stable_snap_rects
+            .contains_key(&server_surface(&loser).id()),
+        "and was set up there rather than left half-initialised"
+    );
+    let p = Point::from((2100.0, 2050.0));
+    assert_eq!(
+        f.state().element_under(p).map(|(w, _)| w.clone()),
+        Some(loser.clone()),
+        "the orphan is on screen, not hidden for an adopt that can never come"
+    );
+
+    settle_resize(&mut f, winner_cid, &winner_surface, (400, 300));
+    client_close(&mut f, winner_cid, &winner_surface);
+    client_close(&mut f, loser_cid, &loser_surface);
 }
 
 /// `msg relaunch` on a selector that names no suspended window errors instead
