@@ -423,7 +423,8 @@ impl DriftWm {
     }
 
     /// Snapshot `w`'s current `SnapRect` into `stable_snap_rects`. Call on
-    /// settled events: initial map, grab end, post-unfit recenter, fit/
+    /// settled events: initial map, grab end, post-unfit recenter, the commit
+    /// that settles a relaunch adopt to the size it configured, fit/
     /// unfit-snapped cluster members. Fit/unfit primaries are cached by
     /// those paths directly (configure not yet acked, so `geometry().size`
     /// would be wrong here). The cached rect outlives mid-teardown geometry

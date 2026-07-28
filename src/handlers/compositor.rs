@@ -292,10 +292,11 @@ impl CompositorHandler for DriftWm {
                     // flight — the exact flight the deferral exists to avoid,
                     // warping the pointer into the grab that is still live. The
                     // rest of that route runs on every pass either way, since
-                    // it keys off `adopted_sid` alone: the snap-rect refresh
-                    // against the body size the client hasn't acked (which
-                    // `adopt_relaunched` skips for exactly that reason) and a
-                    // second open animation on an already-placed window.
+                    // it keys off `adopted_sid` alone: the snap-rect refresh at
+                    // the normal placement (which `adopt_relaunched` then
+                    // deletes — it owes that rect until the client draws the
+                    // size the adopt configures) and a second open animation on
+                    // an already-placed window.
                     let defer_adopt = self.deferred_adoptions.iter().any(|d| d.root == root);
                     if defer_adopt {
                         // The client's own queued fullscreen/fit goes too, on
@@ -1085,15 +1086,23 @@ impl DriftWm {
         let Some(&adopt_size) = self.pending_adopt_settle.get(&surface.id()) else {
             return;
         };
-        // Same slack the reflow's grow test uses, so a size it would never act
-        // on still counts as settled.
+        // A commit within a pixel of `adopt_size` is a size the reflow's grow
+        // test could never act on, so count it as settled rather than hold the
+        // debt over a rounding difference.
         const EPS: i32 = 1;
         let size = window.geometry().size;
         if (size.w - adopt_size.w).abs() > EPS || (size.h - adopt_size.h).abs() > EPS {
             return;
         }
+        let client = StageWindow::Client(window.clone());
+        // A window with no canvas footprint (pinned / fullscreen) has no rect to
+        // record, and clearing the debt against a write that never lands would
+        // leave it with no stable rect at all. Keep owing until it has one.
+        if self.snap_rect_for(&client).is_none() {
+            return;
+        }
         self.pending_adopt_settle.remove(&surface.id());
-        self.refresh_stable_snap_rect(&StageWindow::Client(window.clone()));
+        self.refresh_stable_snap_rect(&client);
     }
 
     /// A snapped window that resizes *itself* larger — not via a resize grab —

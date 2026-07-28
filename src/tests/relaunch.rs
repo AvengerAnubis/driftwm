@@ -10,7 +10,7 @@
 
 use std::time::{Duration, Instant};
 
-use driftwm::config::Config;
+use driftwm::config::{Action, Config};
 use driftwm::desktop_entry::DesktopEntryCache;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::utils::{Point, Size};
@@ -510,6 +510,8 @@ fn adopt_early_ack_straggler_keeps_the_slot_beside_a_neighbor() {
 /// move the failure onto the lone-window case.
 #[test]
 fn adopt_early_ack_straggler_keeps_the_slot_without_a_neighbor() {
+    use smithay::reexports::wayland_server::Resource;
+
     let tmp = TempDir::new();
     let mut f = Fixture::with_config(Config::default());
     f.add_output(1, (1920, 1080));
@@ -549,6 +551,15 @@ fn adopt_early_ack_straggler_keeps_the_slot_without_a_neighbor() {
         Some(Point::from((500, 500))),
         "and settles there"
     );
+    let adopted_id = server_surface(&adopted).id();
+    assert!(
+        !f.state().pending_adopt_settle.contains_key(&adopted_id),
+        "the settle consumed the owed-rect entry"
+    );
+    assert!(
+        f.state().stable_snap_rects.contains_key(&adopted_id),
+        "and paid it off with a rect the client has actually drawn"
+    );
 
     client_close(&mut f, cid, &surface);
 }
@@ -587,6 +598,132 @@ fn an_adopt_that_never_settles_drops_its_owed_rect_on_close() {
         0,
         "the surface teardown took the owed-rect entry with it"
     );
+}
+
+/// The reflow's own worst case — a client that maps small and jumps to its real
+/// render size a frame later — landing on a window that was just adopted. The
+/// jump is not the size the adopt configured, so the rect stays owed. Had the
+/// adopt left the one from the window's pre-adopt placement standing, that jump
+/// would read as a grow past a settled footprint sited where the window used to
+/// be, and the reflow would drag it back beside its former neighbor.
+#[test]
+fn an_adopted_window_that_jumps_size_without_settling_keeps_the_slot() {
+    use smithay::reexports::wayland_server::Resource;
+
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    // The app is already open and normally placed, so it carries a stable snap
+    // rect at that site.
+    let cid = f.add_client();
+    let existing = map_window(&mut f, cid, "myapp", (300, 200));
+    let win = window_by_app_id(&mut f, "myapp").unwrap();
+    let placed = f
+        .state()
+        .snap_rect_for(&StageWindow::Client(win.clone()))
+        .expect("the open window has a footprint");
+    let gap = f.state().config.snap_gap as i32;
+
+    // Gap-adjacent to that placement: the neighbor a reflow would re-place
+    // against.
+    let nb = f.add_client();
+    map_window(&mut f, nb, "nb", (400, 400));
+    let neighbor = window_by_app_id(&mut f, "nb").unwrap();
+    f.state().map_window(
+        StageWindow::Client(neighbor),
+        Point::from((placed.x_high as i32 + gap, placed.y_low as i32)),
+        true,
+    );
+
+    // The stand-in's slot is a canvas away, with a window just under it for the
+    // jumped size to run into — the reflow only moves a grow that collides.
+    let (slot_x, slot_y) = (placed.x_low as i32 - 1000, placed.y_low as i32);
+    let below = f.add_client();
+    map_window(&mut f, below, "below", (200, 100));
+    let below_win = window_by_app_id(&mut f, "below").unwrap();
+    f.state().map_window(
+        StageWindow::Client(below_win),
+        Point::from((slot_x + 100, slot_y + 450)),
+        true,
+    );
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (slot_x, slot_y), (600, 400));
+    f.state().relaunch_suspended(sid);
+    f.state().expire_relaunch_fallback_for_test(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+    present_token(&mut f, cid, &existing, token);
+    assert_eq!(
+        f.state().stage.position_of(&win),
+        Some(Point::from((slot_x, slot_y))),
+        "precondition: the token adopted the open window into the stand-in's slot"
+    );
+
+    // The app draws its real size instead of the body size the adopt asked for.
+    let window = f.client(cid).window(&existing);
+    window.set_size(800, 600);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(cid);
+
+    assert_eq!(
+        f.state().stage.position_of(&win),
+        Some(Point::from((slot_x, slot_y))),
+        "the jump must not drag the window back beside its pre-adopt neighbor"
+    );
+    assert!(
+        f.state()
+            .pending_adopt_settle
+            .contains_key(&server_surface(&win).id()),
+        "a size that isn't the adopt's leaves the rect owed"
+    );
+
+    client_close(&mut f, cid, &existing);
+}
+
+/// The settle pays the debt off with a rect, so it may only consume it when
+/// there is one to write. A screen-pinned window lives outside the canvas and
+/// has no snap rect at all: taking the entry there would leave it with no stable
+/// rect from either side.
+#[test]
+fn a_pinned_adopt_keeps_owing_its_stable_rect() {
+    use smithay::reexports::wayland_server::Resource;
+
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    // The stand-in holds focus, so the adopted window inherits it and is what
+    // the pin action acts on.
+    let sid = insert_suspended(&mut f, 1, "myapp", (500, 500), (400, 300));
+    f.state().focus_and_raise_suspended(sid);
+    f.state().relaunch_suspended(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+    let cid = f.add_client();
+    let surface = begin_window(&mut f, cid, "myapp");
+    present_token(&mut f, cid, &surface, token);
+    finish_window(&mut f, cid, &surface, (700, 500));
+
+    let adopted = mapped_client(&mut f, "myapp").expect("adopted");
+    f.state().execute_action(&Action::TogglePinToScreen);
+    assert!(
+        f.state().is_pinned(&adopted),
+        "precondition: the adopted window pinned before it settled"
+    );
+
+    settle_resize(&mut f, cid, &surface, (400, 300));
+    assert!(
+        f.state()
+            .pending_adopt_settle
+            .contains_key(&server_surface(&adopted).id()),
+        "the debt stands while there is no footprint to record"
+    );
+
+    client_close(&mut f, cid, &surface);
 }
 
 /// Token path, bound after the window is already mapped: adoption happens in the
@@ -650,6 +787,8 @@ fn token_adopt_post_first_commit_focuses_adopted_window() {
 /// body, and consuming the stand-in.
 #[test]
 fn already_open_same_app_window_is_adopted() {
+    use smithay::reexports::wayland_server::Resource;
+
     let tmp = TempDir::new();
     let mut f = Fixture::with_config(Config::default());
     f.add_output(1, (1920, 1080));
@@ -706,7 +845,35 @@ fn already_open_same_app_window_is_adopted() {
         "the token was deregistered on adopt"
     );
 
+    // The window arrived fully placed, so it carried a stable snap rect at the
+    // site it just left. That rect describes neither where the window is now nor
+    // what it will draw, so the adopt takes it away and owes one instead.
+    let adopted_id = server_surface(&adopted).id();
+    assert!(
+        !f.state().stable_snap_rects.contains_key(&adopted_id),
+        "the pre-adopt placement's stable rect left with the move"
+    );
+    assert!(
+        f.state().pending_adopt_settle.contains_key(&adopted_id),
+        "the adopt owes one until the client draws the body size"
+    );
+
+    // The slot is bigger than the window was, so the settle commit is itself a
+    // grow — paid off at the adopted footprint before anything can read it as
+    // growth past the old one.
     settle_resize(&mut f, cid, &existing, (400, 300));
+    let seeded = f
+        .state()
+        .stable_snap_rects
+        .get(&adopted_id)
+        .copied()
+        .expect("the settle seeded a stable snap rect");
+    assert_eq!(
+        (seeded.x_low, seeded.y_low, seeded.x_high, seeded.y_high),
+        (800.0, 500.0, 1200.0, 800.0),
+        "seeded at the stand-in's slot, not the window's pre-adopt footprint"
+    );
+
     client_close(&mut f, cid, &existing);
 }
 
@@ -1389,6 +1556,8 @@ fn mid_move_grab_defers_adoption_then_adopts_when_it_ends() {
 /// without the app committing or activating again.
 #[test]
 fn first_commit_adopt_defers_under_a_stand_in_drag_then_lands_on_release() {
+    use smithay::reexports::wayland_server::Resource;
+
     let tmp = TempDir::new();
     let mut f = Fixture::with_config(Config::default());
     f.add_output(1, (1920, 1080));
@@ -1457,6 +1626,19 @@ fn first_commit_adopt_defers_under_a_stand_in_drag_then_lands_on_release() {
         "the stand-in was consumed by the adopt"
     );
     assert_eq!(f.state().debug_counters()["deferred_adoptions"], 0);
+
+    // The deferral had the window take normal placement, which cached a stable
+    // snap rect at that site; the adopt that follows must not inherit it, or the
+    // window is carrying a footprint from a slot it no longer occupies.
+    let adopted_id = server_surface(&adopted).id();
+    assert!(
+        !f.state().stable_snap_rects.contains_key(&adopted_id),
+        "the rect the normal placement cached left with the adopt"
+    );
+    assert!(
+        f.state().pending_adopt_settle.contains_key(&adopted_id),
+        "the adopt owes one until the client draws the body size"
+    );
 
     settle_resize(&mut f, cid, &surface, (400, 300));
     client_close(&mut f, cid, &surface);
