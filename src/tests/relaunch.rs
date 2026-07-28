@@ -3615,7 +3615,7 @@ fn an_activation_for_a_hidden_adopt_moves_neither_the_camera_nor_the_keyboard() 
     f.state().set_camera_target(None);
 
     // The app's own token, carrying a serial, presented on its own window.
-    let mut self_activate = |f: &mut Fixture| {
+    let self_activate = |f: &mut Fixture| {
         f.client(cid).request_activation_token(&surface, true);
         f.roundtrip(cid);
         f.client(cid).activate(&surface);
