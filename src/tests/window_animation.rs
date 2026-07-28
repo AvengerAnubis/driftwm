@@ -5192,6 +5192,50 @@ fn a_stand_ins_slide_is_not_culled_when_its_target_leaves_every_viewport() {
     );
 }
 
+/// The rect a dismiss fades from is where the stand-in's picture is, not where
+/// its slide was headed. Reading the destination both freezes the departing
+/// chrome at the far end and — when that end is off every viewport — judges the
+/// fade undrawable and skips it, losing an animation whose picture is on screen.
+#[test]
+fn a_dismissed_stand_in_departs_from_its_mid_slide_picture_not_its_destination() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    reset_view(&mut f);
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((200, 200)),
+        Size::from((300, 200)),
+        "n",
+        "N",
+    );
+    let element = standin_element(&mut f, sid);
+
+    let seed = Point::from((200, 200));
+    f.state()
+        .map_window(element.clone(), Point::from((60000, 60000)), false);
+    f.state().animate_element_move_from(&element, seed, None);
+
+    let destination = Rectangle::new(Point::from((60000, 60000)), Size::from((300, 200)));
+    assert!(
+        !f.state().canvas_rect_drawable(destination),
+        "precondition: the slide is headed off every viewport"
+    );
+
+    let departing = f
+        .state()
+        .departing_standin_rect(&element)
+        .expect("the stand-in is still on the stage");
+    assert_eq!(
+        departing.loc,
+        seed.to_f64(),
+        "the fade departs from the picture mid-slide, not from the destination"
+    );
+    assert!(
+        f.state().canvas_rect_drawable(departing.to_i32_round()),
+        "so the dismiss fades it instead of skipping it as undrawable"
+    );
+}
+
 /// Dismissing a stand-in mid-slide drops its window-animation entry
 /// immediately, rather than leaving the next tick's dead-id sweep to reap it a
 /// frame late.

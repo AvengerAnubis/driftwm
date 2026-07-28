@@ -1029,18 +1029,15 @@ impl DriftWm {
             (None, None, None)
         };
 
-        let rect = self
-            .stage
-            .position_of(&element)
-            .map(|loc| (loc, s.size.get()));
+        let rect = self.departing_standin_rect(&element);
         if self.backend.is_some()
-            && let Some((loc, size)) = rect
-            && self.canvas_rect_drawable(Rectangle::new(loc, size))
+            && let Some(rect) = rect
+            && self.canvas_rect_drawable(rect.to_i32_round())
         {
             let focused = self.gated_suspended_focus() == Some(id);
             self.standin_fades.push(crate::render::StandInFade {
                 suspended: s.clone(),
-                loc,
+                loc: rect.loc.to_i32_round(),
                 launching,
                 focused,
                 shrink: self.config.effects.animation_scale,

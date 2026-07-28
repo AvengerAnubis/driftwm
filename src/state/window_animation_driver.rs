@@ -383,6 +383,20 @@ impl DriftWm {
             .unwrap_or_else(|| Rectangle::new(loc.to_f64(), size.to_f64()))
     }
 
+    /// Where a stand-in's departing picture is right now: mid-slide that is the
+    /// leg's own visual, not the destination the stage already holds. A dismiss
+    /// freezes one rect for the fade's whole life and judges drawability on it,
+    /// so reading the destination would both teleport the chrome there for frame
+    /// zero and skip the fade outright while the slide is still on screen.
+    pub(crate) fn departing_standin_rect(
+        &self,
+        element: &StageWindow,
+    ) -> Option<Rectangle<f64, Logical>> {
+        let id = self.stage.id_of(element)?;
+        let loc = self.stage.position_of(element)?;
+        Some(self.geometry_seed(id, loc, StageElement::size(element)))
+    }
+
     /// Canvas geometry animation toward a size configure (fill/fit). Must be
     /// called while the stage still holds the pre-action rect; the chase target
     /// is then the new live stage position. `final_loc` is that post-action
