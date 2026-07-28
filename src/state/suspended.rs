@@ -612,24 +612,71 @@ impl DriftWm {
             self.apply_queued_geometry_request(root);
         }
         // The window is hit-testable again from here, under a pointer that may
-        // not have moved since it was placed. (The adopt re-runs this after its
-        // teleport, where the answer is the one that lasts.)
+        // not have moved since it was placed. Last, so the answer is taken
+        // against the rect the request above moved it to; the adopt route takes
+        // it again after its own teleport and its own request.
         self.refresh_pointer_focus();
     }
 
     /// Hand over a fullscreen / maximize the client asked for while its window
     /// was hidden and [`Self::queues_geometry_request`] queued instead of
-    /// applying. Fullscreen wins when a client asked for both.
-    fn apply_queued_geometry_request(&mut self, root: &WlSurface) {
+    /// applying. Fullscreen wins when a client asked for both. Reports whether
+    /// anything was queued, so a caller that has already taken pointer focus can
+    /// tell whether the window moved out from under it.
+    pub(crate) fn apply_queued_geometry_request(&mut self, root: &WlSurface) -> bool {
         let Some(window) = self.window_for_surface(root) else {
-            return;
+            return false;
         };
-        if let Some(client_output) = self.pending_fullscreen.remove(root) {
+        let fullscreen = self.pending_fullscreen.remove(root);
+        let fit = fullscreen.is_none() && self.pending_fit.remove(root);
+        let applied = fullscreen.is_some() || fit;
+        if let Some(client_output) = fullscreen {
             let target = self.resolve_fullscreen_output(root, client_output);
             self.enter_fullscreen(&window, target);
-        } else if self.pending_fit.remove(root) {
+        } else if fit {
+            // The fit configures its own size, so a stable rect the adopt is
+            // still owed — payable only on a commit at the adopted size — would
+            // never come due, and `decoration_fit` writes none of its own: the
+            // window would end up with no settled footprint at all. Pay it here
+            // against the slot the adopt put it in, which is exactly the pre-fit
+            // rect a fit means to keep as the window's cluster identity. A
+            // fullscreen needs no such payment — its exit configures the adopted
+            // size back and the debt settles then, at a rect that exists again.
+            self.settle_owed_adopt_rect(&window, root);
             self.decoration_fit(&window);
         }
+        applied
+    }
+
+    /// Pay off the stable snap rect an adopt is owing, at the rect the adopt put
+    /// the window in rather than the size the client has committed — for a
+    /// caller about to move the window somewhere the debt's own settle can never
+    /// be reached from.
+    fn settle_owed_adopt_rect(&mut self, window: &Window, root: &WlSurface) {
+        let Some(adopt_size) = self.pending_adopt_settle.remove(&root.id()) else {
+            return;
+        };
+        let Some(loc) = self.stage.position_of(window) else {
+            return;
+        };
+        let bar = self.window_ssd_bar(window);
+        let bw = self.window_border_width(root);
+        self.stable_snap_rects.insert(
+            root.id(),
+            crate::state::fit::snap_rect_at(loc, adopt_size, bar, bw),
+        );
+    }
+
+    /// Take `root` out of the stash and hand back what the hiding withheld,
+    /// immediately before the adopt that ends it. Revealed under the adopt's own
+    /// cause, so the reveal leaves the crossfade and the queued geometry request
+    /// to the adopt that follows.
+    fn end_hiding_for_adopt(&mut self, root: &WlSurface) {
+        let Some(idx) = self.deferred_adoptions.iter().position(|d| d.root == *root) else {
+            return;
+        };
+        let entry = self.deferred_adoptions.remove(idx);
+        self.reveal_deferred_adopt(&entry.root, entry.origin, RevealCause::Adopt);
     }
 
     /// Drop the stashed adopts that can never land — their pending relaunch was
@@ -743,8 +790,12 @@ impl DriftWm {
             // whether the adopt landed or a carve-out dropped the stand-in. Only
             // a first-commit entry ever hides its window, so only that origin
             // can have a queued request to hand over.
-            if origin == AdoptOrigin::FirstCommit {
-                self.apply_queued_geometry_request(&root);
+            if origin == AdoptOrigin::FirstCommit && self.apply_queued_geometry_request(&root) {
+                // Both the reveal and the adopt took pointer focus before this
+                // moved the window again, under a pointer that has not moved
+                // since: the answer has to be taken once more at the rect the
+                // request leaves it at.
+                self.refresh_pointer_focus();
             }
         }
     }
@@ -761,6 +812,15 @@ impl DriftWm {
         let Some(s) = self.find_suspended(sid) else {
             return;
         };
+        // The adopt is the end of the hiding: from here the window holds the
+        // stand-in's slot on screen, and the raise and focus below are the ones
+        // it keeps. Left stashed, the primitives would refuse the adopt's own
+        // refocus and leave the keyboard aimed at a stand-in the `replace` is
+        // about to consume. The flush drains its entry a step earlier, but a
+        // later placement pass and a re-presented relaunch token both arrive
+        // here with the entry still in — so the invariant is asserted where the
+        // adopt is, not at each route into it.
+        self.end_hiding_for_adopt(root);
         let suspended = StageWindow::Suspended(s.clone());
         let pos = self.stage.position_of(&suspended).unwrap_or_default();
         let body_size = s.size.get();

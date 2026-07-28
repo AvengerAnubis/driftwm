@@ -141,6 +141,13 @@ impl DriftWm {
             if self.is_pinned(window) || self.is_window_fullscreen(window) {
                 continue;
             }
+            // A window still held back for a deferred adopt is drawn nowhere,
+            // and the stand-in it is bound for is already in this list at the
+            // placement it is holding: reported here it doubles the app, and
+            // hands a bar an entry whose focus request is refused.
+            if self.hidden_by_deferred_adopt(window) {
+                continue;
+            }
             let (app_id, title) = window_app_id_title(&surface);
             if app_id.is_empty() {
                 continue;

@@ -55,6 +55,10 @@ impl DriftWm {
         }
     }
 
+    /// The one z-raise with no deferred-adopt gate of its own. Its callers each
+    /// establish that separately — one runs before a window can be stashed at
+    /// all, the other only on a path a queued geometry request has already
+    /// intercepted — so this offers a new caller no protection to inherit.
     pub fn raise_window(&mut self, window: &Window, activate: bool) {
         self.stage.raise(window);
         if activate {

@@ -738,12 +738,7 @@ impl CompositorHandler for DriftWm {
                             // destination rect instead.
                             self.start_window_open_animation(&window);
 
-                            if let Some(client_output) = self.pending_fullscreen.remove(&root) {
-                                let target = self.resolve_fullscreen_output(&root, client_output);
-                                self.enter_fullscreen(&window, target);
-                            } else if self.pending_fit.remove(&root) {
-                                self.decoration_fit(&window);
-                            }
+                            self.apply_queued_geometry_request(&root);
                         }
                     } else if !has_size {
                         self.pending_center.insert(root.clone());

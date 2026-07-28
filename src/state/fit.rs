@@ -15,8 +15,9 @@ use driftwm::window_ext::WindowExt;
 /// `unfit_window_snapped` to describe the primary's pre-op and post-op
 /// geometry, both for the exact per-edge deltas and for the primary's
 /// own entry in the rect list those paths cluster over
-/// (`snap_rects_with_primary`).
-fn snap_rect_at(
+/// (`snap_rects_with_primary`), and by the adopt's owed-rect payoff for a
+/// size the client has been configured with but not yet committed.
+pub(super) fn snap_rect_at(
     loc: Point<i32, Logical>,
     size: Size<i32, Logical>,
     bar: i32,

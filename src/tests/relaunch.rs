@@ -3009,9 +3009,18 @@ fn a_hidden_adopt_cannot_fullscreen_before_it_is_revealed() {
         f.state().is_window_fullscreen(&hidden),
         "the flush hands over the request the hiding held back"
     );
-    assert!(
-        !suspended_present(&mut f),
-        "and the stand-in went into the adopt that ran ahead of it"
+    let restores = f
+        .state()
+        .stage
+        .fullscreen_on(&output.name())
+        .map(|fs| (fs.saved_location, fs.saved_size));
+    assert_eq!(
+        restores,
+        Some((Point::from((800, 500)), Size::from((400, 300)))),
+        "and the rect its exit restores is the stand-in's — a fullscreen \
+         entered ahead of the adopt saves the holding placement instead, and \
+         then reads as policy's own, so the adopt drops the stand-in rather \
+         than taking it"
     );
 
     client_close(&mut f, cid, &surface);
@@ -3521,11 +3530,13 @@ fn a_reveal_does_not_unhide_the_entry_still_waiting_behind_it() {
     client_close(&mut f, held_cid, &held_surface);
 }
 
-/// `msg suspend` raises and focuses whatever its selector names, so it can reach
-/// a window still hidden for a deferred adopt. The mark it leaves carries its own
-/// rect and an explicit "suspend this", so the conversion the hiding refuses on
-/// its own account has to go through — otherwise the command silently degrades
-/// into a plain close and the app is gone with nothing to bring it back.
+/// `msg suspend` reaches a window still hidden for a deferred adopt through its
+/// selector alone: it suspends the window it resolved rather than the one the
+/// keyboard is on, which is what lets it name one the focus primitives refuse.
+/// The mark it leaves carries its own rect and an explicit "suspend this", so
+/// the conversion the hiding refuses on its own account has to go through —
+/// otherwise the command silently degrades into a plain close and the app is
+/// gone with nothing to bring it back.
 #[test]
 fn ipc_suspend_of_a_hidden_adopt_still_leaves_a_stand_in() {
     use crate::ipc::protocol::{Request, Response, WindowSelector};
@@ -3707,8 +3718,14 @@ fn the_focus_and_camera_primitives_refuse_a_hidden_adopt() {
     );
 
     // Revealed, the very same three calls do what they say — so the assertions
-    // above are about the hiding, not about calls that never do anything.
+    // above are about the hiding, not about calls that never do anything. The
+    // reveal raises and focuses the window itself, so put the visible one back
+    // on top and in the keyboard first: otherwise all three would read as
+    // honored even if the primitives went on refusing.
     release_onto_a_dismissed_stand_in(&mut f, sid);
+    f.state()
+        .raise_and_focus(&other_win, SERIAL_COUNTER.next_serial());
+    f.state().set_camera_target(None);
     f.state().navigate_to_window(&hidden, true);
     assert!(f.state().camera_target().is_some());
     assert_eq!(topmost(&mut f), Some(StageWindow::Client(hidden.clone())));
@@ -3725,6 +3742,8 @@ fn the_focus_and_camera_primitives_refuse_a_hidden_adopt() {
 /// off. It has to measure the slot the window actually lands in.
 #[test]
 fn a_queued_fit_frames_the_slot_the_adopt_lands_in() {
+    use smithay::reexports::wayland_server::Resource;
+
     let tmp = TempDir::new();
     let mut f = Fixture::with_config(Config::default());
     f.add_output(1, (1920, 1080));
@@ -3741,12 +3760,28 @@ fn a_queued_fit_frames_the_slot_the_adopt_lands_in() {
     f.client(cid).window(&surface).set_maximized();
     f.double_roundtrip(cid);
 
+    // Inside the rect the fit is about to hand the window, outside both the
+    // holding placement and the slot the adopt drops it in.
+    motion(&mut f, Point::from((4400.0, 4700.0)));
+
     f.state().disarm_interactive_move(&sid);
     f.pump(1);
 
     assert!(
         !suspended_present(&mut f),
         "precondition: the adopt took the stand-in's slot"
+    );
+    assert_eq!(
+        f.state()
+            .seat
+            .get_pointer()
+            .unwrap()
+            .current_focus()
+            .map(|t| t.0),
+        Some(server_surface(&hidden)),
+        "the pointer found it there — the reveal's pass and the adopt's both \
+         ran before the fit moved the window, under a pointer that has not \
+         moved since"
     );
     let target = f.state().camera_target();
     assert!(
@@ -3761,6 +3796,26 @@ fn a_queued_fit_frames_the_slot_the_adopt_lands_in() {
         "and the membership survives, which a fit taken before the adopt does \
          not — the stage surgery drops it, leaving the client told it is \
          maximized while nothing here agrees"
+    );
+
+    // The adopt owes a stable snap rect, payable on a commit at the size it
+    // configured — a size this fit means the client never to be asked for. A fit
+    // writes no stable rect of its own either, so the debt has to be settled
+    // against the adopted slot on the way in or the window carries no settled
+    // footprint at all: its close degrades to a cluster of one, and shrink
+    // protection stays off until some later grab writes one.
+    let root_id = server_surface(&hidden).id();
+    let stable = f.state().stable_snap_rects.get(&root_id).copied();
+    assert!(
+        stable.is_some_and(
+            |r| (r.x_low, r.x_high, r.y_low, r.y_high) == (5000.0, 5400.0, 5000.0, 5300.0)
+        ),
+        "the settled footprint is the adopted slot, not the fit rect and not \
+         nothing: {stable:?}"
+    );
+    assert!(
+        !f.state().pending_adopt_settle.contains_key(&root_id),
+        "and the debt is paid rather than left owing for the window's lifetime"
     );
 
     client_close(&mut f, cid, &surface);
@@ -3857,12 +3912,102 @@ fn ipc_focus_of_a_hidden_adopt_is_refused() {
         "and the keyboard stayed where it was"
     );
 
+    // Nor is the id one a bar could have offered in the first place: the app is
+    // already in the inventory as the stand-in the window is bound for, and a
+    // second entry at a placement nothing is drawn at is one whose only reply is
+    // the refusal above.
+    let listed: Vec<bool> = f
+        .state()
+        .window_inventory()
+        .iter()
+        .filter(|w| w.app_id == "myapp")
+        .map(|w| w.suspended)
+        .collect();
+    assert_eq!(
+        listed,
+        vec![true],
+        "the app is listed once, as the stand-in — not twice, the second at a \
+         placement nothing is drawn at"
+    );
+
     // The selector resolves fine once the window is on screen, so the refusal
     // was the hiding rather than a window the command could not find.
     release_onto_a_dismissed_stand_in(&mut f, sid);
     let reply = crate::ipc::dispatch(Request::Focus(Some(WindowSelector::Id(win_id))), f.state());
     assert!(reply.is_ok(), "got {reply:?}");
 
+    client_close(&mut f, cid, &surface);
+    client_close(&mut f, other, &other_surface);
+}
+
+/// The stash outlives the grab that filled it: a release only schedules the
+/// flush, and a client request dispatched in the same round — a re-presented
+/// relaunch token, or the commit of a rule-forced size — can reach the adopt
+/// first. Whichever gets there, the adopt is the end of the hiding: its own
+/// refocus has to land, or the keyboard is left aimed at a stand-in the
+/// `replace` has just consumed, and the window is only rescued by a later reveal
+/// that raises it back out of the z-slot the adopt exists to inherit.
+#[test]
+fn an_adopt_that_beats_the_flush_ends_the_hiding_itself() {
+    use crate::state::AdoptOrigin;
+    use smithay::utils::SERIAL_COUNTER;
+
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    // Mapped after the stand-in, so it sits above the slot the adopt inherits
+    // and a raise nobody asked for shows.
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+    let other = f.add_client();
+    let other_surface = map_window(&mut f, other, "other", (400, 300));
+    let other_win = window_by_app_id(&mut f, "other").unwrap();
+    let on_top = StageWindow::Client(other_win.clone());
+    // Hovered rather than clicked: the stand-in holds the focus the adopt
+    // inherits without being raised over the window above it.
+    f.state()
+        .set_suspended_focus(sid, SERIAL_COUNTER.next_serial());
+
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+
+    // The button is up, so nothing fights the adopt any more — but the flush is
+    // still queued behind this dispatch rather than run.
+    f.state().disarm_interactive_move(&sid);
+    let root = server_surface(&hidden);
+    f.state()
+        .resolve_placed_adopt(&hidden, &root, sid, AdoptOrigin::Activation);
+
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        0,
+        "the adopt dropped the entry that was hiding its own window"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&hidden),
+        Some(Point::from((5000, 5000))),
+        "precondition: it took the stand-in's slot"
+    );
+    assert_eq!(
+        f.state().focused_window(),
+        Some(hidden.clone()),
+        "and its refocus landed, rather than being refused and leaving the \
+         intent on a stand-in that no longer exists"
+    );
+
+    f.pump(1);
+
+    assert_eq!(
+        f.state().stage.windows().next_back().cloned(),
+        Some(on_top),
+        "the flush found nothing left to reveal — a reveal here raises the \
+         window back out of the slot it just inherited"
+    );
+
+    settle_resize(&mut f, cid, &surface, (400, 300));
     client_close(&mut f, cid, &surface);
     client_close(&mut f, other, &other_surface);
 }

@@ -466,7 +466,9 @@ fn cmd_focus(arg: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
     // its own once the grab holding the adopt lets go.
     if state.hidden_by_deferred_adopt(&window) {
         let id = focused_window_info(state, &window).id;
-        return Err(format!("window #{id} is not on screen yet"));
+        return Err(format!(
+            "window #{id} is mid-relaunch and cannot be focused yet"
+        ));
     }
     let info = focused_window_info(state, &window);
     // Already on screen: just raise + focus, don't move the camera. Pinned
