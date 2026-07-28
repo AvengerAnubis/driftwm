@@ -4062,9 +4062,10 @@ fn a_fit_lands_its_parked_pan_on_a_commit_under_a_grab_on_its_own_window() {
 
 /// A grab on some *other* window is not the fit's heir. Landing the pan under it
 /// would slide the canvas out from under a drag that never asked for it — and it
-/// would land more readily than before, since the grab install is what cleared
-/// the camera targets `apply_pending_view` treats as a later action's claim. The
-/// pan is only held back, though: it lands once the unrelated grab lets go.
+/// would land more readily under a grab than with none at all, since the grab
+/// install is what cleared the camera targets `apply_pending_view` treats as a
+/// later action's claim. The pan is only held back, though: it lands once the
+/// unrelated grab lets go.
 #[test]
 fn a_grab_on_another_window_holds_back_a_fits_parked_pan() {
     let mut f = Fixture::new();

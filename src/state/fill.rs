@@ -197,7 +197,7 @@ impl DriftWm {
         // single target and travels the filled rect → restored rect as one leg.
         // Deferring it left the chase shrinking the window anchored at the filled
         // rect's top-left, then jumping when the settle fired. The filled rect
-        // `fill_window` cached is stale now, so refresh.
+        // `fill_window` cached is stale, so refresh.
         self.establish_exit_placement(
             &StageWindow::Client(window.clone()),
             saved_pos,

@@ -816,7 +816,7 @@ fn unfit_refreshes_the_snap_rect_its_fit_cached() {
     let root = super::server_surface(&window);
     let element = StageWindow::Client(window.clone());
 
-    // Snapped fit, never acked: the cache now holds the fit rect while the
+    // Snapped fit, never acked: the cache holds the fit rect while the
     // window still commits — and still occupies — its pre-fit size.
     f.state().fit_window_snapped(&window);
     let cached = *f.state().stable_snap_rects.get(&root.id()).unwrap();
@@ -2170,7 +2170,7 @@ fn ipc_move_mid_fullscreen_exit_settle_lands_where_asked() {
     );
 }
 
-/// Once the settle is done nothing is owed, and now it is the size the exit
+/// Once the settle is done nothing is owed, and it's the size the exit
 /// configured that is stale: a client that settled at a size of its own is
 /// described only by its committed geometry. Placing against the configured size
 /// here would miss by half their difference with no settle left to correct it.
@@ -2253,9 +2253,9 @@ fn ipc_move_mid_settle_lands_where_asked_with_ssd() {
     );
 }
 
-/// The bookmark binding mid fit-exit settle. Only a *fullscreen* exit used to be
-/// compensated here, so a fit exit placed the window against the still-committed
-/// fit size and then dropped the recenter that could have corrected it.
+/// The bookmark binding mid fit-exit settle: a fit exit needs the same recenter
+/// compensation a fullscreen exit gets, or the window lands against the
+/// still-committed fit size with no recenter left to correct it.
 #[test]
 fn move_to_bookmark_mid_fit_exit_settle_lands_where_asked() {
     let mut f = Fixture::new();

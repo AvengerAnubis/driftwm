@@ -1730,7 +1730,7 @@ fn a_flush_under_the_live_grab_leaves_the_dragged_stand_in_alone() {
         "the entry deferred again instead of resolving under the live grab"
     );
 
-    // The drag ends: now the fullscreen carve-out gets to answer.
+    // The drag ends, so the fullscreen carve-out gets to answer.
     f.state().disarm_interactive_move(&sid);
     f.pump(1);
     assert!(

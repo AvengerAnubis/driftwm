@@ -195,7 +195,7 @@ impl DriftWm {
 
         self.animate_window_geometry(window, saved_size, None);
         window.exit_fit_configure(saved_size);
-        // The fit rect `fit_window_snapped` cached is stale now, so refresh.
+        // The fit rect `fit_window_snapped` cached is stale, so refresh.
         self.establish_exit_placement(
             &StageWindow::Client(window.clone()),
             new_loc,

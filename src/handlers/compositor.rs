@@ -267,9 +267,9 @@ impl CompositorHandler for DriftWm {
                         None
                     };
                     // Taking a stand-in the user is dragging would destroy it
-                    // under the grab driving it. Place the window normally for
-                    // now — a coherent state it can sit in indefinitely — and
-                    // move it into the slot once the grab lets go.
+                    // under the grab driving it. Place the window normally
+                    // instead — a coherent state it can sit in indefinitely —
+                    // and move it into the slot once the grab lets go.
                     if let Some(sid) = adopted_sid
                         && self.adopt_fights_a_grab(&window, sid)
                     {
