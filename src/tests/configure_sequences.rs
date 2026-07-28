@@ -594,6 +594,113 @@ fn a_fill_between_a_resize_release_and_its_settle_keeps_its_placement() {
     );
 }
 
+/// The same interleave on a top-left drag, which is the only shape that reaches
+/// the compensation at all — the right-edge case above leaves both arms unfired.
+/// A placement that changed the size as well as the position owns both, so the
+/// held-edge delta is not the resize's to apply: measured against the fill's
+/// size it is the whole width of the screen.
+#[test]
+fn a_fill_between_a_top_left_resize_release_and_its_settle_keeps_its_placement() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let surface = map_settled(&mut f, id, "a", (500, 400));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((300, 200)), false);
+
+    // Drag the top-left corner outward and let the client commit the dragged
+    // size, so the settle's `last_committed_size` is the size the hand ended on
+    // rather than the one it started from.
+    let grab_at = pt(320.0, 220.0);
+    assert!(f.state().try_start_gesture_resize(grab_at, false));
+    motion(&mut f, grab_at + pt(-100.0, -100.0));
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    assert_eq!(
+        f.state().stage.position_of(&window),
+        Some(Point::from((200, 100))),
+        "precondition: the drag held the bottom-right corner still"
+    );
+    end_swipe(&mut f);
+
+    // Fill into the gap before the client's settling commit.
+    f.state().toggle_fill_window(&window);
+    assert!(
+        f.state().stage.is_fill(&window),
+        "precondition: the fill ran"
+    );
+
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+
+    let filled = Point::from((12, 12));
+    assert_eq!(
+        f.state().stage.position_of(&window),
+        Some(filled),
+        "the fill owns both the size and the position, so the settle compensates \
+         for nothing"
+    );
+    let root = super::server_surface(&window);
+    let cached = *f.state().stable_snap_rects.get(&root.id()).unwrap();
+    assert_eq!(
+        (cached.x_low, cached.y_low, cached.x_high, cached.y_high),
+        (12.0, 12.0, 1908.0, 1068.0),
+        "and the refreshed snap rect is the fill's frame"
+    );
+}
+
+/// A fullscreen taken in the same gap. Its placement is the output itself, so a
+/// settle that shifts it by the difference between the drag's size and the
+/// viewport's drags the fullscreen window off the screen it is meant to fill.
+#[test]
+fn a_fullscreen_between_a_resize_release_and_its_settle_stays_on_its_output() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    // Fullscreen moves the camera, which seeds a per-output blur generation
+    // that only clears on output disconnect.
+    f.skip_baseline_check();
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let surface = map_settled(&mut f, id, "a", (500, 400));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((300, 200)), false);
+
+    let grab_at = pt(320.0, 220.0);
+    assert!(f.state().try_start_gesture_resize(grab_at, false));
+    motion(&mut f, grab_at + pt(-100.0, -100.0));
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    end_swipe(&mut f);
+
+    // Fullscreen before the settling commit, then let the client's adoption of
+    // the fullscreen configure be that commit.
+    let cw = f.client(id).window(&surface);
+    cw.set_fullscreen(None);
+    f.double_roundtrip(id);
+    assert_eq!(
+        f.state().stage.position_of(&window),
+        Some(Point::from((0, 0))),
+        "precondition: the fullscreen placed the window on the output origin"
+    );
+
+    adopt_last_configure(&mut f, id, &surface);
+    assert!(
+        f.state().stage.is_fullscreen(&window),
+        "precondition: the client adopted the fullscreen configure"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&window),
+        Some(Point::from((0, 0))),
+        "the fullscreen owns the geometry, so the settle leaves the window on \
+         the output instead of shifting it by the viewport's size"
+    );
+}
+
 /// The same equal-size branch, reached with nothing but fill → fullscreen →
 /// exit → unfill — the shorter and likelier production route.
 ///

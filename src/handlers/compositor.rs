@@ -976,17 +976,33 @@ impl DriftWm {
         // from the grab start would also undo anything that placed the window
         // between the release and this commit (a fill, a fit, an exit, an IPC
         // move), and the settle can be owed indefinitely.
+        //
+        // A placement that changed the size as well as the position owns both,
+        // and the delta is then measured against a size the resize never asked
+        // for — so skip the compensation and let the placement stand. Each
+        // witness is exact: `begin_client_resize` clears fit and fill at entry,
+        // so either membership here landed after the grab started, and an owed
+        // recenter is how the three exits record having configured a different
+        // size. The map itself stays unconditional — it doubles as the resize's
+        // z-raise.
+        let placement_owns_size = self.stage.is_fill(window)
+            || self.stage.is_fit(window)
+            || self.is_window_fullscreen(window)
+            || self.pending_recenter.contains_key(&surface.id());
+
         if initial_screen_pos.is_some() {
             // Pinned: top/left-edge resize moves `screen_pos` so the opposite
             // edge stays fixed. The Space loc is re-synced here directly because
             // the per-frame loc-sync only fires on camera changes.
             if let Some(site) = self.stage.pin_of(window).cloned() {
                 let mut new_sp = site.screen_pos;
-                if has_top(edges) {
-                    new_sp.y = site.screen_pos.y + (last_committed_size.h - current_geo.size.h);
-                }
-                if has_left(edges) {
-                    new_sp.x = site.screen_pos.x + (last_committed_size.w - current_geo.size.w);
+                if !placement_owns_size {
+                    if has_top(edges) {
+                        new_sp.y = site.screen_pos.y + (last_committed_size.h - current_geo.size.h);
+                    }
+                    if has_left(edges) {
+                        new_sp.x = site.screen_pos.x + (last_committed_size.w - current_geo.size.w);
+                    }
                 }
                 self.stage.set_pin(
                     window,
@@ -1020,11 +1036,13 @@ impl DriftWm {
             // inside it — it doubles as the resize's z-raise, and skipping it
             // when the delta is zero would silently drop that raise.
             let mut new_loc = current_pos;
-            if has_top(edges) {
-                new_loc.y = current_pos.y + (last_committed_size.h - current_geo.size.h);
-            }
-            if has_left(edges) {
-                new_loc.x = current_pos.x + (last_committed_size.w - current_geo.size.w);
+            if !placement_owns_size {
+                if has_top(edges) {
+                    new_loc.y = current_pos.y + (last_committed_size.h - current_geo.size.h);
+                }
+                if has_left(edges) {
+                    new_loc.x = current_pos.x + (last_committed_size.w - current_geo.size.w);
+                }
             }
             self.map_window(window.clone(), new_loc, false);
         }

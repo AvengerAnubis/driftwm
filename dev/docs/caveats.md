@@ -104,7 +104,13 @@ Two knock-on effects specific to fit, both accepted: `compute_fit_geometry` does
 
 Grab start sets `Resizing` in *pending* state only, so a resize that ends where it began leaves `send_pending_configure` with nothing to send and the client with no reason to commit, stranding `ResizeState::WaitingForLastCommit` (`src/grabs/resize_grab.rs`). It self-clears on the window's next repaint, but until then the window reads as under an interactive grab: its next geometry animation is silently skipped and relaunch adoption bails. Recognise the symptom rather than chasing the missing animation.
 
-That gap is unbounded, so anything can place the window inside it. `handle_resize_commit` therefore compensates the dragged edge *incrementally* — the live position (or pin `screen_pos`) plus `last_committed_size - current_geo.size` — rather than absolutely from the grab start, which would restore the window to where the grab began and discard a fill, a fit, an exit placement, an IPC `move`, a bookmark jump or a `SendToOutput` that landed in between. The per-commit deltas telescope to the same total, so a drag nothing else touches settles exactly where the absolute form put it. The grab's own `apply_resize` keeps the absolute formula, correctly: a live drag owns the position.
+That gap is unbounded, so anything can place the window inside it, and `handle_resize_commit` has to survive two different kinds of intruder.
+
+A placement that only *moves* the window — an IPC `move`, a bookmark jump, a `SendToOutput`, a nudge, a pin/unpin — is handled by compensating the dragged edge *incrementally*: the live position (or pin `screen_pos`) plus `last_committed_size - current_geo.size`, rather than absolutely from the grab start, which would restore the window to where the grab began. The per-commit deltas telescope to the same total, so a drag nothing else touches settles exactly where the absolute form put it.
+
+A placement that also changes the *size* — fill, fit, fullscreen entry, or any of the three exits — needs the compensation skipped outright, because the delta would then be measured against a size the resize never asked for and applied on top of a position the placement already chose (a fill lands the window a screen-width off-canvas; a fullscreen leaves the output it is meant to fill). `placement_owns_size` is the guard, and each of its witnesses is exact rather than heuristic: `begin_client_resize` clears fit and fill at entry, so either membership at settle time landed after the grab started, and an owed `pending_recenter` is precisely how the exits record having configured a different size. The map itself stays unconditional either way — it doubles as the resize's z-raise.
+
+The grab's own `apply_resize` keeps the absolute formula, correctly: a live drag owns the position.
 
 ## Exit placement is one shared tail — grow a new exit through it
 
