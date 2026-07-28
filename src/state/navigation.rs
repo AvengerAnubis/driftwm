@@ -440,24 +440,25 @@ impl DriftWm {
             .windows()
             .find(|w| focus_belongs_to_window(surface, *w))
             .cloned();
-        if let Some(window) = window {
-            // Widgets and pinned (PiP-style) windows stay out of the focus
-            // cycle / alt-tab history.
-            if window
-                .wl_surface()
-                .and_then(|s| driftwm::config::applied_rule(&s))
-                .is_some_and(|r| r.widget)
-                || self.is_pinned(&window)
-            {
-                return;
-            }
-            // Modal dialogs don't enter focus history — Alt-Tab navigates to
-            // the parent instead, and focus redirect handles the rest.
-            if window.is_modal() {
-                return;
-            }
+        if let Some(window) = window
+            && self.enters_focus_history(&window)
+        {
             self.stage.push_focus(&window);
         }
+    }
+
+    /// Whether `window` belongs in the focus cycle at all. Widgets and pinned
+    /// (PiP-style) windows stay out of Alt-Tab; a modal dialog is reached
+    /// through its parent instead, with the focus redirect handling the rest.
+    /// Shared with the writers that insert somewhere other than the front, so
+    /// no route into the history can skip the filter.
+    pub(crate) fn enters_focus_history(&self, window: &StageWindow) -> bool {
+        !window
+            .wl_surface()
+            .and_then(|s| driftwm::config::applied_rule(&s))
+            .is_some_and(|r| r.widget)
+            && !self.is_pinned(window)
+            && !window.is_modal()
     }
 
     /// Is the window's full snap rect (borders + title bar) inside the active

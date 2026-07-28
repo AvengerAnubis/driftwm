@@ -275,7 +275,7 @@ impl CompositorHandler for DriftWm {
                     {
                         self.defer_adoption(&root, sid, crate::state::AdoptOrigin::FirstCommit);
                         // Asymmetric on purpose: clearing `adopted_sid` lets the
-                        // chain below place the window, while `defer_adopt`
+                        // chain below place the window, while `hidden_for_adopt`
                         // below keeps the arms that establish a *membership*
                         // off — pinning it or sending it fullscreen for the
                         // duration is exactly what the flush's carve-outs would
@@ -298,21 +298,24 @@ impl CompositorHandler for DriftWm {
                     // write while the window is hidden, and which the adopt
                     // clears in any case) and a second open animation, replayed
                     // at the reveal.
-                    let defer_adopt = self.root_hidden_by_deferred_adopt(&root);
-                    if defer_adopt {
-                        // The client's own queued fullscreen/fit goes too, on
+                    let hidden_for_adopt = self.root_hidden_by_deferred_adopt(&root);
+                    if hidden_for_adopt {
+                        // The client's own startup fullscreen/fit goes too, on
                         // every pass: `pending_center` is set again between
-                        // passes, so a request arriving there queues rather
-                        // than applying. Unlike the immediate adopt's drop
-                        // (which trades the request for the slot the window
-                        // does end up in), a deferred adopt may never land — a
-                        // client that asked before its first buffer then keeps
-                        // the plain window it was given. The suppressed
+                        // passes, so a request arriving there queues rather than
+                        // applying. Unlike the immediate adopt's drop
+                        // (which trades the request for the slot the window does
+                        // end up in), a deferred adopt may never land — a client
+                        // that asked before its first buffer then keeps the plain
+                        // window it was given. The suppressed
                         // `pinned_to_screen`/`fullscreen` *rules* share that
                         // fate: this is the last placement pass they get, so a
                         // deferral the flush discards (relaunch TTL swept under
                         // the grab) leaves the window plain with nothing left to
-                        // re-apply them.
+                        // re-apply them. What survives is a request the client
+                        // makes *after* the last pass, once it is a running app
+                        // rather than a starting one: nothing here can reach that
+                        // one, and the reveal hands it over.
                         self.pending_fullscreen.remove(&root);
                         self.pending_fit.remove(&root);
                     }
@@ -443,7 +446,7 @@ impl CompositorHandler for DriftWm {
                         } else {
                             self.pending_size.remove(&root);
                         }
-                    } else if !defer_adopt
+                    } else if !hidden_for_adopt
                         && applied.as_ref().is_some_and(|a| a.pinned_to_screen)
                         && has_size
                         && !is_fullscreen
@@ -583,7 +586,7 @@ impl CompositorHandler for DriftWm {
                         // `focus_on_open = false`.
                         let activate = !place_in_background
                             && !suppress_focus_on_open
-                            && !defer_adopt
+                            && !hidden_for_adopt
                             && applied.as_ref().is_none_or(|a| !a.widget);
                         self.map_window(window.clone(), pos.into(), false);
                         if activate {
@@ -671,7 +674,7 @@ impl CompositorHandler for DriftWm {
                                 .insert(DecorationKey::Surface(root.id()), deco);
                         }
                         if adopted_sid.is_none()
-                            && !defer_adopt
+                            && !hidden_for_adopt
                             && applied.as_ref().is_some_and(|a| a.fullscreen == Some(true))
                         {
                             self.pending_fullscreen.entry(root.clone()).or_insert(None);
@@ -693,7 +696,7 @@ impl CompositorHandler for DriftWm {
                             && !is_fullscreen
                             && !place_in_background
                             && !deferred_fit_or_fs
-                            && !defer_adopt
+                            && !hidden_for_adopt
                             && adopted_sid.is_none()
                         {
                             let reset = self.config.zoom_reset_on_new_window;

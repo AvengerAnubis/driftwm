@@ -294,8 +294,7 @@ impl XdgActivationHandler for DriftWm {
             .user_data
             .get::<crate::state::RelaunchMarker>()
             .map(|m| m.0)
-            && self.pending_relaunches.contains_key(&sid)
-            && self.find_suspended(sid).is_some()
+            && self.relaunch_target_live(sid)
         {
             let window = self.window_for_surface(&surface);
             let root = window
