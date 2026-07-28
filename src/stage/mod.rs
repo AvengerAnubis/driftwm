@@ -61,10 +61,8 @@ struct Entry<W> {
     pinned: Option<PinnedSite>,
 }
 
-/// One entry's element plus the per-entry facts every canvas-space hit-test
-/// walk asks of it. `entry` is a linear scan, so a walk that re-resolved
-/// `position_of` / `is_pinned` per element was quadratic in the window count —
-/// and a single pointer motion runs several such walks.
+/// One entry's element plus its position and pin state, as yielded by
+/// [`Stage::entries`].
 pub struct StageEntry<'a, W> {
     pub window: &'a W,
     pub position: Point<i32, Logical>,
