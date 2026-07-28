@@ -120,7 +120,7 @@ impl DriftWm {
         // stash behind (the pending relaunch itself is keyed by suspended id and
         // GC'd on its own deadline).
         self.pending_adoptions.remove(surface);
-        self.deferred_adoptions.remove(surface);
+        self.deferred_adoptions.retain(|d| d.root != *surface);
         self.auto_anchor_snapshot.remove(surface);
         // Drop snapshots pointing at the destroyed surface as their anchor.
         // Keep `None`-anchor entries (user had no focus) and stand-in anchors

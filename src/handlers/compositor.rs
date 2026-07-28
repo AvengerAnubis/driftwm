@@ -274,9 +274,20 @@ impl CompositorHandler for DriftWm {
                     if let Some(sid) = adopted_sid
                         && self.adopt_fights_a_grab(&window, sid)
                     {
-                        self.deferred_adoptions.insert(root.clone(), sid);
+                        self.defer_adoption(&root, sid, crate::state::AdoptOrigin::FirstCommit);
+                        // Asymmetric on purpose: `adopted_sid` is cleared so the
+                        // chain below actually places the window, while
+                        // `defer_adopt` keeps the rule arms that establish a
+                        // *membership* off — pinning it or sending it fullscreen
+                        // for the duration is exactly what the flush's carve-outs
+                        // would then dismiss the stand-in for. The client's own
+                        // queued fullscreen/fit goes for the same reason the
+                        // immediate adopt drops it: on this path an adopt beats
+                        // both.
                         adopted_sid = None;
                         defer_adopt = true;
+                        self.pending_fullscreen.remove(&root);
+                        self.pending_fit.remove(&root);
                     }
 
                     // Capture preferred size once; later updated only on
@@ -405,7 +416,8 @@ impl CompositorHandler for DriftWm {
                         } else {
                             self.pending_size.remove(&root);
                         }
-                    } else if applied.as_ref().is_some_and(|a| a.pinned_to_screen)
+                    } else if !defer_adopt
+                        && applied.as_ref().is_some_and(|a| a.pinned_to_screen)
                         && has_size
                         && !is_fullscreen
                         && let Some(output) = applied
@@ -628,6 +640,7 @@ impl CompositorHandler for DriftWm {
                                 .insert(DecorationKey::Surface(root.id()), deco);
                         }
                         if adopted_sid.is_none()
+                            && !defer_adopt
                             && applied.as_ref().is_some_and(|a| a.fullscreen == Some(true))
                         {
                             self.pending_fullscreen.entry(root.clone()).or_insert(None);
@@ -657,8 +670,10 @@ impl CompositorHandler for DriftWm {
                             // A deferred adopt means a grab is still live, and a
                             // camera flight warps the pointer into it — dragging
                             // the grabbed element from a motionless mouse. Raise
-                            // and focus without the pan; the adopt brings the
-                            // window into view when the grab ends.
+                            // and focus without the pan: the adopt is camera-
+                            // neutral too, but it lands the window on the
+                            // stand-in the user is dragging, which a drag keeps
+                            // under the cursor and therefore on screen.
                             if self.stage.is_pinned(&window)
                                 || defer_adopt
                                 || placed_at_cursor && !cursor_overview_rescue
@@ -1004,6 +1019,11 @@ impl DriftWm {
                     .replace(ResizeState::Idle);
             });
             self.refresh_stable_snap_rect(&StageWindow::Client(window.clone()));
+            // The grab's `unset` is too early for this: a client resize is
+            // witnessed by the surface's own `ResizeState`, which only reaches
+            // `Idle` on the commit above, so scheduling at release would flush
+            // into a still-live grab and simply defer again.
+            self.schedule_deferred_adoptions();
         } else if size_changed {
             // Still resizing: carry the new committed size forward so the next
             // commit compares against it (write-back only on change).

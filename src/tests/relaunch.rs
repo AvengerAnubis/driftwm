@@ -12,16 +12,20 @@ use std::time::{Duration, Instant};
 
 use driftwm::config::Config;
 use driftwm::desktop_entry::DesktopEntryCache;
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::utils::{Point, Size};
 use wayland_client::protocol::wl_surface::WlSurface as ClientSurface;
 
 use driftwm::window_ext::WindowExt;
 
-use crate::state::{StageWindow, SuspendedId};
+use crate::state::{ClusterResizeSnapshot, StageWindow, SuspendedId};
 
 use super::client::ClientId;
 use super::real::TempDir;
-use super::{Fixture, client_sees_maximized, map_window, server_surface, window_by_app_id};
+use super::{
+    Fixture, adopt_last_configure, client_sees_maximized, config, end_grab,
+    install_client_resize_grab, map_window, motion, server_surface, window_by_app_id,
+};
 
 /// The live client window with `app_id`, if any. Unlike `window_by_app_id`, it
 /// skips a same-named suspended stand-in instead of stopping at it.
@@ -1108,9 +1112,9 @@ fn adopt_of_unfocused_window_keeps_focus_history() {
 
 /// A window under an active interactive move grab must NOT be adopted mid-drag:
 /// teleporting it into the stand-in slot would fight the live grab. The token
-/// bails — leaving the pending relaunch live and the stand-in intact — rather
-/// than dismissing. Once the drag ends and the guard clears, the same still-
-/// registered token adopts normally.
+/// stashes the adopt — leaving the pending relaunch live and the stand-in intact
+/// — rather than dismissing, and the drag's end lands it off the stash alone,
+/// without the app presenting the token again.
 #[test]
 fn mid_move_grab_defers_adoption_then_adopts_when_it_ends() {
     let tmp = TempDir::new();
@@ -1134,9 +1138,9 @@ fn mid_move_grab_defers_adoption_then_adopts_when_it_ends() {
 
     // The window is under a live interactive move grab; the token arrives.
     f.state().arm_interactive_move(&win);
-    present_token(&mut f, cid, &existing, token.clone());
+    present_token(&mut f, cid, &existing, token);
 
-    // Bail, not adopt: the window stayed put, the stand-in and pending survive.
+    // Defer, not adopt: the window stayed put, the stand-in and pending survive.
     assert_eq!(
         f.state().stage.position_of(&win),
         pos_before,
@@ -1152,10 +1156,15 @@ fn mid_move_grab_defers_adoption_then_adopts_when_it_ends() {
         "the pending relaunch stays live for its TTL"
     );
     assert_eq!(token_count(&mut f), 1, "the token was not deregistered");
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        1,
+        "the adopt was stashed for the grab's release"
+    );
 
-    // The drag ends; the same still-registered token now adopts.
+    // The drag ends: the stash alone lands the adopt.
     f.state().disarm_interactive_move(&win);
-    present_token(&mut f, cid, &existing, token);
+    f.pump(1);
 
     let adopted = window_by_app_id(&mut f, "myapp").expect("adopted once the grab ended");
     assert_eq!(
@@ -1381,6 +1390,266 @@ fn an_adopt_deferred_past_the_relaunch_deadline_leaves_a_stale_stand_in() {
 
     f.state().dismiss_suspended(sid);
     client_close(&mut f, cid, &surface);
+}
+
+/// A second presentation of the token while the deferral is still outstanding is
+/// idempotent: one window can only ever adopt one stand-in, so the stash holds a
+/// single entry for that surface and the release lands a single adopt. (The grab
+/// is still live throughout, so no flush can pre-empt the re-presentation.)
+#[test]
+fn a_token_re_presented_under_the_grab_stays_one_deferred_adopt() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let cid = f.add_client();
+    let existing = map_window(&mut f, cid, "myapp", (300, 200));
+    let win = window_by_app_id(&mut f, "myapp").unwrap();
+    let pos_before = f.state().stage.position_of(&win);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (800, 500), (400, 300));
+    let susp = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let eid = f.state().stage.id_of(&susp).unwrap();
+    f.state().relaunch_suspended(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+
+    f.state().arm_interactive_move(&win);
+    present_token(&mut f, cid, &existing, token.clone());
+    present_token(&mut f, cid, &existing, token);
+
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        1,
+        "the re-presented token replaced the stash rather than stacking a second entry"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&win),
+        pos_before,
+        "neither presentation teleported the window out from under its grab"
+    );
+    assert!(suspended_present(&mut f), "the stand-in was retained");
+    assert_eq!(token_count(&mut f), 1, "the token was not deregistered");
+
+    f.state().disarm_interactive_move(&win);
+    f.pump(1);
+
+    let adopted = window_by_app_id(&mut f, "myapp").expect("adopted once the grab ended");
+    assert_eq!(
+        f.state().stage.id_of(&adopted),
+        Some(eid),
+        "took the stand-in's ElementId"
+    );
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        0,
+        "the single stash entry drained"
+    );
+    assert!(!suspended_present(&mut f));
+
+    settle_resize(&mut f, cid, &existing, (400, 300));
+    client_close(&mut f, cid, &existing);
+}
+
+/// The first-commit path resolves adoption *ahead* of window rules and of the
+/// fullscreen/fit a client can queue before its first buffer, so an adopt it
+/// deferred under a stand-in drag must still beat them when it lands —
+/// otherwise something the user never aimed at the stand-in silently destroys
+/// the thing they are holding. Drives one case end to end: relaunch, grab the
+/// stand-in, let the app reach its first sized commit under the grab, release.
+fn assert_a_deferred_first_commit_adopt_wins(
+    rules: &str,
+    before_first_sized_commit: impl Fn(&mut Fixture, ClientId, &ClientSurface),
+) {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(config(rules));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (800, 500), (400, 300));
+    let susp = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let eid = f.state().stage.id_of(&susp).unwrap();
+    f.state().relaunch_suspended(sid);
+    // Long enough a drag that the identity fallback has lapsed, so the stashed
+    // token is the only thing that can still resolve the adopt.
+    f.state().expire_relaunch_fallback_for_test(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+
+    // The user grabs the stand-in while the app is still starting up.
+    f.state().arm_interactive_move(&sid);
+
+    let cid = f.add_client();
+    let surface = begin_window(&mut f, cid, "myapp");
+    present_token(&mut f, cid, &surface, token);
+    before_first_sized_commit(&mut f, cid, &surface);
+    finish_window(&mut f, cid, &surface, (300, 200));
+
+    let placed = mapped_client(&mut f, "myapp").expect("the window mapped");
+    assert!(
+        suspended_present(&mut f),
+        "the stand-in survived the commit that would have consumed it"
+    );
+    assert!(
+        !f.state().is_window_fullscreen(&placed) && !f.state().is_pinned(&placed),
+        "the membership was suppressed for the deferral, not established and then torn down"
+    );
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        1,
+        "the adopt was stashed for the grab's release"
+    );
+
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+
+    let adopted = mapped_client(&mut f, "myapp").expect("the deferred adopt landed");
+    assert_eq!(
+        f.state().stage.id_of(&adopted),
+        Some(eid),
+        "took the stand-in's slot — nothing dismissed it at the flush"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&adopted),
+        Some(Point::from((800, 500))),
+        "relocated onto the stand-in rect the user dragged it to"
+    );
+    assert!(
+        !suspended_present(&mut f),
+        "the stand-in was consumed by the adopt, not dismissed"
+    );
+
+    settle_resize(&mut f, cid, &surface, (400, 300));
+    client_close(&mut f, cid, &surface);
+}
+
+#[test]
+fn a_fullscreen_rule_loses_to_a_deferred_first_commit_adopt() {
+    assert_a_deferred_first_commit_adopt_wins(
+        r#"
+[[window_rules]]
+app_id = "myapp"
+fullscreen = true
+"#,
+        |_, _, _| {},
+    );
+}
+
+#[test]
+fn a_pin_rule_loses_to_a_deferred_first_commit_adopt() {
+    assert_a_deferred_first_commit_adopt_wins(
+        r#"
+[[window_rules]]
+app_id = "myapp"
+pinned_to_screen = true
+"#,
+        |_, _, _| {},
+    );
+}
+
+#[test]
+fn a_widget_rule_loses_to_a_deferred_first_commit_adopt() {
+    assert_a_deferred_first_commit_adopt_wins(
+        r#"
+[[window_rules]]
+app_id = "myapp"
+widget = true
+"#,
+        |_, _, _| {},
+    );
+}
+
+/// A client that asks for fullscreen before its first buffer is the same
+/// question the `fullscreen` rule asks, from the client's side — video players
+/// do exactly this on relaunch.
+#[test]
+fn a_client_queued_fullscreen_loses_to_a_deferred_first_commit_adopt() {
+    assert_a_deferred_first_commit_adopt_wins("", |f, cid, surface| {
+        f.client(cid).window(surface).set_fullscreen(None);
+        f.roundtrip(cid);
+    });
+}
+
+/// The other half of `element_under_interactive_grab`: a client resize, witnessed
+/// by the surface's own `ResizeState` rather than by the move-grab list. Its
+/// teardown runs no disarm, so the stash has to be picked up by the commit that
+/// settles the resize back to `Idle` — without that hook the adopt is stranded
+/// for good.
+#[test]
+fn an_adopt_deferred_by_a_client_resize_lands_when_the_resize_settles() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    let out = f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let cid = f.add_client();
+    let existing = map_window(&mut f, cid, "myapp", (400, 300));
+    let win = window_by_app_id(&mut f, "myapp").unwrap();
+    f.state().map_window(
+        StageWindow::Client(win.clone()),
+        Point::from((400, 300)),
+        true,
+    );
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (800, 500), (400, 300));
+    let susp = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let eid = f.state().stage.id_of(&susp).unwrap();
+    f.state().relaunch_suspended(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+
+    // The user is dragging the window's right edge when the token arrives.
+    install_client_resize_grab(
+        &mut f,
+        &win,
+        xdg_toplevel::ResizeEdge::Right,
+        Point::from((800.0, 450.0)),
+        out,
+        ClusterResizeSnapshot::empty(),
+    );
+    present_token(&mut f, cid, &existing, token);
+
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        1,
+        "the resize half of the grab check deferred the adopt"
+    );
+    assert!(suspended_present(&mut f), "the stand-in was retained");
+
+    motion(&mut f, Point::from((900.0, 450.0)));
+    f.double_roundtrip(cid);
+    adopt_last_configure(&mut f, cid, &existing);
+
+    end_grab(&mut f);
+    f.pump(1);
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        1,
+        "the grab's release alone leaves it stashed — the surface is still mid-settle"
+    );
+
+    // The commit that settles the resize back to Idle is what lets it go.
+    f.double_roundtrip(cid);
+    adopt_last_configure(&mut f, cid, &existing);
+    f.pump(1);
+
+    let adopted = mapped_client(&mut f, "myapp").expect("the deferred adopt landed");
+    assert_eq!(
+        f.state().stage.id_of(&adopted),
+        Some(eid),
+        "took the stand-in's ElementId once the resize settled"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&adopted),
+        Some(Point::from((800, 500))),
+        "relocated onto the stand-in rect"
+    );
+    assert!(!suspended_present(&mut f), "the stand-in was consumed");
+    assert_eq!(f.state().debug_counters()["deferred_adoptions"], 0);
+
+    settle_resize(&mut f, cid, &existing, (400, 300));
+    client_close(&mut f, cid, &existing);
 }
 
 /// A dismiss while a relaunch is in flight cancels it: the token is deregistered

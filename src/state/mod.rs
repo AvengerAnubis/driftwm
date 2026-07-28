@@ -52,7 +52,9 @@ pub use persistence::{read_all_per_output_state, remove_state_file};
 pub use render_cache::{BorderCacheEntry, RenderCache, ShadowCacheEntry};
 pub use session_store::{CameraSeed, SessionStore};
 pub use stage_window::{StageWindow, SuspendedId, SuspendedWindow};
-pub use suspended::{PendingRelaunch, RelaunchMarker, SuspendMark, UnmapSnapshot};
+pub use suspended::{
+    AdoptOrigin, DeferredAdopt, PendingRelaunch, RelaunchMarker, SuspendMark, UnmapSnapshot,
+};
 pub(crate) use window_frame::{configured_window_size, frame_loc_for_center, visual_frame_center};
 
 use smithay::{
@@ -701,14 +703,11 @@ pub struct DriftWm {
     /// first-commit placement, awaiting adoption into the suspended window it
     /// names. Purged with the surface if the client dies before mapping.
     pub pending_adoptions: HashMap<WlSurface, SuspendedId>,
-    /// Adoptions a live interactive grab held back, keyed by the relaunched
-    /// window's root surface. The window keeps whatever placement it was given
-    /// and moves into the stand-in's slot once the grab lets go; nothing revives
-    /// a relaunch that hit its TTL under the grab, so a long enough drag ends
-    /// with the window placed normally and the stand-in left behind as a stale
-    /// duplicate — the same end state as an app that took longer than the TTL to
-    /// come back.
-    pub(crate) deferred_adoptions: HashMap<WlSurface, SuspendedId>,
+    /// Adoptions a live interactive grab held back, in deferral order. The
+    /// window keeps whatever placement it was given and moves into the
+    /// stand-in's slot once the grab lets go; see
+    /// [`DriftWm::flush_deferred_adoptions`] for what lands and what doesn't.
+    pub(crate) deferred_adoptions: Vec<DeferredAdopt>,
     /// Durable session store (session restore): the `session.json` path, dirty
     /// timer, carried-forward entries, and fresh-boot camera seed.
     pub session_store: SessionStore,

@@ -74,6 +74,26 @@ const RELAUNCH_TTL: Duration = Duration::from_secs(30);
 /// (Signal A), ahead of the normal serial-gated activation path.
 pub struct RelaunchMarker(pub SuspendedId);
 
+/// Which path stashed a deferred adopt, which decides how much of the carve-out
+/// list still applies when it lands. The activation path meets an already-placed
+/// window, so every carve-out is a live question about where that window ended
+/// up. The first-commit path resolves adoption *ahead* of window rules, so an
+/// adopt stashed there has already beaten them and only a membership acquired
+/// during the deferral can still call it off.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AdoptOrigin {
+    FirstCommit,
+    Activation,
+}
+
+/// One adopt a live grab held back, until [`DriftWm::flush_deferred_adoptions`].
+pub struct DeferredAdopt {
+    /// The relaunched window's root surface.
+    pub root: WlSurface,
+    pub sid: SuspendedId,
+    pub origin: AdoptOrigin,
+}
+
 /// One in-flight relaunch. The suspended window holds no pending state — this
 /// is the single owner.
 pub struct PendingRelaunch {
@@ -316,8 +336,7 @@ impl DriftWm {
     /// entry would re-seed its leg on every motion and rubber-band behind the
     /// cursor. Unlike the durable fullscreen/pinned/widget/dialog carve-outs
     /// this is transient, so the relaunch caller stashes the adopt for the
-    /// grab's release rather than dismissing, falling back to the pending
-    /// relaunch's TTL if the grab outlives it.
+    /// grab's release rather than dismissing.
     pub(crate) fn element_under_interactive_grab(&self, element: &StageWindow) -> bool {
         if self.element_under_interactive_move(element) {
             return true;
@@ -348,27 +367,31 @@ impl DriftWm {
                 .is_some_and(|s| self.element_under_interactive_grab(&StageWindow::Suspended(s)))
     }
 
-    /// Adopt an already-placed `window` into stand-in `sid`, or resolve why it
-    /// can't be: a window that has landed somewhere the adopt would rip it out
-    /// of drops the stand-in instead, and a grab on either side defers the adopt
-    /// to [`Self::flush_deferred_adoptions`].
-    pub(crate) fn adopt_placed_or_defer(
+    /// Resolve an adopt of already-placed `window` into stand-in `sid` into one
+    /// of three outcomes: adopt it, defer it to
+    /// [`Self::flush_deferred_adoptions`] while a grab is live, or dismiss the
+    /// stand-in because the window has landed somewhere the adopt would rip it
+    /// out of.
+    pub(crate) fn resolve_placed_adopt(
         &mut self,
         window: &Window,
         root: &WlSurface,
         sid: SuspendedId,
+        origin: AdoptOrigin,
     ) {
-        // A window already fullscreen, pinned, rule-placed as a widget, or
-        // living as a dialog/modal of another window is where policy (or its
-        // parent) wants it; adopting would rip it out of that membership — and,
-        // for a dialog, tear it off its parent. Every suspend path excludes
-        // dialogs, so no stand-in ever stands for one. Drop the stand-in instead
-        // and leave the window alone.
+        // A window already fullscreen or pinned is where policy put it; adopting
+        // would rip it out of that membership, so drop the stand-in instead and
+        // leave the window alone. A rule-placed widget, and a dialog/modal owned
+        // by another window, are the same call — but they are decided by window
+        // rules and the xdg parent link, both of which the first-commit path
+        // resolves *after* it has already picked the adopt (every suspend path
+        // excludes dialogs, so no stand-in ever stands for one). An adopt
+        // stashed there beat them once and must not lose to them at the flush.
+        let beats_rules = origin == AdoptOrigin::FirstCommit;
         if self.is_window_fullscreen(window)
             || self.is_pinned(window)
-            || window.is_widget()
-            || window.parent_surface().is_some()
-            || window.is_modal()
+            || (!beats_rules
+                && (window.is_widget() || window.parent_surface().is_some() || window.is_modal()))
         {
             tracing::debug!(
                 "relaunch adopt of {sid:?} skipped: window is fullscreen/pinned/widget/dialog; dismissing stand-in"
@@ -379,7 +402,7 @@ impl DriftWm {
         // Transient, unlike the carve-outs above: the pending relaunch keeps
         // running so the grab's release can still land the adopt.
         if self.adopt_fights_a_grab(window, sid) {
-            self.deferred_adoptions.insert(root.clone(), sid);
+            self.defer_adoption(root, sid, origin);
             return;
         }
         self.adopt_relaunched(window, root, sid);
@@ -388,9 +411,33 @@ impl DriftWm {
         }
     }
 
+    /// Stash an adopt a live grab held back. One window can only ever adopt one
+    /// stand-in, so a second match on the same surface supersedes the first and
+    /// the superseded relaunch falls back to its TTL. Order is insertion order,
+    /// so two windows of one app racing for the same stand-in resolve by which
+    /// deferred first rather than by hash order.
+    pub(crate) fn defer_adoption(
+        &mut self,
+        root: &WlSurface,
+        sid: SuspendedId,
+        origin: AdoptOrigin,
+    ) {
+        let entry = DeferredAdopt {
+            root: root.clone(),
+            sid,
+            origin,
+        };
+        match self.deferred_adoptions.iter_mut().find(|d| d.root == *root) {
+            Some(slot) => *slot = entry,
+            None => self.deferred_adoptions.push(entry),
+        }
+    }
+
     /// Queue the adoptions a grab held back for the moment the current dispatch
     /// unwinds. The adopt re-seats pointer focus and a grab's teardown runs
-    /// inside the pointer mutex, so it can't run inline from there.
+    /// inside the pointer mutex, so it can't run inline from there. Called from
+    /// every point a grab this stash can wait on releases: a move grab's disarm,
+    /// and the commit that settles a client resize back to `ResizeState::Idle`.
     pub(crate) fn schedule_deferred_adoptions(&mut self) {
         if self.deferred_adoptions.is_empty() {
             return;
@@ -400,20 +447,26 @@ impl DriftWm {
     }
 
     /// Land the deferred adoptions whose grab has let go. Each entry re-runs the
-    /// full decision, so one still under a grab of its own simply defers again
-    /// rather than blocking the rest. A relaunch the TTL swept while the grab
-    /// was held is not revived: the window keeps the placement it already has
-    /// and the stand-in stays behind as a stale duplicate — the end state of any
-    /// relaunch that outlives its deadline.
+    /// full decision, so one still held by a second grab simply defers again
+    /// rather than blocking the rest; that re-deferral rides the second grab's
+    /// own scheduling point, and deliberately does not re-arm an idle here — an
+    /// always-pending idle makes the event loop spin.
+    ///
+    /// A relaunch the TTL swept while the grab was held is not revived: the
+    /// window keeps the placement it already has and the stand-in stays behind
+    /// as a stale duplicate — the end state of any relaunch that outlives its
+    /// deadline.
     pub(crate) fn flush_deferred_adoptions(&mut self) {
-        for (root, sid) in std::mem::take(&mut self.deferred_adoptions) {
-            if !self.pending_relaunches.contains_key(&sid) || self.find_suspended(sid).is_none() {
+        for entry in std::mem::take(&mut self.deferred_adoptions) {
+            if !self.pending_relaunches.contains_key(&entry.sid)
+                || self.find_suspended(entry.sid).is_none()
+            {
                 continue;
             }
-            let Some(window) = self.window_for_surface(&root) else {
+            let Some(window) = self.window_for_surface(&entry.root) else {
                 continue;
             };
-            self.adopt_placed_or_defer(&window, &root, sid);
+            self.resolve_placed_adopt(&window, &entry.root, entry.sid, entry.origin);
         }
     }
 

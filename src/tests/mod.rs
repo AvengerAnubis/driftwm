@@ -383,6 +383,67 @@ fn assert_resize_entered(
     );
 }
 
+/// Install a live client [`ResizeGrab`] over `window`, entering the resize
+/// through the same `begin_client_resize` the real entry points run so
+/// `handle_resize_commit` runs its reposition/settle logic. `start` is the
+/// canvas-space grab origin; the size delta is measured from there.
+fn install_client_resize_grab(
+    f: &mut Fixture,
+    window: &Window,
+    edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
+    start: Point<f64, Logical>,
+    output: smithay::output::Output,
+    cluster: crate::state::ClusterResizeSnapshot,
+) {
+    use crate::grabs::{ResizeGrab, SizeConstraints};
+    use crate::state::{ClusterMember, StageWindow};
+    use driftwm::layout::snap::SnapState;
+    use smithay::input::pointer::{Focus, GrabStartData};
+
+    let initial_window_location = f
+        .state()
+        .stage
+        .position_of(&StageWindow::Client(window.clone()))
+        .unwrap();
+    let initial_window_size = window.geometry().size;
+
+    let surface = server_surface(window);
+    f.state().begin_client_resize(
+        window,
+        &surface,
+        edges,
+        initial_window_location,
+        initial_window_size,
+        None,
+    );
+
+    let grab = ResizeGrab {
+        start_data: GrabStartData {
+            focus: None,
+            button: driftwm::config::BTN_LEFT,
+            location: start,
+        },
+        target: ClusterMember::Client(window.clone()),
+        edges,
+        initial_window_location,
+        initial_window_size,
+        last_window_size: initial_window_size,
+        output,
+        last_clamped_location: start,
+        snap: SnapState::default(),
+        constraints: SizeConstraints::for_window(window),
+        cluster_resize: cluster,
+        pinned_initial_screen_pos: None,
+        touch_start: None,
+        touch_slots: 0,
+        locked_ratio: None,
+    };
+
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let serial = SERIAL_COUNTER.next_serial();
+    pointer.set_grab(f.state(), grab, serial, Focus::Clear);
+}
+
 /// Whether `window`'s toplevel currently carries the xdg `Activated` state
 /// (the "focused window" chrome hint the compositor sets exclusively).
 fn is_activated(window: &Window) -> bool {

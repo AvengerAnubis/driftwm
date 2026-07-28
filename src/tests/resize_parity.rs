@@ -20,25 +20,21 @@ use std::cell::RefCell;
 use smithay::backend::input::ButtonState;
 use smithay::desktop::Window;
 use smithay::input::keyboard::ModifiersState;
-use smithay::input::pointer::{
-    ButtonEvent, CursorIcon, CursorImageStatus, Focus, GrabStartData, MotionEvent,
-};
-use smithay::output::Output;
+use smithay::input::pointer::{ButtonEvent, CursorIcon, CursorImageStatus, MotionEvent};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
 use smithay::wayland::compositor::with_states;
 
 use driftwm::config::{BTN_LEFT, Config};
-use driftwm::layout::snap::SnapState;
 use wayland_client::protocol::wl_surface::WlSurface as WlClientSurface;
 
-use crate::grabs::{ResizeGrab, ResizeState, SizeConstraints};
-use crate::state::{ClusterMember, ClusterResizeSnapshot, FocusTarget, StageWindow};
+use crate::grabs::ResizeState;
+use crate::state::{ClusterResizeSnapshot, FocusTarget, StageWindow};
 
 use super::{
     Fixture, adopt_last_configure, assert_resize_entered, client_sees_maximized, fit_and_frame,
-    map_window, seed_fit_and_fill, server_surface, window_by_app_id,
+    install_client_resize_grab, map_window, seed_fit_and_fill, server_surface, window_by_app_id,
 };
 
 fn pt(x: f64, y: f64) -> Point<f64, Logical> {
@@ -102,62 +98,6 @@ fn start_suspended_resize(f: &mut Fixture, click: Point<f64, Logical>) {
     let serial = SERIAL_COUNTER.next_serial();
     f.state()
         .try_suspended_button(&pointer, click, BTN_LEFT, serial, held);
-}
-
-/// Install a live client [`ResizeGrab`] over `window`, entering the resize
-/// through the same `begin_client_resize` the real entry points run so
-/// `handle_resize_commit` runs its reposition/settle logic. `start` is the
-/// canvas-space grab origin; the size delta is measured from there.
-fn install_client_resize_grab(
-    f: &mut Fixture,
-    window: &Window,
-    edges: xdg_toplevel::ResizeEdge,
-    start: Point<f64, Logical>,
-    output: Output,
-    cluster: ClusterResizeSnapshot,
-) {
-    let initial_window_location = f
-        .state()
-        .stage
-        .position_of(&StageWindow::Client(window.clone()))
-        .unwrap();
-    let initial_window_size = window.geometry().size;
-
-    let surface = server_surface(window);
-    f.state().begin_client_resize(
-        window,
-        &surface,
-        edges,
-        initial_window_location,
-        initial_window_size,
-        None,
-    );
-
-    let grab = ResizeGrab {
-        start_data: GrabStartData {
-            focus: None,
-            button: BTN_LEFT,
-            location: start,
-        },
-        target: ClusterMember::Client(window.clone()),
-        edges,
-        initial_window_location,
-        initial_window_size,
-        last_window_size: initial_window_size,
-        output,
-        last_clamped_location: start,
-        snap: SnapState::default(),
-        constraints: SizeConstraints::for_window(window),
-        cluster_resize: cluster,
-        pinned_initial_screen_pos: None,
-        touch_start: None,
-        touch_slots: 0,
-        locked_ratio: None,
-    };
-
-    let pointer = f.state().seat.get_pointer().unwrap();
-    let serial = SERIAL_COUNTER.next_serial();
-    pointer.set_grab(f.state(), grab, serial, Focus::Clear);
 }
 
 /// Read the server-side `ResizeState` a grab/commit left on `surface`.

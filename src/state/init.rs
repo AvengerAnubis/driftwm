@@ -360,7 +360,7 @@ impl DriftWm {
             next_suspended_id: 0,
             pending_relaunches: BTreeMap::new(),
             pending_adoptions: HashMap::new(),
-            deferred_adoptions: HashMap::new(),
+            deferred_adoptions: Vec::new(),
             session_store: super::SessionStore::default(),
             bookmarks,
             window_focus: None,

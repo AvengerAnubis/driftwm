@@ -314,7 +314,12 @@ impl XdgActivationHandler for DriftWm {
             // The press expressed placement intent at the stand-in's slot, so
             // adopt the window into it.
             if let Some(window) = window {
-                self.adopt_placed_or_defer(&window, &root, sid);
+                self.resolve_placed_adopt(
+                    &window,
+                    &root,
+                    sid,
+                    crate::state::AdoptOrigin::Activation,
+                );
                 return;
             }
         }
