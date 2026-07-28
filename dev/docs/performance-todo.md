@@ -48,11 +48,6 @@ or key on (quantized position, behind-element commits).
   cursor (`src/input/actions.rs`, up to 5 s/launch) mark _all_ outputs dirty at
   refresh rate. Mark only the active/cursor output. _Single-output-marginal — same
   shape as the skipped B1; likely not worth it._
-- **B14 (remaining half)** Pointer motion does up to ~6 sequential linear window
-  scans with repeated `with_states` locks per event (`src/input/mod.rs`), and each
-  scan's inner `is_pinned`/`position_of` lookups resolve through `Stage::entry`,
-  itself a linear find — so the real shape is O(n²) in window count. Harmless at
-  today's n, but it is the wrong curve. (The `min_zoom`-per-pinch half shipped.)
 - **Latent frame spikes** (config-dependent): synchronous shader-chunk bakes
   mid-frame (`src/render/shader_chunks.rs` — pre-bake a margin ring, pool the FBO);
   gigapixel-TIFF tile uploads up to ~25 ms/frame on the render thread

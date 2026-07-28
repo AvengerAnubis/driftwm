@@ -1124,10 +1124,13 @@ impl DriftWm {
         point: Point<f64, Logical>,
         mut skip: impl FnMut(&Window) -> bool,
     ) -> Option<(&Window, Point<i32, Logical>)> {
-        for element in self.stage.windows().rev() {
-            match element {
+        for entry in self.stage.entries().rev() {
+            match entry.window {
                 StageWindow::Suspended(s) => {
-                    if self.suspended_decoration_hit(s, point).is_some() {
+                    if self
+                        .suspended_decoration_hit(s, entry.position, point)
+                        .is_some()
+                    {
                         return None;
                     }
                 }
@@ -1135,15 +1138,10 @@ impl DriftWm {
                     if skip(w) {
                         continue;
                     }
-                    // One stage lookup serves position, pin state and the bbox
-                    // below — this walk runs on every pointer motion.
-                    let Some((pos, pinned)) = self.stage.position_and_pinned(w) else {
-                        continue;
-                    };
-                    if pinned || self.hidden_by_deferred_adopt(w) {
+                    if entry.pinned || self.hidden_by_deferred_adopt(w) {
                         continue;
                     }
-                    let render_location = pos - w.geometry().loc;
+                    let render_location = entry.position - w.geometry().loc;
                     let mut bbox = w.bbox_with_popups();
                     bbox.loc += render_location;
                     if bbox.to_f64().contains(point)
@@ -1200,10 +1198,11 @@ impl DriftWm {
     ) -> Option<(StageWindow, HitKind)> {
         let active = self.active_output();
 
-        for element in self.stage.windows().rev() {
+        for entry in self.stage.entries().rev() {
+            let element = entry.window;
             match element {
                 StageWindow::Suspended(s) => {
-                    let Some(hit) = self.suspended_decoration_hit(s, pos) else {
+                    let Some(hit) = self.suspended_decoration_hit(s, entry.position, pos) else {
                         continue;
                     };
                     let hit = HitKind::Decoration(hit);
@@ -1216,15 +1215,13 @@ impl DriftWm {
                     let Some(wl_surface) = w.wl_surface() else {
                         continue;
                     };
-                    let Some((loc, pinned)) = self.stage.position_and_pinned(w) else {
-                        continue;
-                    };
+                    let loc = entry.position;
                     // Pinned windows hit-test in screen space, an off-output
                     // fullscreen window isn't visible here, and one awaiting a
                     // deferred adopt is not drawn at all. All three are skips,
                     // not stops: whatever is genuinely rendered under `pos` on
                     // this output must stay reachable.
-                    if pinned
+                    if entry.pinned
                         || self.fullscreen_on_other_output(&wl_surface, &active)
                         || self.root_hidden_by_deferred_adopt(&wl_surface)
                     {
@@ -1239,9 +1236,9 @@ impl DriftWm {
                     // a resize band there and, for filters that reject one, push
                     // the hit to whatever lies underneath.
                     //
-                    // Inlined rather than `window_bbox_with_popups` so the one
-                    // stage lookup above serves the whole window — this walk
-                    // runs on every pointer motion.
+                    // Inlined rather than `window_bbox_with_popups` so the
+                    // position the walk already carries serves the whole
+                    // window — this walk runs on every pointer motion.
                     let mut bbox = w.bbox_with_popups();
                     bbox.loc += render_location;
                     if bbox.to_f64().contains(pos)
@@ -1351,13 +1348,16 @@ impl DriftWm {
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
         let active_output = self.active_output();
 
-        for window in self.stage.windows().rev().filter_map(|w| w.client()) {
+        for entry in self.stage.entries().rev() {
+            let Some(window) = entry.window.client() else {
+                continue;
+            };
             let Some(wl_surface) = window.wl_surface() else {
                 continue;
             };
             // Pinned windows live in screen space — hit-tested by
             // `pinned_window_under`, never by the canvas-space path.
-            if self.is_pinned(window) {
+            if entry.pinned {
                 continue;
             }
             // A window fullscreen on a different output isn't visible here; on
@@ -1378,9 +1378,7 @@ impl DriftWm {
                 }
             }
 
-            let Some(loc) = self.stage.position_of(window) else {
-                continue;
-            };
+            let loc = entry.position;
 
             // element_location returns the geometry origin, but surface_under
             // expects coords relative to the surface origin (which includes
@@ -1758,11 +1756,11 @@ impl DriftWm {
     ) -> Option<(DecoTarget, DecorationHit)> {
         let active = self.active_output();
 
-        // Iterate in z-order (topmost first, matching stage.windows().rev())
-        for element in self.stage.windows().rev() {
-            let window = match element {
+        // Iterate in z-order (topmost first, matching stage.entries().rev())
+        for entry in self.stage.entries().rev() {
+            let window = match entry.window {
                 StageWindow::Suspended(s) => {
-                    if let Some(hit) = self.suspended_decoration_hit(s, pos) {
+                    if let Some(hit) = self.suspended_decoration_hit(s, entry.position, pos) {
                         return Some((DecoTarget::Suspended(s.clone()), hit));
                     }
                     // Outside this suspended window's frame — a lower element
@@ -1776,7 +1774,7 @@ impl DriftWm {
             };
             // Pinned windows are screen-space; canvas-space decoration hit-test
             // doesn't apply (their SSD is handled via pinned_window_under).
-            if self.is_pinned(window) {
+            if entry.pinned {
                 continue;
             }
             // An off-output fullscreen window isn't visible here — and skipping
@@ -1791,9 +1789,7 @@ impl DriftWm {
             if self.root_hidden_by_deferred_adopt(&wl_surface) {
                 continue;
             }
-            let Some(loc) = self.stage.position_of(window) else {
-                continue;
-            };
+            let loc = entry.position;
 
             if let Some(hit) = self.decoration_hit_for(window, loc, pos) {
                 return Some((DecoTarget::Client(window.clone()), hit));
@@ -1897,17 +1893,15 @@ impl DriftWm {
         let active = self.active_output();
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
 
-        self.stage.windows().any(|element| match element {
-            StageWindow::Suspended(s) => self.stage.position_of(element).is_some_and(|loc| {
-                crate::decorations::resize_edge_at(
-                    pos,
-                    loc,
-                    s.size.get(),
-                    self.config.decorations.title_bar_height,
-                    border_width,
-                )
-                .is_some()
-            }),
+        self.stage.entries().any(|entry| match entry.window {
+            StageWindow::Suspended(s) => crate::decorations::resize_edge_at(
+                pos,
+                entry.position,
+                s.size.get(),
+                self.config.decorations.title_bar_height,
+                border_width,
+            )
+            .is_some(),
             StageWindow::Client(w) => {
                 let Some(wl_surface) = w.wl_surface() else {
                     return false;
@@ -1916,15 +1910,13 @@ impl DriftWm {
                 // hit-tests in screen space, an off-output fullscreen window is
                 // not visible here, and one awaiting a deferred adopt is not
                 // drawn at all.
-                if self.is_pinned(w)
+                if entry.pinned
                     || self.fullscreen_on_other_output(&wl_surface, &active)
                     || self.root_hidden_by_deferred_adopt(&wl_surface)
                 {
                     return false;
                 }
-                self.stage
-                    .position_of(w)
-                    .is_some_and(|loc| self.resize_margin_hit_for(w, loc, pos).is_some())
+                self.resize_margin_hit_for(w, entry.position, pos).is_some()
             }
         })
     }
@@ -1933,13 +1925,15 @@ impl DriftWm {
     /// outside the frame entirely. The whole content+chrome is an opaque hit
     /// target (Body / Label / TitleBar / CloseButton); the outer margin is a
     /// resize border. Pure geometry — suspended windows are never pinned or
-    /// fullscreen.
+    /// fullscreen. `loc` is the stand-in's canvas position, passed in for the
+    /// same reason `decoration_hit_for` takes one: every caller is a z-order
+    /// walk that already holds it.
     fn suspended_decoration_hit(
         &self,
         s: &Rc<SuspendedWindow>,
+        loc: Point<i32, Logical>,
         pos: Point<f64, smithay::utils::Logical>,
     ) -> Option<DecorationHit> {
-        let loc = self.stage.position_of(&StageWindow::Suspended(s.clone()))?;
         let size = s.size.get();
         // Every stand-in draws the same bar; a CSD-origin one shrank its body
         // under it, so the bar band and close button sit at the same offsets as

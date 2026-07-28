@@ -35,6 +35,38 @@ fn map_inserts_on_top_and_remap_raises() {
 }
 
 #[test]
+fn entries_mirror_windows_with_position_and_pin() {
+    let (mut stage, windows) = stage_with(4);
+    // Z-order that differs from creation order, so a reordering accessor can't
+    // pass by accident.
+    stage.raise(&windows[1]);
+    stage.set_pin(
+        &windows[2],
+        PinnedSite {
+            output: "DP-1".to_string(),
+            screen_pos: Point::from((3, 4)),
+        },
+    );
+
+    assert_eq!(
+        stage.entries().map(|e| e.window).collect::<Vec<_>>(),
+        stage.windows().collect::<Vec<_>>()
+    );
+    assert_eq!(stage.entries().len(), stage.windows().len());
+    assert_eq!(
+        stage.entries().rev().map(|e| e.window).collect::<Vec<_>>(),
+        stage.windows().rev().collect::<Vec<_>>()
+    );
+
+    for e in stage.entries() {
+        assert_eq!(Some(e.position), stage.position_of(e.window));
+        assert_eq!(e.pinned, stage.is_pinned(e.window));
+    }
+    // The pin actually reached an entry, so the check above isn't all-false.
+    assert!(stage.entries().any(|e| e.pinned));
+}
+
+#[test]
 fn map_assigns_stable_unique_ids() {
     let (mut stage, windows) = stage_with(2);
     let id0 = stage.id_of(&windows[0]).unwrap();

@@ -61,6 +61,16 @@ struct Entry<W> {
     pinned: Option<PinnedSite>,
 }
 
+/// One entry's element plus the per-entry facts every canvas-space hit-test
+/// walk asks of it. `entry` is a linear scan, so a walk that re-resolved
+/// `position_of` / `is_pinned` per element was quadratic in the window count —
+/// and a single pointer motion runs several such walks.
+pub struct StageEntry<'a, W> {
+    pub window: &'a W,
+    pub position: Point<i32, Logical>,
+    pub pinned: bool,
+}
+
 pub struct Stage<W: StageElement> {
     /// Z-order, bottom → top (matches `Space::elements`).
     entries: Vec<Entry<W>>,
@@ -185,6 +195,19 @@ impl<W: StageElement> Stage<W> {
         self.entries.iter().map(|e| &e.window)
     }
 
+    /// `windows()` with each element's position and pin state carried along, in
+    /// the same order. Hit-test walks take this so the facts arrive with the
+    /// element instead of costing a linear `entry` scan apiece.
+    pub fn entries(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = StageEntry<'_, W>> + ExactSizeIterator {
+        self.entries.iter().map(|e| StageEntry {
+            window: &e.window,
+            position: e.position,
+            pinned: e.pinned.is_some(),
+        })
+    }
+
     pub fn contains<Q>(&self, window: &Q) -> bool
     where
         W: PartialEq<Q>,
@@ -197,16 +220,6 @@ impl<W: StageElement> Stage<W> {
         W: PartialEq<Q>,
     {
         self.entry(window).map(|e| e.position)
-    }
-
-    /// Position and pin state from a single `entry` lookup. `entry` is a linear
-    /// scan and the pointer-motion hit-test asks both questions of every window
-    /// it walks.
-    pub fn position_and_pinned<Q>(&self, window: &Q) -> Option<(Point<i32, Logical>, bool)>
-    where
-        W: PartialEq<Q>,
-    {
-        self.entry(window).map(|e| (e.position, e.pinned.is_some()))
     }
 
     pub fn id_of<Q>(&self, window: &Q) -> Option<ElementId>
