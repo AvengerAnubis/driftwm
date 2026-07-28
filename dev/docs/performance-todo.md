@@ -147,32 +147,33 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   position, so the configured size is the rect that pairs with it — but it is a
   deliberate trade, not an oversight. The deeper issue is that a self-resize
   leaves fill membership claiming a rect the window no longer occupies.
-- **Input hit-testing is not visual-aware, so an animating window cannot be
-  clicked where it is drawn.** Every stage read in the input path is the
-  animation's *destination*: `topmost_under`'s `position_and_pinned`,
-  `element_under_skipping`'s, `decoration_under`'s and `surface_under`'s
-  `position_of` (`src/input/mod.rs`). The render path draws at
-  `geometry_visual_rect`, which has no consumer anywhere under `src/input/`. The
-  two rects are disjoint for the whole animation. For a fit the offset is
-  `old_size/2 - usable.size/2 + gap (+bar)` — independent of camera and position,
-  so a 800×600 window on a 1920×1080 usable area sits 548 px left and 204 px up
-  of its phantom. The title band is ~24 px, so a title-bar grab *cannot* land:
-  the press falls through `decoration_under` (the phantom's content occludes it),
-  matches the phantom body in `element_under`, and lands on click-to-focus.
-  Second symptom, worth fixing together: `surface_under` is stage-based too, so
-  the client receives the press at surface-local coordinates off by the same
-  offset — clicks during an animation reach the wrong part of the window.
-  The freeze is the worst phase: for up to `MAX_START_HOLD` (300 ms) the window
-  is perfectly *motionless* at its old position while the stage already holds the
-  new one, so divergence is at maximum and nothing on screen suggests anything is
-  in flight. Latent at default speeds (~120 ms, reads as a missed click); obvious
-  once `[effects] animation_speed` is lowered — at 0.02 it lasts ~4 s. Same root
-  family as the adopt/dismiss item above, but that one is a cosmetic one-frame
-  pop and this is the whole input layer. Fix: thread the visual rect into those
-  four stage reads, taking `geometry_visual_rect(id).loc` when a Canvas-space
-  entry is live and falling back to the stage position otherwise — the pattern
-  `window_screen_rect_on` (`src/state/window_animation_driver.rs`) already uses.
-  Check `geometry_space` first; that accessor's doc warns about Canvas vs Screen.
+- **Input hit-tests the animation's destination, not the drawn rect — and that is
+  by design.** Every stage read in the input path takes the destination:
+  `topmost_under`'s `position_and_pinned`, `element_under_skipping`'s,
+  `decoration_under`'s and `surface_under`'s `position_of` (`src/input/mod.rs`).
+  The render path draws at `geometry_visual_rect`, which has no consumer anywhere
+  under `src/input/`, so the two rects are disjoint for the whole animation — for
+  a fit, by `old_size/2 - usable.size/2 + gap (+bar)`, which puts an 800×600
+  window on a 1920×1080 usable area 548 px left and 204 px up of where it is
+  drawn. Recorded here because it *looks* like a bug and has been filed as one
+  twice.
+
+  The settled model: a window animation is eye candy over a state change that is
+  already complete. The window is at its destination the moment the action runs;
+  the picture is catching up. So hit-testing the destination is correct, and so
+  are the surface-local coordinates `surface_under` derives from it. A *camera*
+  animation is the opposite — the viewport genuinely is moving, so input tracks
+  it live, which is why the grab-install chokepoints below take the viewport out
+  of flight rather than freezing input.
+
+  The visible cost is that during an animation a window cannot be clicked where
+  it is drawn: at default speeds ~120 ms, reading as a missed click; obvious once
+  `[effects] animation_speed` is lowered — at 0.02 it lasts ~4 s. Going
+  visual-aware would mean threading `geometry_visual_rect(id).loc` into those four
+  reads (checking `geometry_space` first — that accessor's doc warns about Canvas
+  vs Screen), and it carries a non-obvious tax: the idle pointer-focus re-poll has
+  to be suppressed while any transition runs, or moving pixels drag enter/leave
+  across a stationary cursor. Do not reopen without revisiting the model first.
 - **A camera target armed *after* a resize grab installs still resizes the
   window.** `warp_pointer` (`src/state/viewport_animation.rs`) synthesizes real
   motion into a live grab to keep the pointer at a fixed *screen* position, so its
