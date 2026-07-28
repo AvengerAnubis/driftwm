@@ -1452,18 +1452,45 @@ fn a_token_re_presented_under_the_grab_stays_one_deferred_adopt() {
     client_close(&mut f, cid, &existing);
 }
 
+/// One drive of the assertion below. The hooks are `fn` pointers rather than
+/// closures because no case needs to capture anything.
+struct DeferredAdoptCase<'a> {
+    rules: &'a str,
+    /// Runs after the token is presented, before the first sized commit.
+    before_first_commit: fn(&mut Fixture, ClientId, &ClientSurface),
+    /// `Some(size)` when `rules` forces one and only starts matching at the
+    /// first sized commit: the rule configures there and defers the rest of
+    /// placement to the client's follow-up commit at that size, which runs the
+    /// whole block a second time. (A rule that already matched at the initial
+    /// zero-size commit spends its one-shot there instead, so the sized commit
+    /// is the only pass.)
+    size_pass: Option<(u16, u16)>,
+    /// Runs between the two placement passes, where the surface is back in
+    /// `pending_center` and a client request queues instead of applying.
+    before_size_pass: fn(&mut Fixture, ClientId, &ClientSurface),
+}
+
+impl Default for DeferredAdoptCase<'_> {
+    fn default() -> Self {
+        Self {
+            rules: "",
+            before_first_commit: |_, _, _| {},
+            size_pass: None,
+            before_size_pass: |_, _, _| {},
+        }
+    }
+}
+
 /// The first-commit path resolves adoption *ahead* of window rules and of the
 /// fullscreen/fit a client can queue before its first buffer, so an adopt it
 /// deferred under a stand-in drag must still beat them when it lands —
 /// otherwise something the user never aimed at the stand-in silently destroys
 /// the thing they are holding. Drives one case end to end: relaunch, grab the
-/// stand-in, let the app reach its first sized commit under the grab, release.
-fn assert_a_deferred_first_commit_adopt_wins(
-    rules: &str,
-    before_first_sized_commit: impl Fn(&mut Fixture, ClientId, &ClientSurface),
-) {
+/// stand-in, let the app reach its first sized commit under the grab (and, for
+/// a size rule, the second placement pass that commit sets up), release.
+fn assert_a_deferred_first_commit_adopt_wins(case: DeferredAdoptCase) {
     let tmp = TempDir::new();
-    let mut f = Fixture::with_config(config(rules));
+    let mut f = Fixture::with_config(config(case.rules));
     f.add_output(1, (1920, 1080));
     inject_cache(&mut f, &tmp, &["myapp"]);
     origin_view(&mut f);
@@ -1483,8 +1510,13 @@ fn assert_a_deferred_first_commit_adopt_wins(
     let cid = f.add_client();
     let surface = begin_window(&mut f, cid, "myapp");
     present_token(&mut f, cid, &surface, token);
-    before_first_sized_commit(&mut f, cid, &surface);
+    (case.before_first_commit)(&mut f, cid, &surface);
     finish_window(&mut f, cid, &surface, (300, 200));
+    if let Some(size) = case.size_pass {
+        (case.before_size_pass)(&mut f, cid, &surface);
+        // Acking the rule's forced size is the second placement pass.
+        settle_resize(&mut f, cid, &surface, size);
+    }
 
     let placed = mapped_client(&mut f, "myapp").expect("the window mapped");
     assert!(
@@ -1494,6 +1526,10 @@ fn assert_a_deferred_first_commit_adopt_wins(
     assert!(
         !f.state().is_window_fullscreen(&placed) && !f.state().is_pinned(&placed),
         "the membership was suppressed for the deferral, not established and then torn down"
+    );
+    assert!(
+        f.state().camera_target().is_none(),
+        "the placement staged no camera flight: a pan warps the pointer into the live grab"
     );
     assert_eq!(
         f.state().debug_counters()["deferred_adoptions"],
@@ -1526,38 +1562,84 @@ fn assert_a_deferred_first_commit_adopt_wins(
 
 #[test]
 fn a_fullscreen_rule_loses_to_a_deferred_first_commit_adopt() {
-    assert_a_deferred_first_commit_adopt_wins(
-        r#"
+    assert_a_deferred_first_commit_adopt_wins(DeferredAdoptCase {
+        rules: r#"
 [[window_rules]]
 app_id = "myapp"
 fullscreen = true
 "#,
-        |_, _, _| {},
-    );
+        ..Default::default()
+    });
 }
 
 #[test]
 fn a_pin_rule_loses_to_a_deferred_first_commit_adopt() {
-    assert_a_deferred_first_commit_adopt_wins(
-        r#"
+    assert_a_deferred_first_commit_adopt_wins(DeferredAdoptCase {
+        rules: r#"
 [[window_rules]]
 app_id = "myapp"
 pinned_to_screen = true
 "#,
-        |_, _, _| {},
-    );
+        ..Default::default()
+    });
 }
 
 #[test]
 fn a_widget_rule_loses_to_a_deferred_first_commit_adopt() {
-    assert_a_deferred_first_commit_adopt_wins(
-        r#"
+    assert_a_deferred_first_commit_adopt_wins(DeferredAdoptCase {
+        rules: r#"
 [[window_rules]]
 app_id = "myapp"
 widget = true
 "#,
-        |_, _, _| {},
-    );
+        ..Default::default()
+    });
+}
+
+/// A title-matched rule starts applying only once the app names its window,
+/// which for many toolkits is the commit that brings the first buffer — so the
+/// forced `size` configures *there* and hands the rest of placement to a second
+/// pass. That pass can no longer re-derive the adopt (the token stash was spent
+/// on the first, the identity fallback has lapsed), so the suppression has to
+/// outlive the pass that established it or the rule pins the window after all.
+/// `size` + `pinned_to_screen` is a common rule shape.
+#[test]
+fn a_pin_rule_with_a_size_loses_to_a_deferred_first_commit_adopt() {
+    assert_a_deferred_first_commit_adopt_wins(DeferredAdoptCase {
+        rules: r#"
+[[window_rules]]
+title = "ready"
+pinned_to_screen = true
+size = [500, 400]
+"#,
+        before_first_commit: name_the_window,
+        size_pass: Some((500, 400)),
+        ..Default::default()
+    });
+}
+
+/// The fullscreen rule through the same two passes.
+#[test]
+fn a_fullscreen_rule_with_a_size_loses_to_a_deferred_first_commit_adopt() {
+    assert_a_deferred_first_commit_adopt_wins(DeferredAdoptCase {
+        rules: r#"
+[[window_rules]]
+title = "ready"
+fullscreen = true
+size = [500, 400]
+"#,
+        before_first_commit: name_the_window,
+        size_pass: Some((500, 400)),
+        ..Default::default()
+    });
+}
+
+/// Give the window the title the size rules above match on, after its initial
+/// commit — that is what leaves the rule's one-shot size configure unspent until
+/// the first sized commit, and so splits placement across two passes.
+fn name_the_window(f: &mut Fixture, cid: ClientId, surface: &ClientSurface) {
+    f.client(cid).window(surface).set_title("ready");
+    f.roundtrip(cid);
 }
 
 /// A client that asks for fullscreen before its first buffer is the same
@@ -1565,10 +1647,104 @@ widget = true
 /// do exactly this on relaunch.
 #[test]
 fn a_client_queued_fullscreen_loses_to_a_deferred_first_commit_adopt() {
-    assert_a_deferred_first_commit_adopt_wins("", |f, cid, surface| {
-        f.client(cid).window(surface).set_fullscreen(None);
-        f.roundtrip(cid);
+    assert_a_deferred_first_commit_adopt_wins(DeferredAdoptCase {
+        before_first_commit: |f, cid, surface| {
+            f.client(cid).window(surface).set_fullscreen(None);
+            f.roundtrip(cid);
+        },
+        ..Default::default()
     });
+}
+
+/// The same request landing *between* the two placement passes: the forced-size
+/// configure puts the surface back in `pending_center`, so it queues exactly as a
+/// pre-first-buffer one does and the second pass would apply it.
+#[test]
+fn a_fullscreen_queued_between_placement_passes_loses_to_a_deferred_adopt() {
+    assert_a_deferred_first_commit_adopt_wins(DeferredAdoptCase {
+        rules: r#"
+[[window_rules]]
+title = "ready"
+size = [500, 400]
+"#,
+        before_first_commit: name_the_window,
+        size_pass: Some((500, 400)),
+        before_size_pass: |f, cid, surface| {
+            f.client(cid).window(surface).set_fullscreen(None);
+            f.roundtrip(cid);
+        },
+    });
+}
+
+/// The flush re-runs the whole decision for every stashed entry, and it is
+/// scheduled by any grab release anywhere — so it fires while this entry's own
+/// grab is still held. A relaunched window that fullscreened itself mid-drag
+/// then meets the carve-out, which must not destroy the stand-in still under the
+/// user's cursor. Once the drag really ends the carve-out is the right answer.
+#[test]
+fn a_flush_under_the_live_grab_leaves_the_dragged_stand_in_alone() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    // No camera override: output-aligned, the fullscreen park below is a no-op
+    // and the blur-generation counter returns to baseline.
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (800, 500), (400, 300));
+    f.state().relaunch_suspended(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+
+    f.state().arm_interactive_move(&sid);
+    let cid = f.add_client();
+    let surface = begin_window(&mut f, cid, "myapp");
+    present_token(&mut f, cid, &surface, token);
+    finish_window(&mut f, cid, &surface, (300, 200));
+    assert_eq!(f.state().debug_counters()["deferred_adoptions"], 1);
+
+    // The relaunched window fullscreens itself while the drag is still going —
+    // a membership acquired during the deferral, which the flush answers by
+    // dismissing the stand-in.
+    f.client(cid).window(&surface).set_fullscreen(None);
+    f.roundtrip(cid);
+    let placed = mapped_client(&mut f, "myapp").unwrap();
+    assert!(
+        f.state().is_window_fullscreen(&placed),
+        "precondition: the client's own request went through"
+    );
+
+    // An unrelated window's move grab ends: that alone schedules the flush.
+    let other_cid = f.add_client();
+    let other_surface = map_window(&mut f, other_cid, "other", (200, 200));
+    let other = window_by_app_id(&mut f, "other").unwrap();
+    f.state().arm_interactive_move(&other);
+    f.state().disarm_interactive_move(&other);
+    f.pump(1);
+
+    assert!(
+        suspended_present(&mut f),
+        "the stand-in the user is still dragging survived the flush"
+    );
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        1,
+        "the entry deferred again instead of resolving under the live grab"
+    );
+
+    // The drag ends: now the fullscreen carve-out gets to answer.
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+    assert!(
+        !suspended_present(&mut f),
+        "with no grab left, a window that went fullscreen drops the stand-in"
+    );
+    assert!(
+        f.state().is_window_fullscreen(&placed),
+        "the window kept the fullscreen it asked for"
+    );
+    assert_eq!(f.state().debug_counters()["deferred_adoptions"], 0);
+
+    client_close(&mut f, other_cid, &other_surface);
+    client_close(&mut f, cid, &surface);
 }
 
 /// The other half of `element_under_interactive_grab`: a client resize, witnessed

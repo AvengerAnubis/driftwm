@@ -79,7 +79,9 @@ pub struct RelaunchMarker(pub SuspendedId);
 /// window, so every carve-out is a live question about where that window ended
 /// up. The first-commit path resolves adoption *ahead* of window rules, so an
 /// adopt stashed there has already beaten them and only a membership acquired
-/// during the deferral can still call it off.
+/// during the deferral can still call it off — the placement block keeps the
+/// membership arms off for as long as the stash holds the surface, so that
+/// membership can only come from the client or the user.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AdoptOrigin {
     FirstCommit,
@@ -379,6 +381,16 @@ impl DriftWm {
         sid: SuspendedId,
         origin: AdoptOrigin,
     ) {
+        // Transient, unlike the carve-outs below: the pending relaunch keeps
+        // running so the grab's release can still land the adopt. Answered
+        // first because the flush re-runs this for *every* stashed entry and
+        // any grab release anywhere schedules it — a carve-out decided ahead of
+        // this check would dismiss a stand-in the user is still dragging, over
+        // a membership the relaunched window took meanwhile.
+        if self.adopt_fights_a_grab(window, sid) {
+            self.defer_adoption(root, sid, origin);
+            return;
+        }
         // A window already fullscreen or pinned is where policy put it; adopting
         // would rip it out of that membership, so drop the stand-in instead and
         // leave the window alone. A rule-placed widget, and a dialog/modal owned
@@ -399,12 +411,6 @@ impl DriftWm {
             self.dismiss_suspended(sid);
             return;
         }
-        // Transient, unlike the carve-outs above: the pending relaunch keeps
-        // running so the grab's release can still land the adopt.
-        if self.adopt_fights_a_grab(window, sid) {
-            self.defer_adoption(root, sid, origin);
-            return;
-        }
         self.adopt_relaunched(window, root, sid);
         if let Some(toplevel) = window.toplevel() {
             toplevel.send_configure();
@@ -416,6 +422,12 @@ impl DriftWm {
     /// the superseded relaunch falls back to its TTL. Order is insertion order,
     /// so two windows of one app racing for the same stand-in resolve by which
     /// deferred first rather than by hash order.
+    ///
+    /// Keyed on the surface alone, so a later placement pass — where the token
+    /// stash is spent and only the identity fallback can still match — may
+    /// supersede the entry with a *different* stand-in of the same app (FIFO
+    /// over the pending relaunches), retargeting the adopt away from the one the
+    /// token named.
     pub(crate) fn defer_adoption(
         &mut self,
         root: &WlSurface,
@@ -463,6 +475,10 @@ impl DriftWm {
             {
                 continue;
             }
+            // No stage window behind the surface — destroyed, or unmapped to
+            // hide — so the entry leaves with the drain rather than waiting for
+            // a remap: the stand-in stays as a stale duplicate, and a window
+            // that does come back is placed fresh.
             let Some(window) = self.window_for_surface(&entry.root) else {
                 continue;
             };

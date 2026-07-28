@@ -270,22 +270,34 @@ impl CompositorHandler for DriftWm {
                     // under the grab driving it. Place the window normally for
                     // now — a coherent state it can sit in indefinitely — and
                     // move it into the slot once the grab lets go.
-                    let mut defer_adopt = false;
                     if let Some(sid) = adopted_sid
                         && self.adopt_fights_a_grab(&window, sid)
                     {
                         self.defer_adoption(&root, sid, crate::state::AdoptOrigin::FirstCommit);
-                        // Asymmetric on purpose: `adopted_sid` is cleared so the
-                        // chain below actually places the window, while
-                        // `defer_adopt` keeps the rule arms that establish a
-                        // *membership* off — pinning it or sending it fullscreen
-                        // for the duration is exactly what the flush's carve-outs
-                        // would then dismiss the stand-in for. The client's own
-                        // queued fullscreen/fit goes for the same reason the
-                        // immediate adopt drops it: on this path an adopt beats
-                        // both.
+                        // Asymmetric on purpose: clearing `adopted_sid` lets the
+                        // chain below place the window, while `defer_adopt`
+                        // below keeps the arms that establish a *membership*
+                        // off — pinning it or sending it fullscreen for the
+                        // duration is exactly what the flush's carve-outs would
+                        // then dismiss the stand-in for.
                         adopted_sid = None;
-                        defer_adopt = true;
+                    }
+                    // Read off the stash rather than off the branch above: a
+                    // rule that forces a size configures and runs this whole
+                    // block again on the follow-up commit, and by then the
+                    // token stash is spent and the identity fallback may have
+                    // lapsed — a pass that re-derived the deferral from the
+                    // match would miss it and establish the membership.
+                    let defer_adopt = self.deferred_adoptions.iter().any(|d| d.root == root);
+                    if defer_adopt {
+                        // The client's own queued fullscreen/fit goes too, on
+                        // every pass: `pending_center` is set again between
+                        // passes, so a request arriving there queues rather
+                        // than applying. Unlike the immediate adopt's drop
+                        // (which trades the request for the slot the window
+                        // does end up in), a deferred adopt may never land — a
+                        // client that asked before its first buffer then keeps
+                        // the plain window it was given.
                         self.pending_fullscreen.remove(&root);
                         self.pending_fit.remove(&root);
                     }
@@ -1022,7 +1034,10 @@ impl DriftWm {
             // The grab's `unset` is too early for this: a client resize is
             // witnessed by the surface's own `ResizeState`, which only reaches
             // `Idle` on the commit above, so scheduling at release would flush
-            // into a still-live grab and simply defer again.
+            // into a still-live grab and simply defer again. A resize that nets
+            // no size change has nothing to configure, so this hook waits on
+            // whatever the client commits next — up to the relaunch TTL, whose
+            // end state is the documented stale duplicate.
             self.schedule_deferred_adoptions();
         } else if size_changed {
             // Still resizing: carry the new committed size forward so the next

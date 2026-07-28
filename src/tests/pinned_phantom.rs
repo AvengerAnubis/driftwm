@@ -162,6 +162,61 @@ fn margin_contexts(rules: &str) -> (BindingContext, BindingContext) {
     )
 }
 
+/// Whether the resize margin just outside a pinned window, and just outside a
+/// canvas one, hands the window pointer focus — the same two points
+/// `margin_contexts` asks the binding question about, put to the focus cascade.
+fn margin_takes_pointer_focus(rules: &str) -> (bool, bool) {
+    let mut f = Fixture::with_config(config(rules));
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "pin", (400, 300));
+    let pin = window_by_app_id(&mut f, "pin").unwrap();
+    let site = f.state().stage.pin_of(&pin).unwrap().screen_pos;
+
+    map_window(&mut f, id, "canvas", (400, 300));
+    let canvas = window_by_app_id(&mut f, "canvas").unwrap();
+    let origin = Point::from((5000, 5000));
+    f.state()
+        .map_window(StageWindow::Client(canvas.clone()), origin, false);
+
+    let pinned_screen = pt(site.x as f64 - 4.0, site.y as f64 + 150.0);
+    let pinned_canvas = to_canvas(&mut f, pinned_screen);
+    let unpinned_canvas = pt(origin.x as f64 - 4.0, origin.y as f64 + 150.0);
+    let unpinned_screen = to_screen(&mut f, unpinned_canvas);
+    let pinned = f
+        .state()
+        .pointer_focus_under(pinned_screen, pinned_canvas)
+        .is_some();
+    let unpinned = f
+        .state()
+        .pointer_focus_under(unpinned_screen, unpinned_canvas)
+        .is_some();
+    (pinned, unpinned)
+}
+
+/// Control for the scenario below: with the border live the margin is the
+/// window's own chrome on both paths, so it takes pointer focus either way.
+#[test]
+fn the_live_resize_margin_takes_pointer_focus_pinned_or_not() {
+    assert_eq!(
+        margin_takes_pointer_focus(PIN_RULE),
+        (true, true),
+        "a grabbable border is the window's, so the pointer over it is the window's"
+    );
+}
+
+/// The focus half of the inert margin: nothing is drawn there and nothing can be
+/// grabbed there, so the pointer must not land on the window — on the pinned
+/// path (screen space) or the canvas one alike.
+#[test]
+fn an_inert_resize_margin_takes_no_pointer_focus_pinned_or_not() {
+    assert_eq!(
+        margin_takes_pointer_focus(PIN_RULE_NO_BORDER_RESIZE),
+        (false, false),
+        "with no border to grab, the margin is empty space whether the window is pinned or not"
+    );
+}
+
 /// Control for the scenario below: with the border live the margin is chrome,
 /// so both answers are on-window and the point really is in the band.
 #[test]
@@ -401,6 +456,12 @@ fn a_tap_in_the_phantom_band_does_not_take_the_pinned_window() {
         "precondition: nothing but the phantom rect covers the tap point"
     );
 
+    // The recorded tap time is the control below; a double tap clears it, so
+    // pin down that it starts clear and the touch is what sets it.
+    assert!(
+        f.state().touch_state.last_three_finger_tap.is_none(),
+        "precondition: no tap has been recorded yet"
+    );
     touch_down(&mut f, band, 0);
     touch_up(&mut f, 0);
     f.double_roundtrip(id);
@@ -446,6 +507,12 @@ fn a_tap_on_a_pinned_window_as_drawn_targets_it() {
         "precondition: the canvas window covers the tap point"
     );
 
+    // The recorded tap time is the control below; a double tap clears it, so
+    // pin down that it starts clear and the touch is what sets it.
+    assert!(
+        f.state().touch_state.last_three_finger_tap.is_none(),
+        "precondition: no tap has been recorded yet"
+    );
     touch_down(&mut f, on_pin, 0);
     touch_up(&mut f, 0);
     f.double_roundtrip(id);
