@@ -26,8 +26,10 @@ use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 use crate::state::StageWindow;
 
 use super::client::ClientId;
-use super::input_backend::{FakeDevice, click, touch_down, touch_up};
-use super::{Fixture, config, is_activated, map_window, window_by_app_id};
+use super::input_backend::{FakeDevice, click, pointer_to, press, release, touch_down, touch_up};
+use super::{
+    Fixture, config, give_ssd, is_activated, map_window, server_surface, window_by_app_id,
+};
 
 /// Every window here is 400x300 so a rect test needs only its origin.
 const W: f64 = 400.0;
@@ -194,6 +196,67 @@ fn margin_takes_pointer_focus(rules: &str) -> (bool, bool) {
     (pinned, unpinned)
 }
 
+/// Binding context 4 px above a *server-decorated* canvas window's title bar —
+/// inside the margin the frame adds above the bar, outside every band that is
+/// drawn. A server frame reads its margin through its own arm, so the CSD pair
+/// above can't answer for it.
+fn ssd_margin_context(rules: &str) -> BindingContext {
+    let mut f = Fixture::with_config(config(rules));
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "canvas", (400, 300));
+    let window = window_by_app_id(&mut f, "canvas").unwrap();
+    give_ssd(&mut f, &window);
+    let origin = Point::from((5000, 5000));
+    f.state()
+        .map_window(StageWindow::Client(window), origin, false);
+
+    let bar = f.state().config.decorations.title_bar_height as f64;
+    f.state()
+        .pointer_context(pt(origin.x as f64 + 200.0, origin.y as f64 - bar - 4.0))
+}
+
+/// Whether a left press in a canvas window's left-edge resize margin starts a
+/// compositor resize, driven through the real button dispatch. `Resizing` is
+/// seeded by `begin_client_resize` and nothing else, so this reports the resize
+/// half of the band rather than merely that some grab took the pointer.
+fn margin_press_starts_resize(rules: &str) -> bool {
+    use crate::grabs::ResizeState;
+    use smithay::wayland::compositor::with_states;
+    use std::cell::RefCell;
+
+    let mut f = Fixture::with_config(config(rules));
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "canvas", (400, 300));
+    let window = window_by_app_id(&mut f, "canvas").unwrap();
+    // Canvas == screen, so the margin point below is on the viewport for the
+    // pointer to reach.
+    f.state().with_output_state(|os| {
+        os.zoom = 1.0;
+        os.camera = pt(0.0, 0.0);
+    });
+    let origin = Point::from((500, 400));
+    f.state()
+        .map_window(StageWindow::Client(window.clone()), origin, false);
+
+    let mouse = FakeDevice::mouse();
+    pointer_to(
+        &mut f,
+        &mouse,
+        pt(origin.x as f64 - 4.0, origin.y as f64 + 150.0),
+    );
+    press(&mut f, &mouse, BTN_LEFT);
+    let resizing = with_states(&server_surface(&window), |states| {
+        states
+            .data_map
+            .get::<RefCell<ResizeState>>()
+            .is_some_and(|s| matches!(*s.borrow(), ResizeState::Resizing { .. }))
+    });
+    release(&mut f, &mouse, BTN_LEFT);
+    resizing
+}
+
 /// The margin belongs to the window on both hit-test paths whatever
 /// `resize_on_border` says. The option decides whether the band *resizes*, not
 /// whether it is part of the window: `surface_under` and `pinned_window_under`
@@ -213,8 +276,9 @@ fn the_resize_margin_takes_pointer_focus_whether_or_not_it_resizes() {
     );
 }
 
-/// Control for the scenario below: with the border live the margin is chrome,
-/// so both answers are on-window and the point really is in the band.
+/// The option at its default: with the border live the margin is chrome, so
+/// both answers are on-window and the point really is in the band. Paired with
+/// the scenario below, which changes only what the option is set to.
 #[test]
 fn the_live_resize_margin_binds_as_window_pinned_or_not() {
     assert_eq!(
@@ -224,18 +288,47 @@ fn the_live_resize_margin_binds_as_window_pinned_or_not() {
     );
 }
 
-/// `resize_on_border = false` splits the two paths, and the split is observable.
-/// The option gates the decoration channel (`decoration_hit_for`), which is the
-/// only arm that reads a *canvas* window's margin for binding context; a pinned
-/// window's margin comes from `pinned_window_under`, which is ungated. So the
-/// same 8 px band binds on-window around a pin and on-canvas around a canvas
-/// window.
+/// `resize_on_border = false` leaves membership alone: the band is the window's
+/// on both paths, it just can't be dragged. The option gates the decoration
+/// channel (`decoration_hit_for`), which is the only arm that reads a *canvas*
+/// window's margin for binding context, so that path carries an ungated
+/// membership arm to match the pinned one — whose margin comes from
+/// `pinned_window_under` and was never gated.
 #[test]
-fn an_inert_resize_margin_binds_as_window_only_around_a_pin() {
+fn an_inert_resize_margin_binds_as_window_pinned_or_not() {
     assert_eq!(
         margin_contexts(PIN_RULE_NO_BORDER_RESIZE),
-        (BindingContext::OnWindow, BindingContext::OnCanvas),
-        "the option gates the resize channel, and only the canvas path reads the margin through it"
+        (BindingContext::OnWindow, BindingContext::OnWindow),
+        "an inert band is still the window's, so the same ring binds on-window either side"
+    );
+}
+
+/// The same for a server-decorated window, whose margin wraps the title bar as
+/// well and comes from the other arm of the geometry.
+#[test]
+fn a_resize_margin_above_a_server_frame_binds_as_window_either_way() {
+    assert_eq!(
+        (
+            ssd_margin_context(PIN_RULE),
+            ssd_margin_context(PIN_RULE_NO_BORDER_RESIZE)
+        ),
+        (BindingContext::OnWindow, BindingContext::OnWindow),
+        "the strip above an SSD title bar is the window's whether it resizes or not"
+    );
+}
+
+/// The other half of that separation: what the option *does* gate still works.
+/// The same inert band starts no resize, so membership moved to on-window
+/// without the drag following it.
+#[test]
+fn an_inert_resize_margin_starts_no_resize() {
+    assert!(
+        margin_press_starts_resize(PIN_RULE),
+        "control: with the option on, a press in the margin drags the edge"
+    );
+    assert!(
+        !margin_press_starts_resize(PIN_RULE_NO_BORDER_RESIZE),
+        "with the option off the band is inert, whatever it binds as"
     );
 }
 

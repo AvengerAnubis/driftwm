@@ -1826,7 +1826,38 @@ impl DriftWm {
         pos: Point<f64, Logical>,
     ) -> Option<DecorationHit> {
         let wl_surface = window.wl_surface()?;
-        let bar_height = self.config.decorations.title_bar_height;
+
+        if self
+            .decorations
+            .contains_key(&DecorationKey::Surface(wl_surface.id()))
+        {
+            let bar_height = self.config.decorations.title_bar_height;
+            let width = window.geometry().size.w;
+            if crate::decorations::close_button_contains(pos, loc, width, bar_height) {
+                return Some(DecorationHit::CloseButton);
+            }
+            if crate::decorations::title_bar_contains(pos, loc, width, bar_height) {
+                return Some(DecorationHit::TitleBar);
+            }
+        }
+        if !self.config.resize_on_border {
+            return None;
+        }
+        self.resize_margin_hit_for(window, loc, pos)
+    }
+
+    /// The compositor's resize margin around `window`: the band strictly outside
+    /// its rect, and outside its title bar too when the frame is ours. Ungated —
+    /// the margin is part of the window whether or not `resize_on_border` lets it
+    /// be dragged, so membership asks here while `decoration_hit_for` reaches it
+    /// only when the option is on.
+    fn resize_margin_hit_for(
+        &self,
+        window: &Window,
+        loc: Point<i32, Logical>,
+        pos: Point<f64, Logical>,
+    ) -> Option<DecorationHit> {
+        let wl_surface = window.wl_surface()?;
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
         let size = window.geometry().size;
 
@@ -1834,33 +1865,68 @@ impl DriftWm {
             .decorations
             .contains_key(&DecorationKey::Surface(wl_surface.id()))
         {
-            if crate::decorations::close_button_contains(pos, loc, size.w, bar_height) {
-                return Some(DecorationHit::CloseButton);
-            }
-            if crate::decorations::title_bar_contains(pos, loc, size.w, bar_height) {
-                return Some(DecorationHit::TitleBar);
-            }
-            if self.config.resize_on_border
-                && let Some(edge) =
-                    crate::decorations::resize_edge_at(pos, loc, size, bar_height, border_width)
-            {
-                return Some(DecorationHit::ResizeBorder(edge));
-            }
-        } else {
-            // CSD: only the outer resize margin (see surface_under). The
-            // geometry test leads so the rule lookup and the fullscreen scan run
-            // only for a point actually in the margin — the walk above visits
-            // every window on every pointer motion.
-            if self.config.resize_on_border
-                && let Some(edge) =
-                    crate::decorations::resize_edge_at(pos, loc, size, 0, border_width)
-                && !driftwm::config::applied_rule(&wl_surface).is_some_and(|r| r.widget)
-                && !self.is_window_fullscreen(window)
-            {
-                return Some(DecorationHit::ResizeBorder(edge));
-            }
+            let bar_height = self.config.decorations.title_bar_height;
+            return crate::decorations::resize_edge_at(pos, loc, size, bar_height, border_width)
+                .map(DecorationHit::ResizeBorder);
         }
-        None
+
+        // CSD: only the outer resize margin (see surface_under). The geometry
+        // test leads so the rule lookup and the fullscreen scan run only for a
+        // point actually in the margin — the walks that call this visit every
+        // window on every pointer motion.
+        let edge = crate::decorations::resize_edge_at(pos, loc, size, 0, border_width)?;
+        if driftwm::config::applied_rule(&wl_surface).is_some_and(|r| r.widget)
+            || self.is_window_fullscreen(window)
+        {
+            return None;
+        }
+        Some(DecorationHit::ResizeBorder(edge))
+    }
+
+    /// Whether `pos` lands in the resize margin of any canvas element. The
+    /// channels that report that margin — `decoration_hit_for` and
+    /// `suspended_decoration_hit` — are gated on `resize_on_border` because they
+    /// answer what the band *does*; `pointer_context` asks this instead so the
+    /// band's membership stays the window's either way. A pinned window needs no
+    /// arm here: `pinned_window_under` already answers for its margin ungated, in
+    /// screen space.
+    ///
+    /// No occlusion pass: anything drawn over a margin is itself on-window, so
+    /// the answer is the same whichever of the two the pointer is really over.
+    fn resize_margin_under(&self, pos: Point<f64, Logical>) -> bool {
+        let active = self.active_output();
+        let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
+
+        self.stage.windows().any(|element| match element {
+            StageWindow::Suspended(s) => self.stage.position_of(element).is_some_and(|loc| {
+                crate::decorations::resize_edge_at(
+                    pos,
+                    loc,
+                    s.size.get(),
+                    self.config.decorations.title_bar_height,
+                    border_width,
+                )
+                .is_some()
+            }),
+            StageWindow::Client(w) => {
+                let Some(wl_surface) = w.wl_surface() else {
+                    return false;
+                };
+                // The same skips the decoration walk makes: a pinned window
+                // hit-tests in screen space, an off-output fullscreen window is
+                // not visible here, and one awaiting a deferred adopt is not
+                // drawn at all.
+                if self.is_pinned(w)
+                    || self.fullscreen_on_other_output(&wl_surface, &active)
+                    || self.root_hidden_by_deferred_adopt(&wl_surface)
+                {
+                    return false;
+                }
+                self.stage
+                    .position_of(w)
+                    .is_some_and(|loc| self.resize_margin_hit_for(w, loc, pos).is_some())
+            }
+        })
     }
 
     /// Which region of a suspended window's frame `pos` lands in, or `None` if

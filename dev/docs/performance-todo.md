@@ -159,29 +159,32 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   deliberate trade, not an oversight. The deeper issue is that a self-resize
   leaves fill membership claiming a rect the window no longer occupies.
 - **`resize_on_border` decides whether the border resizes, not whether it is part
-  of the window — an open decision, not a bug.** The option gates
-  `decoration_hit_for` and `pinned_decoration_under` (`src/input/mod.rs`), which
-  produce `DecorationHit::ResizeBorder` — *resize* behaviour. It does not gate
-  `surface_under` or `pinned_window_under`, which decide *membership*: pointer
-  focus, binding context, pick target. So with the option off the 8 px band is
-  still the window's, it just can't be dragged. Whether "the border is not for
-  resizing" should also mean "the border is not part of the window" is a
-  user-facing call nobody has made. Two things constrain it. Making the band fall
-  through is not a no-op: `pointer_focus_under` continues past `surface_under`
-  into `canvas_layer_under`, widget windows and then `Bottom`/`Background`, so a
-  wallpaper client would take an enter/leave pair every time the cursor crossed
-  any window's ring, and that arm sets `pointer_over_layer`, which makes
-  `maybe_hover_focus` return early — `focus_follows_mouse` would be *suppressed*
-  in the ring rather than falling through to canvas. And `render/shaders.rs` draws
-  the border `border_width_logical` *outside* the window rect, i.e. inside this
-  band, so `[decorations] border_width > 0` plus a fall-through would give a
-  visible border that is click- and hover-through. The split the current answer
-  leaves is observable and pinned by
-  `an_inert_resize_margin_binds_as_window_only_around_a_pin`
-  (`src/tests/pinned_phantom.rs`): with the option off, the ring around a
-  **pinned** window reports `OnWindow` for binding context while the ring around a
-  **canvas** window reports `OnCanvas`, because the canvas path reads its margin
-  through the gated decoration channel and the pinned path does not.
+  of the window — settled, and the band is uniformly the window's.** The option
+  gates `decoration_hit_for` and `pinned_decoration_under` (`src/input/mod.rs`),
+  which produce `DecorationHit::ResizeBorder` — *resize* behaviour. It does not
+  gate `surface_under` or `pinned_window_under`, which decide *membership*:
+  pointer focus, binding context, pick target. So with the option off the 8 px
+  band is still the window's, it just can't be dragged. It used to be the
+  window's only *around a pin*: binding context for a canvas window read its
+  margin through the gated decoration channel, so the same ring bound `OnWindow`
+  around a pin and `OnCanvas` around a canvas window. `pointer_context` now asks
+  `resize_margin_under`, an ungated membership walk, whenever the option is off,
+  which closes the split in the additive direction — the band gains `OnWindow`,
+  nothing starts falling through. `an_inert_resize_margin_binds_as_window_pinned_or_not`
+  and its SSD sibling (`src/tests/pinned_phantom.rs`) pin the membership half,
+  `an_inert_resize_margin_starts_no_resize` the resize half.
+
+  The opposite direction — letting the inert band fall through to whatever is
+  behind it — was rejected, and these two constraints are why. It is not a no-op:
+  `pointer_focus_under` continues past `surface_under` into `canvas_layer_under`,
+  widget windows and then `Bottom`/`Background`, so a wallpaper client would take
+  an enter/leave pair every time the cursor crossed any window's ring, and that
+  arm sets `pointer_over_layer`, which makes `maybe_hover_focus` return early —
+  `focus_follows_mouse` would be *suppressed* in the ring rather than falling
+  through to canvas. And `render/shaders.rs` draws the border
+  `border_width_logical` *outside* the window rect, i.e. inside this band, so
+  `[decorations] border_width > 0` plus a fall-through would give a visible
+  border that is click- and hover-through.
 - **Input hit-tests the animation's destination, not the drawn rect — and that is
   by design.** Every stage read in the input path takes the destination:
   `topmost_under`'s `position_and_pinned`, `element_under_skipping`'s,

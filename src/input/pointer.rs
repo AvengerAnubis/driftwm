@@ -52,10 +52,17 @@ impl DriftWm {
         // SSD chrome and the CSD resize margin sit outside the surface bbox, so
         // `element_under` misses them; count them as OnWindow so on-window bindings
         // apply over the chrome, not just the client surface.
+        //
+        // `decoration_under` reaches a canvas element's resize margin only while
+        // `resize_on_border` is on, so with the option off that band needs its own
+        // ungated arm — otherwise the same ring binds on-window around a pinned
+        // window (whose margin arrives above, ungated) and on-canvas around a
+        // canvas one.
         let over_window = over_pinned
             || self.element_under(pos).is_some()
             || self.canvas_layer_under(pos).is_some()
-            || self.decoration_under(pos).is_some();
+            || self.decoration_under(pos).is_some()
+            || (!self.config.resize_on_border && self.resize_margin_under(pos));
         if over_window {
             BindingContext::OnWindow
         } else {
