@@ -82,51 +82,16 @@ Open bugs, not perf work. Behaviour that reads like a bug but is settled — wha
 input hit-tests, what a configured size means, the inert resize band — lives in
 [caveats.md](caveats.md).
 
-- **A fill dispatched between a resize release and the settle commit loses its
-  placement.** `handle_resize_commit` (`src/handlers/compositor.rs`) maps the
-  window back to the grab's `initial_window_location`, discarding the
-  `map_window` the fill did in between, so a filled window settles at the
-  pre-resize corner instead of the gap-inset one the fill computed (verified: fill
-  places 12,12 with `snap_gap = 12`, the settle puts it back at 0,0). The cached
-  snap rect does *not* disagree — the settle's own `refresh_stable_snap_rect`
-  re-derives it from the wrong position — which is precisely why nothing
-  downstream notices. Pre-existing;
-  `unfill_after_fullscreen_exit_drops_the_stale_recenter_so_the_next_resize_does_not_teleport`
-  walks straight through it.
-- **Adopt and dismiss read the stage position, not the in-flight visual.**
-  Both take `stage.position_of` — the destination — ignoring
-  `geometry_visual_rect`, while `animate_element_move_from` is careful to seed
-  from the entry's current visual. Adopting or dismissing a stand-in that a
-  neighbouring resize pushed within the last few hundred ms teleports the
-  departing chrome to the end of the slide in one frame: a pop inside the
-  crossfade that exists to prevent exactly that. Cosmetic, narrow window.
-- **A fullscreen dispatched before a fit's ack saves a mismatched rect.**
-  `enter_fullscreen` (`src/state/fullscreen.rs`) pairs `saved_location`, read
-  live from the stage, with a `saved_size` read from `window.geometry().size` on
-  the fit arm — but `fit_window` maps to the fit location without waiting for the
-  ack, so a fullscreen in that gap saves the fit-era position against the pre-fit
-  size and the exit restores the two together. The fill arm had the identical
-  bug against `restore_size` and now reads `configured_window_size` instead;
-  fit was left alone because nothing forced it. Verified in the fixture: fit
-  un-acked, then fullscreen, then exit, restores 800×600 at the fit position.
-- **A camera target armed *after* a resize grab installs still resizes the
-  window.** `warp_pointer` (`src/state/viewport_animation.rs`) synthesizes real
-  motion into a live grab to keep the pointer at a fixed *screen* position, so its
-  *canvas* position moves, and `apply_resize` measures that delta against a fixed
-  canvas anchor. The two grab-install chokepoints (`arm_interactive_move` in
-  `src/state/mod.rs`, `begin_client_resize` in `src/state/resize.rs`) take the
-  viewport out of flight, so a grab installed *during* a glide is safe — but that
-  is a snapshot of the moment the grab took over, not an invariant. Anything
-  arming `camera_target`/`zoom_target` while the grab is held resumes warping:
-  keyboard and IPC navigation (`src/input/actions.rs`, `src/ipc/mod.rs`), a new
-  window mapping (`src/handlers/compositor.rs`), an activation request
-  (`src/handlers/xdg_shell.rs`), the output-removal warp
-  (`src/state/output.rs`). The **move** counterpart of this is deliberate and
-  hardware-confirmed: hold a window, then jump to a bookmark or home, and the
-  window is carried along — that is the feature, not a bug, and it is why the
-  chokepoints cancel only at install. Only the resize arm is wrong; a held border
-  is not a handle on the window. The fix is to re-anchor `ResizeGrab`'s
-  `start_data.location` by the camera delta, not to gate the producers.
+- **Adopting a stand-in reads the stage position, not the in-flight visual.**
+  `adopt_relaunched` takes `stage.position_of` — the destination — so adopting a
+  stand-in that a neighbouring cluster shift pushed within the last few hundred ms
+  teleports the departing chrome to the end of the slide in one frame. The dismiss
+  half of this is fixed; adopt is not, because seeding only the fade leaves the
+  two crossfade halves offset for its whole life (worse than the pop), and seeding
+  the incoming window too means converting a deliberate hold — `from == target`,
+  which holds the slot until the client acks — into a finite leg in exactly the
+  window that hold exists to cover, plus reassembling the CSD bar offset by hand.
+  Cosmetic, narrow, and not the one-liner it looks like.
 - **`reflow_grown_snapped_window`'s stale-frame guard reads *unacked* configures,
   so an early-acking client goes unguarded.** The owed-resize bail
   (`src/handlers/compositor.rs`) scans `pending_configures()`, which empties the
