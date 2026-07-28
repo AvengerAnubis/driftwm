@@ -560,6 +560,9 @@ impl XdgShellHandler for DriftWm {
             };
         let constraints = crate::grabs::SizeConstraints::for_window(&window);
         let locked_ratio = crate::grabs::locked_ratio_for(&window, initial_window_size);
+        let grab_output = pinned_output.unwrap_or(output);
+        let (start_screen, start_zoom) =
+            crate::grabs::resize_screen_anchor(&grab_output, start_data.location);
         let grab = ResizeGrab {
             start_data,
             target: ClusterMember::Client(window),
@@ -567,7 +570,9 @@ impl XdgShellHandler for DriftWm {
             initial_window_location,
             initial_window_size,
             last_window_size: initial_window_size,
-            output: pinned_output.unwrap_or(output),
+            output: grab_output,
+            start_screen,
+            start_zoom,
             last_clamped_location,
             snap: driftwm::layout::snap::SnapState::default(),
             constraints,

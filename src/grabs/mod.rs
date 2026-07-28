@@ -146,7 +146,7 @@ pub use navigate_grab::NavigateGrab;
 pub use pan_grab::PanGrab;
 pub use resize_grab::{
     ResizeGrab, ResizeState, SizeConstraints, has_bottom, has_left, has_right, has_top,
-    locked_ratio_for,
+    locked_ratio_for, resize_screen_anchor,
 };
 pub use screen_space_click::ScreenSpaceClickGrab;
 pub use touch_gesture_grab::TouchGestureGrab;

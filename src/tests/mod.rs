@@ -395,7 +395,7 @@ fn install_client_resize_grab(
     output: smithay::output::Output,
     cluster: crate::state::ClusterResizeSnapshot,
 ) {
-    use crate::grabs::{ResizeGrab, SizeConstraints};
+    use crate::grabs::{ResizeGrab, SizeConstraints, resize_screen_anchor};
     use crate::state::{ClusterMember, StageWindow};
     use driftwm::layout::snap::SnapState;
     use smithay::input::pointer::{Focus, GrabStartData};
@@ -417,6 +417,7 @@ fn install_client_resize_grab(
         None,
     );
 
+    let (start_screen, start_zoom) = resize_screen_anchor(&output, start);
     let grab = ResizeGrab {
         start_data: GrabStartData {
             focus: None,
@@ -429,6 +430,8 @@ fn install_client_resize_grab(
         initial_window_size,
         last_window_size: initial_window_size,
         output,
+        start_screen,
+        start_zoom,
         last_clamped_location: start,
         snap: SnapState::default(),
         constraints: SizeConstraints::for_window(window),

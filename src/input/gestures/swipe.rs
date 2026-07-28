@@ -588,6 +588,7 @@ impl DriftWm {
         let serial = SERIAL_COUNTER.next_serial();
         self.raise_and_focus_element(&element, serial);
 
+        let (start_screen, start_zoom) = crate::grabs::resize_screen_anchor(&output, pos);
         let grab = ResizeGrab {
             start_data: GrabStartData {
                 focus: None,
@@ -600,6 +601,8 @@ impl DriftWm {
             initial_window_size: initial_size,
             last_window_size: initial_size,
             output,
+            start_screen,
+            start_zoom,
             last_clamped_location: pos,
             snap: SnapState::default(),
             constraints,

@@ -180,6 +180,15 @@ pub struct ResizeGrab {
     pub initial_window_size: Size<i32, Logical>,
     pub last_window_size: Size<i32, Logical>,
     pub output: Output,
+    /// Grab-start cursor position in *screen* space, paired with the zoom it was
+    /// taken at. The resize applies measure the drag against these instead of a
+    /// frozen canvas point, so a camera flight armed after the grab installed
+    /// slides the canvas under a still anchor instead of reading as drag input.
+    /// The move grab deliberately does the opposite — a held window rides the
+    /// viewport. Build both with [`resize_screen_anchor`] on the grab's own
+    /// output, which is not always the active one.
+    pub start_screen: Point<f64, Logical>,
+    pub start_zoom: f64,
     pub last_clamped_location: Point<f64, Logical>,
     pub snap: SnapState,
     /// Declared min/max size, read once at grab start. Used to clamp
@@ -209,6 +218,22 @@ pub struct ResizeGrab {
     /// Snapshotted from the window's size at grab start. Always `None` for a
     /// stand-in (the rule lookup needs a surface).
     pub locked_ratio: Option<f64>,
+}
+
+/// Project a canvas-space grab origin onto `output`'s screen space, returning it
+/// with that output's zoom — the seed for [`ResizeGrab::start_screen`] and
+/// [`ResizeGrab::start_zoom`]. `output` must be the one the grab will carry: a
+/// grab over a screen-pinned window takes the pin's output, and the anchor read
+/// through any other one lands hundreds of pixels off.
+pub fn resize_screen_anchor(
+    output: &Output,
+    location: Point<f64, Logical>,
+) -> (Point<f64, Logical>, f64) {
+    let (camera, zoom) = {
+        let os = output_state(output);
+        (os.camera, os.zoom)
+    };
+    (canvas_to_screen(CanvasPos(location), camera, zoom).0, zoom)
 }
 
 /// Check if `edges` includes a horizontal/vertical component via raw bit values.
@@ -423,6 +448,7 @@ impl ResizeGrab {
         pinned_initial_screen_pos: Option<Point<i32, Logical>>,
         locked_ratio: Option<f64>,
     ) -> Self {
+        let (start_screen, start_zoom) = resize_screen_anchor(&output, touch_start.location);
         Self {
             start_data: GrabStartData {
                 focus: None,
@@ -435,6 +461,8 @@ impl ResizeGrab {
             initial_window_size,
             last_window_size: initial_window_size,
             output,
+            start_screen,
+            start_zoom,
             last_clamped_location: touch_start.location,
             snap: SnapState::default(),
             constraints,
@@ -472,8 +500,7 @@ impl ResizeGrab {
         self.last_clamped_location =
             canvas::screen_to_canvas(canvas::ScreenPos(clamped_screen), camera, zoom).0;
 
-        let start_screen = canvas_to_screen(CanvasPos(self.start_data.location), camera, zoom).0;
-        let delta = clamped_screen - start_screen;
+        let delta = clamped_screen - self.start_screen;
 
         let mut new_w = self.initial_window_size.w;
         let mut new_h = self.initial_window_size.h;
@@ -530,7 +557,20 @@ impl ResizeGrab {
         element: &StageWindow,
         location: Point<f64, Logical>,
     ) {
-        let delta = location - self.start_data.location;
+        let (camera, zoom) = {
+            let os = output_state(&self.output);
+            (os.camera, os.zoom)
+        };
+        // Measured screen-to-screen against a frozen screen anchor, then scaled
+        // back to canvas units by the zoom the grab started at. The live zoom
+        // would rescale the whole drag whenever a zoom flight moved it, which is
+        // the same defect one axis over.
+        let screen_delta =
+            canvas_to_screen(CanvasPos(location), camera, zoom).0 - self.start_screen;
+        let delta = Point::<f64, Logical>::from((
+            screen_delta.x / self.start_zoom,
+            screen_delta.y / self.start_zoom,
+        ));
 
         let mut new_w = self.initial_window_size.w;
         let mut new_h = self.initial_window_size.h;
@@ -561,7 +601,6 @@ impl ResizeGrab {
         // Snap active resize edges to nearby windows. Skipped under a locked
         // ratio: snapping one axis would fight the ratio-derived axis.
         if data.config.snap_enabled && self.locked_ratio.is_none() {
-            let zoom = output_state(&self.output).zoom;
             #[allow(clippy::mutable_key_type)]
             let excludes = self.cluster_resize.exclude_set(&data.stage);
             let (others, self_bar, self_bw) = data.snap_targets(element, &excludes);

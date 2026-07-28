@@ -641,3 +641,209 @@ fn edge_pan_still_drives_the_camera_under_a_live_move_grab() {
     }
     end_grab(&mut f);
 }
+
+/// Drag the right edge out by a fractional amount, so the grab is carrying a
+/// real displacement rather than sitting on its origin where every delta reads
+/// as zero regardless. Fractional because the delta feeds an `as i32`
+/// truncation and the screen round-trip is only exact to within an ulp.
+const DRAG_OUT: Point<f64, Logical> = Point::new(60.5, 0.0);
+
+/// Cancelling the flight at grab install only covers the flights already
+/// running. Sixteen producers can arm one mid-drag — a keyboard pan, a bookmark
+/// jump, a window mapping — and the warp that follows is not the user's hand.
+#[test]
+fn a_camera_flight_armed_after_a_resize_grab_does_not_resize_the_window() {
+    let mut f = Fixture::new();
+    let (id, surface) = one_window(&mut f);
+    let window = window_by_app_id(&mut f, "a").unwrap();
+
+    let grab_at = Point::from((790.0, 450.0));
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let serial = SERIAL_COUNTER.next_serial();
+    assert!(
+        f.state().start_compositor_resize_with_edge(
+            &pointer,
+            &window,
+            grab_at,
+            BTN_LEFT,
+            serial,
+            Some(xdg_toplevel::ResizeEdge::Right),
+            false,
+        ),
+        "precondition: the resize grab installed"
+    );
+    motion(&mut f, grab_at + DRAG_OUT);
+    f.double_roundtrip(id);
+    let before = configure_trace(&mut f, id, &surface);
+
+    arm_distant_flight(&mut f);
+    assert!(
+        f.state().seat.get_pointer().unwrap().is_grabbed(),
+        "precondition: the pointer is grabbed, so a warp reaches the grab \
+         synchronously instead of taking the deferred branch"
+    );
+    for _ in 0..5 {
+        f.state().apply_camera_animation(TICK);
+    }
+    f.double_roundtrip(id);
+
+    assert_eq!(
+        configure_trace(&mut f, id, &surface),
+        before,
+        "the canvas slid under a held edge without resizing it"
+    );
+    end_grab(&mut f);
+}
+
+/// The zoom half. The cursor has to be off the grab origin first: parked on it
+/// the screen delta is zero at any zoom, and an anchor that divided by the
+/// *live* zoom would sail through.
+#[test]
+fn a_zoom_flight_armed_after_a_resize_grab_does_not_rescale_the_window() {
+    let mut f = Fixture::new();
+    let (id, surface) = one_window(&mut f);
+    let window = window_by_app_id(&mut f, "a").unwrap();
+
+    let grab_at = Point::from((790.0, 450.0));
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let serial = SERIAL_COUNTER.next_serial();
+    assert!(
+        f.state().start_compositor_resize_with_edge(
+            &pointer,
+            &window,
+            grab_at,
+            BTN_LEFT,
+            serial,
+            Some(xdg_toplevel::ResizeEdge::Right),
+            false,
+        ),
+        "precondition: the resize grab installed"
+    );
+    motion(&mut f, grab_at + DRAG_OUT);
+    f.double_roundtrip(id);
+    let before = configure_trace(&mut f, id, &surface);
+    assert_eq!(
+        before.1,
+        (460, 300),
+        "precondition: the drag is displaced from the grab origin, so a zoom \
+         change has something to rescale"
+    );
+
+    f.state().with_output_state(|os| os.zoom_target = Some(0.5));
+    run_zoom_animation(&mut f);
+    f.double_roundtrip(id);
+
+    assert_eq!(
+        f.state().zoom(),
+        0.5,
+        "precondition: the zoom flight actually ran"
+    );
+    assert_eq!(
+        configure_trace(&mut f, id, &surface),
+        before,
+        "the drag stayed the size the hand made it, at the new zoom"
+    );
+    end_grab(&mut f);
+}
+
+/// The pinned arm freezes its anchor too. It already measured in screen space,
+/// but re-projecting a canvas anchor through the live camera every motion drifts
+/// it by the camera delta scaled by zoom.
+#[test]
+fn a_camera_flight_armed_after_a_pinned_resize_grab_does_not_resize_the_window() {
+    let config = Config::from_toml(
+        r#"
+        [[window_rules]]
+        app_id = "a"
+        pinned_to_screen = true
+        size = [400, 300]
+    "#,
+    )
+    .unwrap();
+    let mut f = Fixture::with_config(config);
+    f.skip_baseline_check();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "a", (400, 300));
+    origin_view(&mut f);
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    let site = f
+        .state()
+        .stage
+        .pin_of(&window)
+        .expect("precondition: the rule pinned the window to the screen")
+        .screen_pos;
+
+    // Camera and zoom are the identity here, so the pin's screen rect and its
+    // canvas rect coincide and the grab point can be written in either.
+    let grab_at = Point::from((site.x as f64 + 390.0, site.y as f64 + 150.0));
+    let pointer = f.state().seat.get_pointer().unwrap();
+    let serial = SERIAL_COUNTER.next_serial();
+    assert!(
+        f.state().start_compositor_resize_with_edge(
+            &pointer,
+            &window,
+            grab_at,
+            BTN_LEFT,
+            serial,
+            Some(xdg_toplevel::ResizeEdge::Right),
+            false,
+        ),
+        "precondition: the pinned resize grab installed"
+    );
+    motion(&mut f, grab_at + DRAG_OUT);
+    f.double_roundtrip(id);
+    let before = configure_trace(&mut f, id, &surface);
+
+    arm_distant_flight(&mut f);
+    for _ in 0..5 {
+        f.state().apply_camera_animation(TICK);
+    }
+    f.double_roundtrip(id);
+
+    assert_eq!(
+        configure_trace(&mut f, id, &surface),
+        before,
+        "a pinned window ignores the camera it is pinned away from"
+    );
+    end_grab(&mut f);
+}
+
+/// The move grab is the deliberate opposite, and the ordering that breaks the
+/// resize grab is the one that makes this work: hold a window, jump somewhere
+/// else, and the window comes along.
+#[test]
+fn a_camera_flight_armed_after_a_move_grab_still_carries_the_window() {
+    let mut f = Fixture::new();
+    let (_id, _surface) = one_window(&mut f);
+    let element = StageWindow::Client(window_by_app_id(&mut f, "a").unwrap());
+
+    let grab_at = Point::from((600.0, 450.0));
+    assert!(
+        f.state().try_start_gesture_move(grab_at, false),
+        "precondition: the move grab installed"
+    );
+    motion(&mut f, grab_at);
+    assert_eq!(
+        f.state().stage.position_of(&element),
+        Some(Point::from((400, 300))),
+        "precondition: the grab itself moved nothing"
+    );
+
+    arm_distant_flight(&mut f);
+    for _ in 0..5 {
+        f.state().apply_camera_animation(TICK);
+    }
+
+    let travelled = f.state().camera().x;
+    assert!(
+        travelled > 100.0,
+        "precondition: the flight moved the camera a long way, not a hair"
+    );
+    let position = f.state().stage.position_of(&element).unwrap();
+    assert!(
+        (position.x as f64 - (400.0 + travelled)).abs() <= 1.0,
+        "the held window rode the camera to {travelled}, landing at {position:?}"
+    );
+    end_grab(&mut f);
+}

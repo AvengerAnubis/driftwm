@@ -953,6 +953,7 @@ impl DriftWm {
         } else {
             ClusterResizeSnapshot::empty()
         };
+        let (start_screen, start_zoom) = crate::grabs::resize_screen_anchor(&output, pos);
         let grab = ResizeGrab {
             start_data,
             target: ClusterMember::Suspended(s.id),
@@ -961,6 +962,8 @@ impl DriftWm {
             initial_window_size: size,
             last_window_size: size,
             output,
+            start_screen,
+            start_zoom,
             last_clamped_location: pos,
             snap: driftwm::layout::snap::SnapState::default(),
             constraints: crate::grabs::SizeConstraints::for_suspended(),
@@ -1253,6 +1256,7 @@ impl DriftWm {
         };
         let constraints = crate::grabs::SizeConstraints::for_window(window);
         let locked_ratio = crate::grabs::locked_ratio_for(window, initial_window_size);
+        let (start_screen, start_zoom) = crate::grabs::resize_screen_anchor(&output, pos);
         let grab = ResizeGrab {
             start_data,
             target: ClusterMember::Client(window.clone()),
@@ -1261,6 +1265,8 @@ impl DriftWm {
             initial_window_size,
             last_window_size: initial_window_size,
             output,
+            start_screen,
+            start_zoom,
             last_clamped_location: pos,
             snap: driftwm::layout::snap::SnapState::default(),
             constraints,
