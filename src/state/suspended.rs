@@ -1029,15 +1029,20 @@ impl DriftWm {
             (None, None, None)
         };
 
-        let rect = self.departing_standin_rect(&element);
+        // Only the location is taken from the animation's in-flight visual: the
+        // fade draws the chrome at the stand-in's own size, so asking about any
+        // other size would answer a question the frame composer never poses.
+        let loc = self
+            .departing_standin_rect(&element)
+            .map(|r| r.loc.to_i32_round());
         if self.backend.is_some()
-            && let Some(rect) = rect
-            && self.canvas_rect_drawable(rect.to_i32_round())
+            && let Some(loc) = loc
+            && self.canvas_rect_drawable(Rectangle::new(loc, s.size.get()))
         {
             let focused = self.gated_suspended_focus() == Some(id);
             self.standin_fades.push(crate::render::StandInFade {
                 suspended: s.clone(),
-                loc: rect.loc.to_i32_round(),
+                loc,
                 launching,
                 focused,
                 shrink: self.config.effects.animation_scale,

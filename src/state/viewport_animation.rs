@@ -39,13 +39,18 @@ impl DriftWm {
             os.zoom_animation_anchor = None;
             os.momentum.stop();
         }
-        // Per-output, so only a launch pending on *this* output is disarmed —
-        // an unconditional clear would let a fit or a navigation on one screen
-        // swallow the finger lift on another.
+        self.disarm_momentum_launch_on(&output.name());
+    }
+
+    /// Drop a pending momentum auto-launch, but only the one stored for
+    /// `output_name`. The deadline is per-output, so an unconditional clear
+    /// would let a cancel or a finger lift on one screen swallow a launch still
+    /// pending on another.
+    fn disarm_momentum_launch_on(&mut self, output_name: &str) {
         if self
             .momentum_deadline
             .as_ref()
-            .is_some_and(|(_, name)| *name == output.name())
+            .is_some_and(|(_, name)| name == output_name)
         {
             self.momentum_deadline = None;
         }
@@ -397,13 +402,14 @@ impl DriftWm {
 
     /// Launch momentum on the active output — called when input ends (finger lift, gesture end).
     pub fn launch_momentum(&mut self) {
-        self.momentum_deadline = None;
-        self.with_output_state(|os| os.momentum.launch());
+        if let Some(output) = self.active_output() {
+            self.launch_momentum_on(&output);
+        }
     }
 
     /// Launch momentum on a specific output.
     pub fn launch_momentum_on(&mut self, output: &smithay::output::Output) {
-        self.momentum_deadline = None;
+        self.disarm_momentum_launch_on(&output.name());
         super::output_state(output).momentum.launch();
     }
 

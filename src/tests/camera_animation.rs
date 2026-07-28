@@ -687,6 +687,11 @@ fn a_camera_flight_armed_after_a_resize_grab_does_not_resize_the_window() {
     }
     f.double_roundtrip(id);
 
+    assert!(
+        f.state().camera().x > 100.0,
+        "precondition: the flight moved the camera a long way — an unchanged \
+         trace means nothing if nothing happened"
+    );
     assert_eq!(
         configure_trace(&mut f, id, &surface),
         before,
@@ -801,6 +806,11 @@ fn a_camera_flight_armed_after_a_pinned_resize_grab_does_not_resize_the_window()
     }
     f.double_roundtrip(id);
 
+    assert!(
+        f.state().camera().x > 100.0,
+        "precondition: the flight moved the camera a long way — an unchanged \
+         trace means nothing if nothing happened"
+    );
     assert_eq!(
         configure_trace(&mut f, id, &surface),
         before,
@@ -1031,5 +1041,41 @@ fn cancelling_one_output_leaves_anothers_pending_launch_armed() {
     assert!(
         !coasting(&out2),
         "so the cancelled burst never coasts after the fact"
+    );
+}
+
+/// An explicit launch disarms per-output for the same reason: a finger lift
+/// reported on one screen must not swallow the auto-launch another screen's
+/// burst is still waiting on.
+#[test]
+fn launching_one_output_leaves_anothers_pending_launch_armed() {
+    let mut f = Fixture::new();
+    f.skip_baseline_check();
+    let out1 = f.add_output(1, (1920, 1080));
+    let out2 = f.add_output(2, (1280, 720));
+    assert_eq!(
+        f.state().active_output(),
+        Some(out1.clone()),
+        "precondition: the lift below lands on the output that was never panned"
+    );
+
+    pan_burst(&mut f, &out2, 0);
+    assert!(
+        f.state().momentum_deadline.is_some(),
+        "precondition: a launch is pending on the second output"
+    );
+
+    // The finger-lift path, which targets the active output.
+    f.state().launch_momentum();
+    assert!(
+        f.state().momentum_deadline.is_some(),
+        "a lift on the other output leaves it armed"
+    );
+
+    std::thread::sleep(PAST_MOMENTUM_DEADLINE);
+    f.pump(1);
+    assert!(
+        coasting(&out2),
+        "so the burst still gets the auto-launch it was waiting for"
     );
 }

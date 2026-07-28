@@ -5210,11 +5210,34 @@ fn a_dismissed_stand_in_departs_from_its_mid_slide_picture_not_its_destination()
     );
     let element = standin_element(&mut f, sid);
 
-    let seed = Point::from((200, 200));
+    // Slide across the viewport first and stop partway. Reading at t=0 proves
+    // nothing: the seed is still exactly the from-rect on the first frame, so
+    // the picture and either end coincide.
+    let start = Point::from((200, 200));
+    f.state()
+        .map_window(element.clone(), Point::from((1500, 200)), false);
+    f.state().animate_element_move_from(&element, start, None);
+    for _ in 0..3 {
+        f.state().tick_window_animations(TICK);
+    }
+
+    let midway = f
+        .state()
+        .departing_standin_rect(&element)
+        .expect("the stand-in is still on the stage")
+        .loc;
+    assert!(
+        midway.x > start.x as f64 && midway.x < 1500.0,
+        "the departing rect is the leg's live picture, between where the slide \
+         began and where it is headed: {midway:?}"
+    );
+
+    // Now re-aim it off every viewport, which is where reading the destination
+    // costs the animation outright rather than merely misplacing it.
     f.state()
         .map_window(element.clone(), Point::from((60000, 60000)), false);
-    f.state().animate_element_move_from(&element, seed, None);
-
+    f.state()
+        .animate_element_move_from(&element, Point::from((1500, 200)), None);
     let destination = Rectangle::new(Point::from((60000, 60000)), Size::from((300, 200)));
     assert!(
         !f.state().canvas_rect_drawable(destination),
@@ -5224,14 +5247,15 @@ fn a_dismissed_stand_in_departs_from_its_mid_slide_picture_not_its_destination()
     let departing = f
         .state()
         .departing_standin_rect(&element)
-        .expect("the stand-in is still on the stage");
+        .expect("the stand-in is still on the stage")
+        .loc;
     assert_eq!(
-        departing.loc,
-        seed.to_f64(),
-        "the fade departs from the picture mid-slide, not from the destination"
+        departing, midway,
+        "the re-aim carried the picture forward instead of jumping it to either end"
     );
     assert!(
-        f.state().canvas_rect_drawable(departing.to_i32_round()),
+        f.state()
+            .canvas_rect_drawable(Rectangle::new(departing.to_i32_round(), (300, 200).into())),
         "so the dismiss fades it instead of skipping it as undrawable"
     );
 }
