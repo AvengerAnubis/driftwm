@@ -430,12 +430,13 @@ impl DriftWm {
     }
 
     /// Snapshot `w`'s current `SnapRect` into `stable_snap_rects`. Call on
-    /// settled events: initial map, grab end, post-unfit recenter, the commit
-    /// that settles a relaunch adopt to the size it configured, fit/
-    /// unfit-snapped cluster members. Fit/unfit primaries are cached by
-    /// those paths directly (configure not yet acked, so `geometry().size`
-    /// would be wrong here). The cached rect outlives mid-teardown geometry
-    /// changes and is consulted by `first_spatially_related_in_history`.
+    /// settled events: initial map, grab end, post-unfit recenter, a deferred
+    /// adopt's reveal, the commit that settles a relaunch adopt to the size it
+    /// configured, fit/unfit-snapped cluster members. Fit/unfit primaries are
+    /// cached by those paths directly (configure not yet acked, so
+    /// `geometry().size` would be wrong here). The cached rect outlives
+    /// mid-teardown geometry changes and is consulted by
+    /// `first_spatially_related_in_history`.
     pub fn refresh_stable_snap_rect(&mut self, w: &StageWindow) {
         let Some(rect) = self.snap_rect_for(w) else {
             return;

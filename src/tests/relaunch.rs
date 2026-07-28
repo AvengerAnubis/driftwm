@@ -505,9 +505,8 @@ fn adopt_early_ack_straggler_keeps_the_slot_beside_a_neighbor() {
 }
 
 /// The same early-ack straggler with nothing gap-adjacent to the stand-in: the
-/// reflow needs a neighbor to anchor re-placement, which is why hardware only
-/// ever saw the jump beside another window. Pins that the fix did not simply
-/// move the failure onto the lone-window case.
+/// reflow needs a neighbor to anchor re-placement, so a lone window must ride
+/// out the straggler untouched.
 #[test]
 fn adopt_early_ack_straggler_keeps_the_slot_without_a_neighbor() {
     use smithay::reexports::wayland_server::Resource;
@@ -2720,10 +2719,10 @@ fn a_hidden_adopt_does_not_swallow_a_click_on_the_chrome_beneath_it() {
 }
 
 /// `center-window` with nothing focused centers the nearest canvas element, and
-/// change A makes that the common arm by suppressing the deferred adopt's focus
-/// — so without the canvas-eligibility skip a single keypress flies the camera
-/// to an invisible window. The stand-in the user is dragging is the nearest
-/// element that can legitimately answer.
+/// suppressing a deferred adopt's focus makes that the common arm — so without
+/// the canvas-eligibility skip a single keypress flies the camera to an
+/// invisible window. The stand-in the user is dragging is the nearest element
+/// that can legitimately answer.
 #[test]
 fn center_window_never_flies_the_camera_to_a_hidden_adopt() {
     let tmp = TempDir::new();
