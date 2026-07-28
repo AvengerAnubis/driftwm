@@ -582,6 +582,80 @@ fn client_resize_configures_repositions_and_settles() {
     );
 }
 
+/// The top/left compensation is measured per commit against the size that
+/// commit replaces, so a drag the client acks in several steps lands exactly
+/// where one grown-from-the-grab-start step would: the opposite edges never
+/// move, however many commits the delta is spread over.
+#[test]
+fn a_top_left_resize_holds_its_opposite_edges_across_every_commit() {
+    let mut f = Fixture::with_config(config_resize_binding());
+    let out = f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let id = f.add_client();
+    let csurface = map_window(&mut f, id, "c", (400, 300));
+    let window = window_by_app_id(&mut f, "c").unwrap();
+    f.state().map_window(
+        StageWindow::Client(window.clone()),
+        Point::from((400, 300)),
+        true,
+    );
+    let ssurface = server_surface(&window);
+
+    // Grab the top-left corner: the right edge sits at 800, the bottom at 600,
+    // and both must stay there for the whole drag.
+    install_client_resize_grab(
+        &mut f,
+        &window,
+        xdg_toplevel::ResizeEdge::TopLeft,
+        pt(400.0, 300.0),
+        out,
+        ClusterResizeSnapshot::empty(),
+    );
+
+    for (drag_to, expected) in [
+        (pt(300.0, 250.0), Point::from((300, 250))),
+        (pt(250.0, 200.0), Point::from((250, 200))),
+        (pt(200.0, 150.0), Point::from((200, 150))),
+    ] {
+        motion(&mut f, drag_to);
+        f.double_roundtrip(id);
+        adopt_last_configure(&mut f, id, &csurface);
+        let pos = f
+            .state()
+            .stage
+            .position_of(&StageWindow::Client(window.clone()))
+            .unwrap();
+        assert_eq!(
+            (
+                pos,
+                pos + Point::from((window.geometry().size.w, window.geometry().size.h))
+            ),
+            (expected, Point::from((800, 600))),
+            "every commit moves the dragged corner and leaves the opposite one at (800, 600)"
+        );
+    }
+
+    release(&mut f);
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &csurface);
+    assert!(
+        matches!(resize_state(&ssurface), ResizeState::Idle),
+        "the final commit settles the resize back to Idle"
+    );
+    assert_eq!(
+        f.state()
+            .stage
+            .position_of(&StageWindow::Client(window.clone())),
+        Some(Point::from((200, 150))),
+        "the settle commit at an unchanged size leaves the window where the drag left it"
+    );
+    assert_eq!(
+        f.state().stage.restore_size(&window),
+        Some(Size::from((600, 450))),
+        "and anchors the restore size to the user's final choice"
+    );
+}
+
 /// A client dying mid-resize degrades the grab to a pass-through: the cluster
 /// cascade stops (a neighbor no longer moves) and release cleans up with no
 /// panic.

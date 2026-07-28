@@ -970,31 +970,35 @@ impl DriftWm {
 
         let current_geo = window.geometry();
 
-        // Compute from initial position to avoid cumulative drift.
-        if let Some(initial_screen_pos) = initial_screen_pos {
+        // Compensate incrementally from wherever the window is now, against the
+        // size this commit replaces. The only job here is to hold the opposite
+        // edge still across one size change; deriving the position absolutely
+        // from the grab start would also undo anything that placed the window
+        // between the release and this commit (a fill, a fit, an exit, an IPC
+        // move), and the settle can be owed indefinitely.
+        if initial_screen_pos.is_some() {
             // Pinned: top/left-edge resize moves `screen_pos` so the opposite
             // edge stays fixed. The Space loc is re-synced here directly because
             // the per-frame loc-sync only fires on camera changes.
-            let mut new_sp = initial_screen_pos;
-            if has_top(edges) {
-                new_sp.y = initial_screen_pos.y + (initial_window_size.h - current_geo.size.h);
-            }
-            if has_left(edges) {
-                new_sp.x = initial_screen_pos.x + (initial_window_size.w - current_geo.size.w);
-            }
-            let output_name = self.stage.pin_of(window).map(|site| site.output.clone());
-            if let Some(name) = output_name {
+            if let Some(site) = self.stage.pin_of(window).cloned() {
+                let mut new_sp = site.screen_pos;
+                if has_top(edges) {
+                    new_sp.y = site.screen_pos.y + (last_committed_size.h - current_geo.size.h);
+                }
+                if has_left(edges) {
+                    new_sp.x = site.screen_pos.x + (last_committed_size.w - current_geo.size.w);
+                }
                 self.stage.set_pin(
                     window,
                     driftwm::stage::PinnedSite {
-                        output: name.clone(),
+                        output: site.output.clone(),
                         screen_pos: new_sp,
                     },
                 );
                 // Output gone: keep the screen_pos update, skip only the
                 // loc re-anchor — the tail below must still run to reset
                 // ResizeState.
-                if let Some(output) = self.output_by_name(&name) {
+                if let Some(output) = self.output_by_name(&site.output) {
                     let (camera, zoom) = {
                         let os = crate::state::output_state(&output);
                         (os.camera, os.zoom)
@@ -1009,15 +1013,18 @@ impl DriftWm {
                     self.map_window(window.clone(), canvas, false);
                 }
             }
-        } else {
-            let mut new_loc = initial_window_location;
+        } else if let Some(current_pos) = self.stage.position_of(window) {
+            // `if let`, not an early return on `None`: the tail below has to run
+            // whatever happens here, or `WaitingForLastCommit` is stranded and
+            // every later commit re-runs the settle. The map stays unconditional
+            // inside it — it doubles as the resize's z-raise, and skipping it
+            // when the delta is zero would silently drop that raise.
+            let mut new_loc = current_pos;
             if has_top(edges) {
-                new_loc.y =
-                    initial_window_location.y + (initial_window_size.h - current_geo.size.h);
+                new_loc.y = current_pos.y + (last_committed_size.h - current_geo.size.h);
             }
             if has_left(edges) {
-                new_loc.x =
-                    initial_window_location.x + (initial_window_size.w - current_geo.size.w);
+                new_loc.x = current_pos.x + (last_committed_size.w - current_geo.size.w);
             }
             self.map_window(window.clone(), new_loc, false);
         }

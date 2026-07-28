@@ -558,6 +558,68 @@ size = [400, 300]
     end_swipe(&mut f);
 }
 
+/// The pinned settle compensates per commit, exactly like the canvas one, so a
+/// top-left drag the client acks in several steps holds the pin's right and
+/// bottom screen edges still through every one of them.
+#[test]
+fn a_top_left_pinned_resize_holds_its_opposite_edges_across_every_commit() {
+    let mut f = Fixture::with_config(config(
+        r#"
+[[window_rules]]
+app_id = "pin"
+pinned_to_screen = true
+size = [400, 300]
+"#,
+    ));
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let id = f.add_client();
+    let csurface = map_window(&mut f, id, "pin", (400, 300));
+    let window = window_by_app_id(&mut f, "pin").unwrap();
+
+    // No rule `position` centers the pin: (1920/2 - 200, 1080/2 - 150). Its
+    // right edge sits at 1160 and its bottom at 690, where they must stay.
+    let site = f.state().stage.pin_of(&window).unwrap().screen_pos;
+    assert_eq!(site, Point::from((760, 390)), "precondition: the pin site");
+
+    // Canvas == screen here; land in the window's top-left ninth.
+    assert!(
+        f.state()
+            .try_start_gesture_resize(pt(site.x as f64 + 50.0, site.y as f64 + 50.0), false)
+    );
+
+    // The grab sits 50px inside the corner, so the corner tracks the cursor at
+    // that offset.
+    for (drag_to, expected) in [
+        (pt(710.0, 390.0), Point::from((660, 340))),
+        (pt(660.0, 340.0), Point::from((610, 290))),
+        (pt(610.0, 290.0), Point::from((560, 240))),
+    ] {
+        motion(&mut f, drag_to);
+        f.double_roundtrip(id);
+        adopt_last_configure(&mut f, id, &csurface);
+        let sp = f.state().stage.pin_of(&window).unwrap().screen_pos;
+        let size = window.geometry().size;
+        assert_eq!(
+            (
+                sp,
+                Point::<i32, Logical>::from((sp.x + size.w, sp.y + size.h))
+            ),
+            (expected, Point::from((1160, 690))),
+            "every commit moves the dragged corner and leaves the opposite one at (1160, 690)"
+        );
+    }
+
+    end_swipe(&mut f);
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &csurface);
+    assert_eq!(
+        f.state().stage.pin_of(&window).unwrap().screen_pos,
+        Point::from((560, 240)),
+        "the settle commit at an unchanged size leaves the pin where the drag left it"
+    );
+}
+
 /// A pinned window's stage entry keeps its stale canvas position (only its
 /// screen-space site is live) — the walk must skip past it rather than
 /// stopping there, so `under`, genuinely mapped beneath it, stays reachable.

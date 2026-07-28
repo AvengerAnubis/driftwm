@@ -541,6 +541,59 @@ fn unfill_after_fullscreen_exit_drops_the_stale_recenter_so_the_next_resize_does
     );
 }
 
+/// A resize settle only has to hold the *opposite* edge still across one size
+/// change. Anything that placed the window between the release and the settling
+/// commit — here a fill, but equally a fit, an exit, an IPC move or a bookmark
+/// jump — owns the position, and the settle must compensate from there rather
+/// than from where the grab started.
+#[test]
+fn a_fill_between_a_resize_release_and_its_settle_keeps_its_placement() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let surface = map_settled(&mut f, id, "a", (1920, 1080));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((0, 0)), false);
+
+    // Resize from the right edge and release, but hold the client's final
+    // commit back: the settle is still owed.
+    let grab_at = pt(1900.0, 540.0);
+    assert!(f.state().try_start_gesture_resize(grab_at, false));
+    motion(&mut f, grab_at + pt(-100.0, 0.0));
+    end_swipe(&mut f);
+
+    // Fill into that gap.
+    f.state().toggle_fill_window(&window);
+    assert!(
+        f.state().stage.is_fill(&window),
+        "precondition: the fill ran"
+    );
+
+    // The client's next commit adopts the fill *and* settles the resize.
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+
+    let filled = Point::from((12, 12));
+    assert_eq!(
+        f.state().stage.position_of(&window),
+        Some(filled),
+        "the settle must compensate from the filled position, not restore the grab start"
+    );
+    // The cache is the other half: the settle refreshes it, so a wrong position
+    // there and a wrong position on the stage agree with each other and nothing
+    // downstream can tell.
+    let root = super::server_surface(&window);
+    let cached = *f.state().stable_snap_rects.get(&root.id()).unwrap();
+    assert_eq!(
+        (cached.x_low, cached.y_low, cached.x_high, cached.y_high),
+        (12.0, 12.0, 1908.0, 1068.0),
+        "and the refreshed snap rect is the fill's frame"
+    );
+}
+
 /// The same equal-size branch, reached with nothing but fill → fullscreen →
 /// exit → unfill — the shorter and likelier production route.
 ///
