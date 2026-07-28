@@ -1040,6 +1040,56 @@ fn fullscreen_exit_restores_the_filled_rect_when_it_beats_the_fill_ack() {
     );
 }
 
+/// The fit twin of the test above. `fit_window` maps to the fit position in the
+/// same breath as it sends the fit configure, so a fullscreen pressed into that
+/// gap finds committed geometry at the pre-fit size — pairing it with the fit
+/// position would hand the exit a rect the window never held.
+#[test]
+fn fullscreen_exit_restores_the_fit_rect_when_it_beats_the_fit_ack() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+
+    let surface = map_settled(&mut f, id, "a", (800, 600));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((200, 150)), false);
+    origin_view(&mut f);
+
+    f.state().fit_window(&window);
+    assert!(f.state().stage.is_fit(&window), "precondition: the fit ran");
+    let fit_loc = f.state().stage.position_of(&window).unwrap();
+    assert_eq!(
+        window.geometry().size,
+        Size::from((800, 600)),
+        "precondition: the client has not acked the fit configure yet"
+    );
+
+    // Fullscreen straight through the un-acked fit, then back.
+    f.state().enter_fullscreen(&window, Some(output.clone()));
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    f.state().exit_fullscreen_on(&output);
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+
+    // Usable 1920×1080 minus a 12px gap on every side, no SSD bar or border on a
+    // default CSD window — the same rect the fit configured.
+    assert_eq!(
+        (
+            f.state().stage.position_of(&window).unwrap(),
+            window.geometry().size
+        ),
+        (fit_loc, Size::from((1896, 1056))),
+        "the exit restores the fit rect the fit configured, not the size the client still had"
+    );
+    assert!(
+        f.state().stage.is_fit(&window),
+        "and the window is still fit"
+    );
+}
+
 #[test]
 fn fill_grows_to_usable_minus_gap() {
     let mut f = Fixture::new();

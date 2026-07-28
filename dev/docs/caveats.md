@@ -94,9 +94,11 @@ The opposite direction — letting the inert band fall through to whatever is be
 
 Re-aiming rather than dropping buys the correct landing at the cost `drop_owed_recenter`'s own doc warns about: an entry left owed gates `reflow_grown_snapped_window`. The settle trigger is `geo.size != pre_exit_size` (`src/handlers/compositor.rs`), so a client that acks the exit configure and then commits back at *exactly* its pre-exit size never fires it — the window keeps a provisional placement derived from the size the exit configured rather than the one the client kept (leaving it half that difference off the requested point) and stays out of snap/cluster reflow until it unmaps. Nothing bounds either half.
 
-## A filled window's fullscreen exit restores the configured size
+## A fit or filled window's fullscreen exit restores the configured size
 
-`enter_fullscreen`'s fill arm reads `configured_window_size`, which is what closes the pre-ack race, but that is pending state and no client-initiated resize updates it. So a client that resizes *itself* after being filled gets its fill-configured size back on the fullscreen exit rather than its current one. That is a deliberate trade, not an oversight: the stage still holds the filled position, so the configured size is the rect that pairs with it. The deeper consequence is that a self-resize leaves fill membership claiming a rect the window no longer occupies.
+`enter_fullscreen`'s fit/fill arm reads `configured_window_size`, which is what closes the pre-ack race — both `fit_window` and `fill_window` map to their new position in the same breath as the configure, so a fullscreen pressed into that gap would otherwise pair the new position with the pre-fit/pre-fill committed size. But that is pending state and no client-initiated resize updates it. So a client that resizes *itself* after being fit or filled gets its fit/fill-configured size back on the fullscreen exit rather than its current one. That is a deliberate trade, not an oversight: the stage still holds the fitted/filled position, so the configured size is the rect that pairs with it. The deeper consequence is that a self-resize leaves fit/fill membership claiming a rect the window no longer occupies.
+
+Two knock-on effects specific to fit, both accepted: `compute_fit_geometry` does not clamp to `SizeConstraints`, so a client that refuses the fit size has an unattainable size recorded in `set_fullscreen` (the end state is unchanged — the exit re-configures the fit size and the client re-clamps identically), and such a client no longer trips `MIN_RESTORE_FLOOR`.
 
 ## A zero-net-change resize leaves the window reading as grabbed
 

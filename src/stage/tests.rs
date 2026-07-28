@@ -1428,6 +1428,9 @@ mod harness {
                     if self.stage.fullscreen_on(&key).is_some() {
                         self.exit_fullscreen(&key);
                     }
+                    // The real fit/fill arms read the size last *configured*;
+                    // this harness has no pending-configure state to model, so
+                    // it stands in with the committed size and covers fit only.
                     let saved_size = if self.stage.is_fit(&w) {
                         StageElement::size(&w)
                     } else {
