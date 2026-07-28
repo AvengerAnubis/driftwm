@@ -579,10 +579,15 @@ fn cmd_move(window: Option<WindowSelector>, to: Option<(i32, i32)>, state: &mut 
         }
         Some((x, y)) => {
             // A pinned window renders at its pin, a fullscreen one at its
-            // camera park — writing the canvas position would silently do
-            // nothing (pinned) or displace the park (fullscreen).
+            // camera park, and one held back for a deferred adopt is about to be
+            // teleported into a slot — writing the canvas position would
+            // silently do nothing, displace the park, or be overwritten.
             if !state.is_canvas_window(&window) {
-                return Err("pinned and fullscreen windows have no canvas position to move".into());
+                return Err(
+                    "this window has no canvas position to move: it is pinned, fullscreen, a \
+                     widget, or not on screen yet"
+                        .into(),
+                );
             }
             // Activating is only consistent when the target already holds
             // focus; a selector can reach any window.

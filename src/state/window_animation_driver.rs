@@ -1072,7 +1072,7 @@ impl DriftWm {
         // and the capture below imports its buffers on demand rather than
         // reusing what a frame drew — so without this the fade-out would be the
         // first and only time the user sees it.
-        if self.adopt_is_deferred(surface) {
+        if self.root_hidden_by_deferred_adopt(surface) {
             return;
         }
         // Backend-gated (the headless fixture never accumulates render transients).

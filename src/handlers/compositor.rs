@@ -298,7 +298,7 @@ impl CompositorHandler for DriftWm {
                     // write while the window is hidden, and which the adopt
                     // clears in any case) and a second open animation, replayed
                     // at the reveal.
-                    let defer_adopt = self.adopt_is_deferred(&root);
+                    let defer_adopt = self.root_hidden_by_deferred_adopt(&root);
                     if defer_adopt {
                         // The client's own queued fullscreen/fit goes too, on
                         // every pass: `pending_center` is set again between

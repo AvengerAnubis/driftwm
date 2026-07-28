@@ -1226,7 +1226,7 @@ impl DriftWm {
                     // this output must stay reachable.
                     if pinned
                         || self.fullscreen_on_other_output(&wl_surface, &active)
-                        || self.adopt_is_deferred(&wl_surface)
+                        || self.root_hidden_by_deferred_adopt(&wl_surface)
                     {
                         continue;
                     }
@@ -1367,7 +1367,7 @@ impl DriftWm {
             }
             // Nothing is drawn for a window awaiting a deferred adopt, so the
             // pointer over its rect belongs to whatever is drawn beneath it.
-            if self.adopt_is_deferred(&wl_surface) {
+            if self.root_hidden_by_deferred_adopt(&wl_surface) {
                 continue;
             }
             let rule = driftwm::config::applied_rule(&wl_surface);
@@ -1788,7 +1788,7 @@ impl DriftWm {
             // Same shape for a window awaiting a deferred adopt: its chrome is
             // not drawn, so it must neither answer for a click nor occlude the
             // window that really is under one.
-            if self.adopt_is_deferred(&wl_surface) {
+            if self.root_hidden_by_deferred_adopt(&wl_surface) {
                 continue;
             }
             let Some(loc) = self.stage.position_of(window) else {

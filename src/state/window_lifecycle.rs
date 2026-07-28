@@ -14,7 +14,7 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point};
 use smithay::wayland::seat::WaylandFocus;
 
-use super::{DriftWm, StageWindow};
+use super::{DriftWm, RevealCause, StageWindow};
 
 impl DriftWm {
     /// Push any `below` windows to the bottom of the z-order.
@@ -124,16 +124,17 @@ impl DriftWm {
         self.pending_adoptions.remove(surface);
         // Drained through the reveal like every other exit from the stash, so no
         // path can leave a window hidden for an adopt that will never come. It
-        // is inert on all three callers — each has already taken the window off
-        // the stage, or is tearing down a dead surface — but the two belong
-        // together whatever a future caller does.
+        // runs *after* the removals above and would write some of them back —
+        // the reveal's own `alive()` guard is what stops that, not the call
+        // order: the crash route gets here with the window still on the stage,
+        // and only its dead surface turns the reveal into a plain drain.
         if let Some(idx) = self
             .deferred_adoptions
             .iter()
             .position(|d| d.root == *surface)
         {
             let entry = self.deferred_adoptions.remove(idx);
-            self.reveal_deferred_adopt(&entry.root, entry.origin);
+            self.reveal_deferred_adopt(&entry.root, entry.origin, RevealCause::Abandoned);
         }
         self.auto_anchor_snapshot.remove(surface);
         // Drop snapshots pointing at the destroyed surface as their anchor.

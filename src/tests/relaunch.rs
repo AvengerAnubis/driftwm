@@ -1717,10 +1717,10 @@ fn token_adopt_defers_under_a_stand_in_drag_then_lands_on_release() {
 }
 
 /// A drag that outlives the 30s relaunch deadline is the deferral's end state:
-/// the deadline sweep reclaims the pending relaunch, the release finds nothing
-/// to adopt into, and the window keeps the placement it was given while the
-/// stand-in stays behind as a stale duplicate — exactly what an app that took
-/// longer than the TTL to come back leaves behind.
+/// the deadline sweep reclaims the pending relaunch, the next tick's liveness
+/// sweep drops the stashed adopt with it, and the window keeps the placement it
+/// was given while the stand-in stays behind as a stale duplicate — exactly what
+/// an app that took longer than the TTL to come back leaves behind.
 #[test]
 fn an_adopt_deferred_past_the_relaunch_deadline_leaves_a_stale_stand_in() {
     let tmp = TempDir::new();
@@ -2093,15 +2093,16 @@ fn a_flush_under_the_live_grab_leaves_the_dragged_stand_in_alone() {
     finish_window(&mut f, cid, &surface, (300, 200));
     assert_eq!(f.state().debug_counters()["deferred_adoptions"], 1);
 
-    // The relaunched window fullscreens itself while the drag is still going —
-    // a membership acquired during the deferral, which the flush answers by
-    // dismissing the stand-in.
+    // The relaunched window fullscreens itself while the drag is still going.
+    // The request is queued rather than taken — nothing is drawn for the window,
+    // so nothing may be made to fill the screen — and lands at the reveal, where
+    // it is the membership the flush answers by dismissing the stand-in.
     f.client(cid).window(&surface).set_fullscreen(None);
     f.roundtrip(cid);
     let placed = mapped_client(&mut f, "myapp").unwrap();
     assert!(
-        f.state().is_window_fullscreen(&placed),
-        "precondition: the client's own request went through"
+        !f.state().is_window_fullscreen(&placed),
+        "precondition: a hidden window takes no fullscreen membership"
     );
 
     // An unrelated window's move grab ends: that alone schedules the flush.
@@ -2835,8 +2836,9 @@ fn auto_placement_reserves_no_ground_for_a_hidden_adopt() {
 /// end, and a client-resize deferral holds one with no grab live at all — so
 /// nothing but the per-frame liveness sweep bounds how long its window stays
 /// hidden. Once the relaunch deadline lapses the sweep drops the entry and shows
-/// the window where it stands, fully set up: hit-testable, focused, and carrying
-/// the settled snap rect its suppressed placement never wrote.
+/// the window where it stands, fully set up: hit-testable, back in the Alt-Tab
+/// cycle, and carrying the settled snap rect its suppressed placement never
+/// wrote.
 #[test]
 fn the_liveness_sweep_reveals_an_adopt_whose_relaunch_lapsed() {
     use smithay::reexports::wayland_server::Resource;
@@ -2869,10 +2871,12 @@ fn the_liveness_sweep_reveals_an_adopt_whose_relaunch_lapsed() {
         Some(hidden.clone()),
         "the window is on screen and answers for the pointer over it"
     );
-    assert_eq!(
-        f.state().focused_window(),
-        Some(hidden.clone()),
-        "and holds the focus its placement withheld"
+    assert!(
+        f.state()
+            .stage
+            .focus_history()
+            .contains(&StageWindow::Client(hidden.clone())),
+        "and is back in the Alt-Tab cycle its placement kept it out of"
     );
     assert!(
         f.state()
@@ -2965,6 +2969,306 @@ fn the_loser_of_a_two_window_race_is_revealed_where_it_stands() {
     settle_resize(&mut f, winner_cid, &winner_surface, (400, 300));
     client_close(&mut f, winner_cid, &winner_surface);
     client_close(&mut f, loser_cid, &loser_surface);
+}
+
+/// A client that fullscreens itself while it is hidden must not get it there:
+/// the render skips the window and the fullscreen cull skips everything else,
+/// so the output would draw nothing at all until the drag ended. The request
+/// waits in the same queue a pre-first-commit one uses and is applied at the
+/// reveal — where being fullscreen is a place policy put the window, so the
+/// adopt stands down and the stand-in goes.
+#[test]
+fn a_hidden_adopt_cannot_fullscreen_before_it_is_revealed() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    let output = f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    // No camera override: output-aligned, so the fullscreen park below is a
+    // no-op and the blur-generation counter returns to baseline.
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (800, 500), (400, 300));
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+
+    f.client(cid).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(cid);
+
+    assert!(
+        !f.state().is_output_fullscreen(&output),
+        "a window nothing is drawn for must never own the output's fullscreen"
+    );
+    assert!(
+        !f.state().is_window_fullscreen(&hidden),
+        "and must not be carrying the membership either"
+    );
+
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+
+    assert!(
+        f.state().is_window_fullscreen(&hidden),
+        "the reveal hands over the request the hiding held back"
+    );
+    assert!(
+        !suspended_present(&mut f),
+        "a window that came back fullscreen is where policy put it, so the \
+         adopt drops the stand-in instead of ripping it out"
+    );
+
+    client_close(&mut f, cid, &surface);
+}
+
+/// The maximize twin of the same gate. Milder — a fit pans the camera onto a
+/// rect nothing is drawn at rather than blanking the output — but it rides the
+/// same queue, and lands when the window is on screen to be fitted.
+#[test]
+fn a_hidden_adopt_cannot_fit_before_it_is_revealed() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+
+    let camera_before = f.state().camera();
+    f.client(cid).window(&surface).set_maximized();
+    f.double_roundtrip(cid);
+
+    assert!(
+        !f.state().stage.is_fit(&hidden),
+        "a hidden window takes no fit membership"
+    );
+    assert_eq!(
+        f.state().camera(),
+        camera_before,
+        "and the camera did not fly to it to show off the fit"
+    );
+
+    // Dismissed mid-drag, so the release reveals the window where it stands
+    // instead of teleporting it — the fit lands on the rect the user sees.
+    abandon_the_adopt(&mut f, sid);
+
+    assert!(
+        f.state().stage.is_fit(&hidden),
+        "the reveal applies the queued fit"
+    );
+
+    client_close(&mut f, cid, &surface);
+}
+
+/// A single-instance app can present its relaunch token a second time on the
+/// window it already gave back. That re-stashes the adopt through the activation
+/// path, which must not overwrite the first-commit entry: doing so un-hides the
+/// window at its holding placement mid-drag, and then the drain skips the reveal
+/// that entry is owed, leaving the window out of the Alt-Tab cycle.
+#[test]
+fn a_second_token_on_a_hidden_window_leaves_it_hidden() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+
+    let under = f.add_client();
+    let under_surface = map_window(&mut f, under, "under", (400, 300));
+    let below = window_by_app_id(&mut f, "under").unwrap();
+    seat_at(&mut f, &below, (1000, 1000));
+
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+    seat_at(&mut f, &hidden, (1000, 1000));
+    let p = Point::from((1100.0, 1050.0));
+
+    // The stand-in is still under the drag, so the activation path stashes
+    // rather than adopting on the spot.
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+    present_token(&mut f, cid, &surface, token);
+
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        1,
+        "the second stash superseded the first rather than piling up"
+    );
+    assert_eq!(
+        f.state().element_under(p).map(|(w, _)| w.clone()),
+        Some(below.clone()),
+        "the window is still hidden: the point belongs to what is drawn there"
+    );
+
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+
+    let adopted = mapped_client(&mut f, "myapp").expect("the adopt landed");
+    assert!(
+        f.state()
+            .stage
+            .focus_history()
+            .contains(&StageWindow::Client(adopted)),
+        "and the reveal it was owed still ran, so Alt-Tab can reach it"
+    );
+
+    settle_resize(&mut f, cid, &surface, (400, 300));
+    client_close(&mut f, cid, &surface);
+    client_close(&mut f, under, &under_surface);
+}
+
+/// A relaunch that commits while an output is fullscreen is background-placed —
+/// tucked behind the fullscreen window, no activation, no focus. The reveal
+/// stands in for that placement and has to keep its bargain: raising the window
+/// over the fullscreen one and taking the keyboard is exactly what the
+/// background arm exists to prevent.
+#[test]
+fn a_reveal_behind_a_fullscreen_window_does_not_take_its_focus() {
+    use smithay::reexports::wayland_server::Resource;
+
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    let output = f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    // No camera override: output-aligned, so the fullscreen park below is a
+    // no-op and the blur-generation counter returns to baseline.
+
+    let fs = f.add_client();
+    let fs_surface = map_window(&mut f, fs, "fs", (400, 300));
+    let fs_window = window_by_app_id(&mut f, "fs").unwrap();
+    f.client(fs).window(&fs_surface).set_fullscreen(None);
+    f.double_roundtrip(fs);
+    adopt_last_configure(&mut f, fs, &fs_surface);
+    assert!(
+        f.state().is_output_fullscreen(&output),
+        "precondition: the output is fullscreen, so the relaunch is background-placed"
+    );
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+    assert_eq!(
+        f.state().focused_window(),
+        Some(fs_window.clone()),
+        "precondition: the fullscreen window still holds the keyboard"
+    );
+
+    abandon_the_adopt(&mut f, sid);
+
+    assert_eq!(
+        f.state().focused_window(),
+        Some(fs_window.clone()),
+        "the reveal left the keyboard with the window filling the screen"
+    );
+    assert!(
+        !is_activated(&hidden),
+        "and did not hand it the focused-window chrome hint either"
+    );
+    assert!(
+        f.state()
+            .stable_snap_rects
+            .contains_key(&server_surface(&hidden).id()),
+        "the reveal did run — only it writes this rect on the abandon path — so \
+         the two assertions above are about the focus, not about nothing happening"
+    );
+
+    client_close(&mut f, cid, &surface);
+    client_close(&mut f, fs, &fs_surface);
+}
+
+/// The liveness sweep can fire a full relaunch deadline after the window was
+/// placed, while the user has long since moved on to something else and may
+/// still be dragging. Showing the window is the whole point; taking the keyboard
+/// out of whatever they are typing into is not.
+#[test]
+fn the_liveness_sweep_reveal_does_not_take_focus_from_elsewhere() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let other = f.add_client();
+    let other_surface = map_window(&mut f, other, "other", (200, 200));
+    let other_window = window_by_app_id(&mut f, "other").unwrap();
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (5000, 5000), (400, 300));
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+    let hidden = mapped_client(&mut f, "myapp").unwrap();
+    seat_at(&mut f, &hidden, (1000, 1000));
+
+    // The drag never ends; the deadline does.
+    f.state()
+        .sweep_pending_relaunches(Instant::now() + Duration::from_secs(31));
+    f.pump(1);
+
+    assert_eq!(
+        f.state()
+            .element_under(Point::from((1100.0, 1050.0)))
+            .map(|(w, _)| w.clone()),
+        Some(hidden.clone()),
+        "precondition: the sweep did reveal it — the window is on screen"
+    );
+    assert_eq!(
+        f.state().focused_window(),
+        Some(other_window),
+        "the keyboard stayed where the user left it"
+    );
+    assert!(
+        f.state()
+            .stage
+            .focus_history()
+            .contains(&StageWindow::Client(hidden)),
+        "but Alt-Tab can reach it, which is the half the reveal does owe"
+    );
+
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+    f.state().dismiss_suspended(sid);
+    client_close(&mut f, cid, &surface);
+    client_close(&mut f, other, &other_surface);
+}
+
+/// Under `suspend_on_close`, closing a window that is still hidden must not
+/// leave a stand-in: the one it was going to be adopted into is still sitting
+/// there, so the user would end up with two for one app — the second faded in at
+/// a holding placement nobody ever saw the window at.
+#[test]
+fn closing_a_hidden_adopt_leaves_no_second_stand_in() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(config("[session]\nsuspend_on_close = true"));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (800, 500), (400, 300));
+    let cid = f.add_client();
+    let surface = hide_under_a_stand_in_drag(&mut f, cid, sid);
+
+    client_close(&mut f, cid, &surface);
+
+    assert_eq!(
+        f.state()
+            .stage
+            .windows()
+            .filter(|w| w.suspended().is_some())
+            .count(),
+        1,
+        "only the stand-in the user was dragging is left"
+    );
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        0,
+        "and the stash went with the surface"
+    );
+
+    f.state().disarm_interactive_move(&sid);
+    f.state().dismiss_suspended(sid);
 }
 
 /// `msg relaunch` on a selector that names no suspended window errors instead

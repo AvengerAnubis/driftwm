@@ -53,7 +53,8 @@ pub use render_cache::{BorderCacheEntry, RenderCache, ShadowCacheEntry};
 pub use session_store::{CameraSeed, SessionStore};
 pub use stage_window::{StageWindow, SuspendedId, SuspendedWindow};
 pub use suspended::{
-    AdoptOrigin, DeferredAdopt, PendingRelaunch, RelaunchMarker, SuspendMark, UnmapSnapshot,
+    AdoptOrigin, DeferredAdopt, PendingRelaunch, RelaunchMarker, RevealCause, SuspendMark,
+    UnmapSnapshot,
 };
 pub(crate) use window_frame::{
     configured_window_size, frame_loc_for_center, rule_point_to_visual_center, visual_frame_center,
@@ -720,6 +721,10 @@ pub struct DriftWm {
     /// window keeps whatever placement it was given and moves into the
     /// stand-in's slot once the grab lets go; see
     /// [`DriftWm::flush_deferred_adoptions`] for what lands and what doesn't.
+    /// A first-commit entry does more than postpone: it is also what keeps its
+    /// window off the screen and out of every canvas relation for the duration
+    /// ([`DriftWm::reveal_deferred_adopt`] hands all of that back), so an entry
+    /// that outlives its purpose is an invisible window.
     pub(crate) deferred_adoptions: Vec<DeferredAdopt>,
     /// Durable session store (session restore): the `session.json` path, dirty
     /// timer, carried-forward entries, and fresh-boot camera seed.

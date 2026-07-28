@@ -167,10 +167,7 @@ impl XdgShellHandler for DriftWm {
     ) {
         let wl_surface = surface.wl_surface().clone();
         let client_output = output.and_then(|wo| smithay::output::Output::from_resource(&wo));
-        // Defer until the first sized commit — geometry is still (0,0)
-        // here, which would poison `saved_size`, and the initial-commit
-        // positioning block would clobber the fullscreen map.
-        if self.pending_center.contains(&wl_surface) {
+        if self.queues_geometry_request(&wl_surface) {
             self.pending_fullscreen.insert(wl_surface, client_output);
             return;
         }
@@ -190,7 +187,7 @@ impl XdgShellHandler for DriftWm {
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
         let wl_surface = surface.wl_surface().clone();
-        if self.pending_center.contains(&wl_surface) {
+        if self.queues_geometry_request(&wl_surface) {
             self.pending_fit.insert(wl_surface);
             return;
         }

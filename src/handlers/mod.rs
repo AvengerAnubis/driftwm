@@ -738,7 +738,7 @@ impl ForeignToplevelHandler for DriftWm {
 
     fn set_fullscreen(&mut self, wl_surface: WlSurface, wl_output: Option<WlOutput>) {
         let client_output = wl_output.and_then(|wo| smithay::output::Output::from_resource(&wo));
-        if self.pending_center.contains(&wl_surface) {
+        if self.queues_geometry_request(&wl_surface) {
             self.pending_fullscreen.insert(wl_surface, client_output);
             return;
         }
@@ -757,7 +757,7 @@ impl ForeignToplevelHandler for DriftWm {
     }
 
     fn set_maximized(&mut self, wl_surface: WlSurface) {
-        if self.pending_center.contains(&wl_surface) {
+        if self.queues_geometry_request(&wl_surface) {
             self.pending_fit.insert(wl_surface);
             return;
         }
