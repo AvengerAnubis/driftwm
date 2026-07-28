@@ -1335,9 +1335,7 @@ impl DriftWm {
     /// This is the foundation for all hit-testing — focus, gestures, resize grabs.
     /// Also checks SSD decoration areas (title bar, resize borders), interleaved
     /// with window content in z-order so a higher window's content takes priority
-    /// over a lower window's decorations. The resize margins obey
-    /// `resize_on_border`: with no border to grab, the margin is empty space and
-    /// whatever renders under it answers instead.
+    /// over a lower window's decorations.
     pub fn surface_under(
         &self,
         pos: Point<f64, smithay::utils::Logical>,
@@ -1397,15 +1395,8 @@ impl DriftWm {
             {
                 if crate::decorations::close_button_contains(pos, loc, size.w, bar_height)
                     || crate::decorations::title_bar_contains(pos, loc, size.w, bar_height)
-                    || (self.config.resize_on_border
-                        && crate::decorations::resize_edge_at(
-                            pos,
-                            loc,
-                            size,
-                            bar_height,
-                            border_width,
-                        )
-                        .is_some())
+                    || crate::decorations::resize_edge_at(pos, loc, size, bar_height, border_width)
+                        .is_some()
                 {
                     return Some((FocusTarget((*wl_surface).clone()), loc.to_f64()));
                 }
@@ -1416,8 +1407,7 @@ impl DriftWm {
                 // (Brave, Nautilus) own the inside; we own the outside — no overlap.
                 let is_widget = rule.as_ref().is_some_and(|r| r.widget);
                 let is_fullscreen = self.is_window_fullscreen(window);
-                if self.config.resize_on_border
-                    && !is_widget
+                if !is_widget
                     && !is_fullscreen
                     && crate::decorations::resize_edge_at(pos, loc, size, 0, border_width).is_some()
                 {
@@ -1436,12 +1426,6 @@ impl DriftWm {
     /// correct surface-local coordinates. Only windows on the active output are
     /// considered — the pointer is always on the active output, and `screen_pos`
     /// is relative to it.
-    ///
-    /// The resize margins obey `resize_on_border` so a pinned window's chrome
-    /// answers the same as a canvas window's, in this cascade (`surface_under`)
-    /// as in the decoration channel (`decoration_hit_for`); with the option off
-    /// there is no border to hit, and the margin must read as the empty space it
-    /// is.
     pub(crate) fn pinned_window_under(
         &self,
         screen_pos: Point<f64, smithay::utils::Logical>,
@@ -1499,15 +1483,14 @@ impl DriftWm {
                     p.screen_pos,
                     size.w,
                     bar_height,
-                ) || (self.config.resize_on_border
-                    && crate::decorations::resize_edge_at(
-                        screen_pos,
-                        p.screen_pos,
-                        size,
-                        bar_height,
-                        border_width,
-                    )
-                    .is_some())
+                ) || crate::decorations::resize_edge_at(
+                    screen_pos,
+                    p.screen_pos,
+                    size,
+                    bar_height,
+                    border_width,
+                )
+                .is_some()
                 {
                     let adjusted = screen_space_focus_loc(
                         ScreenPos(p.screen_pos.to_f64()),
@@ -1519,8 +1502,7 @@ impl DriftWm {
             } else {
                 let is_widget =
                     driftwm::config::applied_rule(&wl_surface).is_some_and(|r| r.widget);
-                if self.config.resize_on_border
-                    && !is_widget
+                if !is_widget
                     && crate::decorations::resize_edge_at(
                         screen_pos,
                         p.screen_pos,

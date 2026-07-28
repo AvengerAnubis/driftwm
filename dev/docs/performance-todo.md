@@ -105,6 +105,17 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   changing this one arm alone would make the two disagree, and neither
   `docs/ipc.md` nor `docs/cli.md` documents which size the center derives from.
   Fix, if ever: move every reader onto one accessor at once.
+- **A re-aimed recenter that never settles strands both halves of what it
+  promised.** Re-aiming rather than dropping (the item above) buys the correct
+  landing at the cost `drop_owed_recenter`'s own doc warns about: an entry left
+  owed also gates `reflow_grown_snapped_window`. The settle trigger is
+  `geo.size != pre_exit_size` (`src/handlers/compositor.rs`), so a client that
+  acks the exit configure and then commits back at *exactly* its pre-exit size
+  never fires it. The window keeps the provisional placement — which was derived
+  from the size the exit *configured*, not the one the client kept, so it sits
+  half that difference off the requested point — and stays out of snap/cluster
+  reflow until it unmaps. `map_window_to_rule_point`'s own doc names the reflow
+  half; nothing bounds either.
 - **Zero-net-change resize strands `ResizeState::WaitingForLastCommit`.**
   Grab start sets `Resizing` in *pending* state only, so a resize that ends
   where it began leaves `send_pending_configure` with nothing to send and the
@@ -147,6 +158,30 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   position, so the configured size is the rect that pairs with it — but it is a
   deliberate trade, not an oversight. The deeper issue is that a self-resize
   leaves fill membership claiming a rect the window no longer occupies.
+- **`resize_on_border` decides whether the border resizes, not whether it is part
+  of the window — an open decision, not a bug.** The option gates
+  `decoration_hit_for` and `pinned_decoration_under` (`src/input/mod.rs`), which
+  produce `DecorationHit::ResizeBorder` — *resize* behaviour. It does not gate
+  `surface_under` or `pinned_window_under`, which decide *membership*: pointer
+  focus, binding context, pick target. So with the option off the 8 px band is
+  still the window's, it just can't be dragged. Whether "the border is not for
+  resizing" should also mean "the border is not part of the window" is a
+  user-facing call nobody has made. Two things constrain it. Making the band fall
+  through is not a no-op: `pointer_focus_under` continues past `surface_under`
+  into `canvas_layer_under`, widget windows and then `Bottom`/`Background`, so a
+  wallpaper client would take an enter/leave pair every time the cursor crossed
+  any window's ring, and that arm sets `pointer_over_layer`, which makes
+  `maybe_hover_focus` return early — `focus_follows_mouse` would be *suppressed*
+  in the ring rather than falling through to canvas. And `render/shaders.rs` draws
+  the border `border_width_logical` *outside* the window rect, i.e. inside this
+  band, so `[decorations] border_width > 0` plus a fall-through would give a
+  visible border that is click- and hover-through. The split the current answer
+  leaves is observable and pinned by
+  `an_inert_resize_margin_binds_as_window_only_around_a_pin`
+  (`src/tests/pinned_phantom.rs`): with the option off, the ring around a
+  **pinned** window reports `OnWindow` for binding context while the ring around a
+  **canvas** window reports `OnCanvas`, because the canvas path reads its margin
+  through the gated decoration channel and the pinned path does not.
 - **Input hit-tests the animation's destination, not the drawn rect — and that is
   by design.** Every stage read in the input path takes the destination:
   `topmost_under`'s `position_and_pinned`, `element_under_skipping`'s,
@@ -237,9 +272,12 @@ unrelated reason — the inherited stage entry has no fit state, so a set
 `Maximized` is one the client can never shed. It seeds no `ResizeState` and no
 resize is in flight; it is not a fifth site. The "drop an owed `pending_recenter`
 before establishing a placement" step is `DriftWm::drop_owed_recenter`
-(`src/state/recenter.rs`), called by all **eight** arms — nine until the exit
-tails collapsed their two equal-size copies into the one call
-`establish_exit_placement` now makes for all three exits.
+(`src/state/recenter.rs`), called by **seven** arms (`input/actions.rs` twice,
+`state/fullscreen.rs`, `state/fill.rs`, `state/fit.rs`, `state/suspended.rs`,
+and `establish_exit_placement`'s own equal-size branch). It was nine before the
+exit tails collapsed their two equal-size copies into the one call
+`establish_exit_placement` now makes for all three exits, and eight before the
+bookmark move stopped dropping what it can re-aim instead.
 
 The measurement that motivated the extraction: against niri (93,951 Rust lines to
 driftwm's 98,156, but 81,832 non-test to driftwm's 63,671 — driftwm carries ~29%

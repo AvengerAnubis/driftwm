@@ -286,8 +286,16 @@ impl CompositorHandler for DriftWm {
                     // rule that forces a size configures and runs this whole
                     // block again on the follow-up commit, and by then the
                     // token stash is spent and the identity fallback may have
-                    // lapsed — a pass that re-derived the deferral from the
-                    // match would miss it and establish the membership.
+                    // lapsed. A pass that re-derived the deferral from the
+                    // match would miss it and run the whole non-adopted tail:
+                    // the membership arms, and `navigate_to_window`'s camera
+                    // flight — the exact flight the deferral exists to avoid,
+                    // warping the pointer into the grab that is still live. The
+                    // rest of that route runs on every pass either way, since
+                    // it keys off `adopted_sid` alone: the snap-rect refresh
+                    // against the body size the client hasn't acked (which
+                    // `adopt_relaunched` skips for exactly that reason) and a
+                    // second open animation on an already-placed window.
                     let defer_adopt = self.deferred_adoptions.iter().any(|d| d.root == root);
                     if defer_adopt {
                         // The client's own queued fullscreen/fit goes too, on
@@ -297,7 +305,12 @@ impl CompositorHandler for DriftWm {
                         // (which trades the request for the slot the window
                         // does end up in), a deferred adopt may never land — a
                         // client that asked before its first buffer then keeps
-                        // the plain window it was given.
+                        // the plain window it was given. The suppressed
+                        // `pinned_to_screen`/`fullscreen` *rules* share that
+                        // fate: this is the last placement pass they get, so a
+                        // deferral the flush discards (relaunch TTL swept under
+                        // the grab) leaves the window plain with nothing left to
+                        // re-apply them.
                         self.pending_fullscreen.remove(&root);
                         self.pending_fit.remove(&root);
                     }

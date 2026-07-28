@@ -2083,15 +2083,15 @@ fn owe_a_fill_exit_recenter(
     key
 }
 
-/// The canvas location a window-rule point maps to for a window of `size` under
-/// a bar of `bar` — what the settle must land on, derived the way every other
-/// caller derives it.
-fn rule_point_loc(x: i32, y: i32, size: Size<i32, Logical>, bar: i32) -> Point<i32, Logical> {
-    crate::state::frame_loc_for_center(
-        Point::from((x as f64, -y as f64 - bar as f64 / 2.0)),
-        size,
-        bar,
-    )
+/// The canvas location a window-rule point maps to for a window of `size` —
+/// what the settle must land on. Derived straight from the rule convention
+/// rather than through the center formula the settle itself runs, so a bar term
+/// dropped or flipped on the way into `target_center` shows up here as a
+/// half-bar offset instead of cancelling out. Exact for the even sizes used
+/// below; an odd one would part company with the settle by the truncation
+/// `map_window_to_rule_point` documents.
+fn rule_point_loc(x: i32, y: i32, size: Size<i32, Logical>) -> Point<i32, Logical> {
+    driftwm::canvas::rule_to_internal(x, y, size)
 }
 
 /// Ack the outstanding restore configure and then commit a buffer at a size of
@@ -2145,7 +2145,7 @@ fn ipc_move_mid_fullscreen_exit_settle_lands_where_asked() {
     assert!(matches!(reply, Ok(Response::Position { x: 1000, y: -500 })));
     assert_eq!(
         f.state().stage.position_of(&a),
-        Some(rule_point_loc(1000, -500, Size::from((400, 300)), 0)),
+        Some(rule_point_loc(1000, -500, Size::from((400, 300)))),
         "the provisional placement already uses the size the exit configured, \
          not the fullscreen buffer the client is still committing"
     );
@@ -2165,7 +2165,7 @@ fn ipc_move_mid_fullscreen_exit_settle_lands_where_asked() {
     );
     assert_eq!(
         f.state().stage.position_of(&a),
-        Some(rule_point_loc(1000, -500, Size::from((700, 500)), 0)),
+        Some(rule_point_loc(1000, -500, Size::from((700, 500)))),
         "the window landed on the point msg move asked for"
     );
 }
@@ -2208,11 +2208,7 @@ fn ipc_move_after_a_client_chosen_settle_uses_committed_size() {
 
     assert_eq!(
         f.state().stage.position_of(&a),
-        Some(driftwm::canvas::rule_to_internal(
-            1000,
-            -500,
-            Size::from((700, 500))
-        )),
+        Some(rule_point_loc(1000, -500, Size::from((700, 500)))),
         "the move centered the window on the size it actually committed"
     );
 }
@@ -2248,7 +2244,7 @@ fn ipc_move_mid_settle_lands_where_asked_with_ssd() {
 
     assert_eq!(
         f.state().stage.position_of(&a),
-        Some(rule_point_loc(1000, -500, Size::from((700, 500)), bar)),
+        Some(rule_point_loc(1000, -500, Size::from((700, 500)))),
         "the window landed on the point msg move asked for, bar included"
     );
 }
@@ -2287,7 +2283,7 @@ fn move_to_bookmark_mid_fit_exit_settle_lands_where_asked() {
     );
     assert_eq!(
         f.state().stage.position_of(&a),
-        Some(rule_point_loc(1000, -500, Size::from((700, 500)), 0)),
+        Some(rule_point_loc(1000, -500, Size::from((700, 500)))),
         "the window landed on the bookmark it was moved to"
     );
 }
@@ -2325,7 +2321,7 @@ fn move_to_bookmark_mid_fill_exit_settle_lands_where_asked() {
     );
     assert_eq!(
         f.state().stage.position_of(&a),
-        Some(rule_point_loc(1000, -500, Size::from((700, 500)), 0)),
+        Some(rule_point_loc(1000, -500, Size::from((700, 500)))),
         "the window landed on the bookmark it was moved to"
     );
 }

@@ -91,6 +91,15 @@ pub(crate) fn visual_frame_center(
     ))
 }
 
+/// The visual center a window-rule point `(x, y)` names, in internal canvas
+/// coords: the rule convention's Y-up flip, plus the half-bar by which a frame's
+/// center sits above its content's. `rule_to_internal` maps the same point to a
+/// content top-left, and feeding this center to [`frame_loc_for_center`] with
+/// the same size and bar lands there too.
+pub(crate) fn rule_point_to_visual_center(x: i32, y: i32, bar: i32) -> Point<f64, Logical> {
+    Point::from((x as f64, -y as f64 - bar as f64 / 2.0))
+}
+
 /// The size a window will have once it acks everything already configured: the
 /// last size we sent, else its committed geometry.
 ///

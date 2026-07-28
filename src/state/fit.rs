@@ -393,9 +393,9 @@ impl DriftWm {
         for member in &cluster_members {
             self.refresh_stable_snap_rect(member);
         }
-        // Primary's cache is refreshed by `unfit_window` directly when the exit
-        // size is unchanged, otherwise by the pending_recenter completion in
-        // `handlers/compositor.rs` once the client acks the exit configure.
+        // Primary's cache is refreshed by `establish_exit_placement` when the
+        // exit size is unchanged, otherwise by the pending_recenter completion
+        // in `handlers/compositor.rs` once the client acks the exit configure.
     }
 
     /// Snapshot each cluster member's pre-shift canvas position, so the shift

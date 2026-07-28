@@ -55,7 +55,9 @@ pub use stage_window::{StageWindow, SuspendedId, SuspendedWindow};
 pub use suspended::{
     AdoptOrigin, DeferredAdopt, PendingRelaunch, RelaunchMarker, SuspendMark, UnmapSnapshot,
 };
-pub(crate) use window_frame::{configured_window_size, frame_loc_for_center, visual_frame_center};
+pub(crate) use window_frame::{
+    configured_window_size, frame_loc_for_center, rule_point_to_visual_center, visual_frame_center,
+};
 
 use smithay::{
     desktop::{PopupGrab, PopupManager, Space, Window},

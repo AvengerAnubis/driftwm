@@ -1468,6 +1468,11 @@ struct DeferredAdoptCase<'a> {
     /// Runs between the two placement passes, where the surface is back in
     /// `pending_center` and a client request queues instead of applying.
     before_size_pass: fn(&mut Fixture, ClientId, &ClientSurface),
+    /// Set when `rules` makes the window a widget, which leaves the camera
+    /// assertion below no work: the whole navigate block is skipped for a
+    /// widget whatever the deferral says, so the flight it guards against
+    /// cannot be staged in the first place.
+    widget: bool,
 }
 
 impl Default for DeferredAdoptCase<'_> {
@@ -1477,6 +1482,7 @@ impl Default for DeferredAdoptCase<'_> {
             before_first_commit: |_, _, _| {},
             size_pass: None,
             before_size_pass: |_, _, _| {},
+            widget: false,
         }
     }
 }
@@ -1527,10 +1533,12 @@ fn assert_a_deferred_first_commit_adopt_wins(case: DeferredAdoptCase) {
         !f.state().is_window_fullscreen(&placed) && !f.state().is_pinned(&placed),
         "the membership was suppressed for the deferral, not established and then torn down"
     );
-    assert!(
-        f.state().camera_target().is_none(),
-        "the placement staged no camera flight: a pan warps the pointer into the live grab"
-    );
+    if !case.widget {
+        assert!(
+            f.state().camera_target().is_none(),
+            "the placement staged no camera flight: a pan warps the pointer into the live grab"
+        );
+    }
     assert_eq!(
         f.state().debug_counters()["deferred_adoptions"],
         1,
@@ -1592,6 +1600,7 @@ fn a_widget_rule_loses_to_a_deferred_first_commit_adopt() {
 app_id = "myapp"
 widget = true
 "#,
+        widget: true,
         ..Default::default()
     });
 }
@@ -1673,6 +1682,7 @@ size = [500, 400]
             f.client(cid).window(surface).set_fullscreen(None);
             f.roundtrip(cid);
         },
+        ..Default::default()
     });
 }
 

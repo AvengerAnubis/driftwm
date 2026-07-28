@@ -37,12 +37,19 @@ impl DriftWm {
     /// A rule point *is* a visual center, and the map onto one is
     /// size-independent: `rule_to_internal` subtracts half the size per axis and
     /// `visual_frame_center` adds the same half straight back, leaving
-    /// `(x, -y - bar/2)` whatever the size. So a request that arrives mid-settle
-    /// can re-aim the owed recenter without knowing the size the client is still
-    /// resizing into, and the settle re-derives the location from the size it
-    /// actually commits — residual error is integer truncation, under a pixel
-    /// per axis. Dropping the entry instead would strand the window half the
-    /// size delta from the request with nothing left to correct it.
+    /// [`rule_point_to_visual_center`]'s `(x, -y - bar/2)` whatever the size. So
+    /// a request that arrives mid-settle can re-aim the owed recenter without
+    /// knowing the size the client is still resizing into, and the settle
+    /// re-derives the location from the size it actually commits. Dropping the
+    /// entry instead would strand the window half the size delta from the
+    /// request with nothing left to correct it.
+    ///
+    /// Residual error against the location a same-size direct move would pick is
+    /// up to a pixel per axis, and a whole one in half the cases that have any:
+    /// an odd content dimension leaves a ½ in the settle's intermediate, and
+    /// `as i32` truncates toward zero rather than down, so the half is lost
+    /// where that intermediate is positive (a positive `x`, a negative rule `y`)
+    /// and kept where it is negative.
     ///
     /// The re-aimed entry keeps gating `reflow_grown_snapped_window` until that
     /// commit lands, the cost [`Self::drop_owed_recenter`] describes; a client
@@ -76,9 +83,9 @@ impl DriftWm {
         );
 
         if let Some(surface) = owed {
-            let bar = self.window_ssd_bar(window) as f64;
+            let center = super::rule_point_to_visual_center(x, y, self.window_ssd_bar(window));
             if let Some(pending) = self.pending_recenter.get_mut(&surface.id()) {
-                pending.target_center = Point::from((x as f64, -y as f64 - bar / 2.0));
+                pending.target_center = center;
             }
         }
     }

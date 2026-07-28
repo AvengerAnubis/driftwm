@@ -194,26 +194,22 @@ fn margin_takes_pointer_focus(rules: &str) -> (bool, bool) {
     (pinned, unpinned)
 }
 
-/// Control for the scenario below: with the border live the margin is the
-/// window's own chrome on both paths, so it takes pointer focus either way.
+/// The margin belongs to the window on both hit-test paths whatever
+/// `resize_on_border` says. The option decides whether the band *resizes*, not
+/// whether it is part of the window: `surface_under` and `pinned_window_under`
+/// answer for it unconditionally, so the pointer over it is the window's and
+/// nothing rendered beneath — a wallpaper layer, a lower window — can claim it.
 #[test]
-fn the_live_resize_margin_takes_pointer_focus_pinned_or_not() {
+fn the_resize_margin_takes_pointer_focus_whether_or_not_it_resizes() {
     assert_eq!(
         margin_takes_pointer_focus(PIN_RULE),
         (true, true),
         "a grabbable border is the window's, so the pointer over it is the window's"
     );
-}
-
-/// The focus half of the inert margin: nothing is drawn there and nothing can be
-/// grabbed there, so the pointer must not land on the window — on the pinned
-/// path (screen space) or the canvas one alike.
-#[test]
-fn an_inert_resize_margin_takes_no_pointer_focus_pinned_or_not() {
     assert_eq!(
         margin_takes_pointer_focus(PIN_RULE_NO_BORDER_RESIZE),
-        (false, false),
-        "with no border to grab, the margin is empty space whether the window is pinned or not"
+        (true, true),
+        "an inert border is still the window's margin, not the empty space behind it"
     );
 }
 
@@ -228,14 +224,18 @@ fn the_live_resize_margin_binds_as_window_pinned_or_not() {
     );
 }
 
-/// `resize_on_border = false` makes the margin inert, so it is empty space — and
-/// a pinned window's margin, hit-tested in screen space, has to say so too.
+/// `resize_on_border = false` splits the two paths, and the split is observable.
+/// The option gates the decoration channel (`decoration_hit_for`), which is the
+/// only arm that reads a *canvas* window's margin for binding context; a pinned
+/// window's margin comes from `pinned_window_under`, which is ungated. So the
+/// same 8 px band binds on-window around a pin and on-canvas around a canvas
+/// window.
 #[test]
-fn an_inert_resize_margin_binds_as_canvas_pinned_or_not() {
+fn an_inert_resize_margin_binds_as_window_only_around_a_pin() {
     assert_eq!(
         margin_contexts(PIN_RULE_NO_BORDER_RESIZE),
-        (BindingContext::OnCanvas, BindingContext::OnCanvas),
-        "with no border to grab, the margin is canvas whether the window is pinned or not"
+        (BindingContext::OnWindow, BindingContext::OnCanvas),
+        "the option gates the resize channel, and only the canvas path reads the margin through it"
     );
 }
 
