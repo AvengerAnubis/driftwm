@@ -395,7 +395,6 @@ impl DriftWm {
             &window,
             &wl_surface,
             edges,
-            initial_window_location,
             initial_window_size,
             pinned_initial_screen_pos,
         );

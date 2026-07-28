@@ -556,14 +556,7 @@ impl DriftWm {
                 };
                 // No pinned anchor: the pinned arm above delegated to the
                 // pointer path and returned, so this is a canvas window.
-                self.begin_client_resize(
-                    window,
-                    &wl_surface,
-                    edges,
-                    initial_location,
-                    initial_size,
-                    None,
-                );
+                self.begin_client_resize(window, &wl_surface, edges, initial_size, None);
                 (
                     ClusterMember::Client(window.clone()),
                     crate::grabs::SizeConstraints::for_window(window),

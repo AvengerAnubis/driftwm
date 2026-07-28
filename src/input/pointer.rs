@@ -953,6 +953,10 @@ impl DriftWm {
         } else {
             ClusterResizeSnapshot::empty()
         };
+        // Before the anchor is taken, as at every other resize seed site: the
+        // cancel is what stops a flight from moving the camera the anchor is
+        // projected through.
+        self.arm_interactive_move(&s.id);
         let (start_screen, start_zoom) = crate::grabs::resize_screen_anchor(&output, pos);
         let grab = ResizeGrab {
             start_data,
@@ -973,7 +977,6 @@ impl DriftWm {
             touch_slots: 0,
             locked_ratio: None,
         };
-        self.arm_interactive_move(&s.id);
         pointer.set_grab(self, grab, serial, Focus::Clear);
     }
 
@@ -1230,7 +1233,6 @@ impl DriftWm {
             window,
             &wl_surface,
             edges,
-            initial_window_location,
             initial_window_size,
             pinned_initial_screen_pos,
         );

@@ -938,33 +938,17 @@ impl DriftWm {
                 .borrow()
         });
 
-        let (
-            edges,
-            initial_window_location,
-            initial_window_size,
-            initial_screen_pos,
-            last_committed_size,
-        ) = match resize_state {
+        let (edges, initial_screen_pos, last_committed_size) = match resize_state {
             ResizeState::Resizing {
                 edges,
-                initial_window_location,
-                initial_window_size,
                 initial_screen_pos,
                 last_committed_size,
             }
             | ResizeState::WaitingForLastCommit {
                 edges,
-                initial_window_location,
-                initial_window_size,
                 initial_screen_pos,
                 last_committed_size,
-            } => (
-                edges,
-                initial_window_location,
-                initial_window_size,
-                initial_screen_pos,
-                last_committed_size,
-            ),
+            } => (edges, initial_screen_pos, last_committed_size),
             ResizeState::Idle => return,
         };
 
@@ -1087,8 +1071,6 @@ impl DriftWm {
                     .get_or_insert(|| RefCell::new(ResizeState::Idle))
                     .replace(ResizeState::Resizing {
                         edges,
-                        initial_window_location,
-                        initial_window_size,
                         initial_screen_pos,
                         last_committed_size: current_geo.size,
                     });

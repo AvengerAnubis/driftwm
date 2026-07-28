@@ -885,7 +885,6 @@ fn touch_resize_entry_establishes_the_whole_resize_invariant() {
             &mut f,
             &window,
             xdg_toplevel::ResizeEdge::Right,
-            INITIAL,
             initial_size(),
             None,
         );
@@ -908,7 +907,6 @@ size = [400, 300]
         let window = window_by_app_id(&mut f, "pin").unwrap();
         let site = f.state().stage.pin_of(&window).unwrap().screen_pos;
         let element = StageWindow::Client(window.clone());
-        let loc = f.state().stage.position_of(&element).unwrap();
         seed_fit_and_fill(&mut f, &window);
 
         let start = TouchGrabStartData {
@@ -934,7 +932,6 @@ size = [400, 300]
             &mut f,
             &window,
             xdg_toplevel::ResizeEdge::Right,
-            loc,
             initial_size(),
             Some(site),
         );
@@ -964,7 +961,6 @@ fn swipe_resize_entry_establishes_the_whole_resize_invariant() {
         &mut f,
         &window,
         xdg_toplevel::ResizeEdge::Right,
-        INITIAL,
         initial_size(),
         None,
     );

@@ -31,7 +31,6 @@ impl DriftWm {
         window: &Window,
         wl_surface: &WlSurface,
         edges: xdg_toplevel::ResizeEdge,
-        initial_window_location: Point<i32, Logical>,
         initial_window_size: Size<i32, Logical>,
         pinned_initial_screen_pos: Option<Point<i32, Logical>>,
     ) {
@@ -48,8 +47,6 @@ impl DriftWm {
                 .get_or_insert(|| RefCell::new(ResizeState::Idle))
                 .replace(ResizeState::Resizing {
                     edges,
-                    initial_window_location,
-                    initial_window_size,
                     initial_screen_pos: pinned_initial_screen_pos,
                     last_committed_size: initial_window_size,
                 });

@@ -1025,7 +1025,6 @@ fn pointer_resize_entry_establishes_the_whole_resize_invariant() {
             &mut f,
             &window,
             xdg_toplevel::ResizeEdge::Right,
-            Point::from((400, 300)),
             Size::from((400, 300)),
             None,
         );
@@ -1040,11 +1039,6 @@ fn pointer_resize_entry_establishes_the_whole_resize_invariant() {
         map_window(&mut f, id, "pin", (400, 300));
         let window = window_by_app_id(&mut f, "pin").unwrap();
         let site = f.state().stage.pin_of(&window).unwrap().screen_pos;
-        let loc = f
-            .state()
-            .stage
-            .position_of(&StageWindow::Client(window.clone()))
-            .unwrap();
         seed_fit_and_fill(&mut f, &window);
 
         let pointer = f.state().seat.get_pointer().unwrap();
@@ -1063,7 +1057,6 @@ fn pointer_resize_entry_establishes_the_whole_resize_invariant() {
             &mut f,
             &window,
             xdg_toplevel::ResizeEdge::Right,
-            loc,
             Size::from((400, 300)),
             Some(site),
         );
@@ -1103,7 +1096,6 @@ fn client_resize_request_establishes_the_whole_resize_invariant() {
             &mut f,
             &window,
             xdg_toplevel::ResizeEdge::Right,
-            Point::from((400, 300)),
             Size::from((400, 300)),
             None,
         );
@@ -1118,11 +1110,6 @@ fn client_resize_request_establishes_the_whole_resize_invariant() {
         let csurface = map_window(&mut f, id, "pin", (400, 300));
         let window = window_by_app_id(&mut f, "pin").unwrap();
         let site = f.state().stage.pin_of(&window).unwrap().screen_pos;
-        let loc = f
-            .state()
-            .stage
-            .position_of(&StageWindow::Client(window.clone()))
-            .unwrap();
         seed_fit_and_fill(&mut f, &window);
 
         press_over(
@@ -1140,7 +1127,6 @@ fn client_resize_request_establishes_the_whole_resize_invariant() {
             &mut f,
             &window,
             xdg_toplevel::ResizeEdge::Right,
-            loc,
             Size::from((400, 300)),
             Some(site),
         );

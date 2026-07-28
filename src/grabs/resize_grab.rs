@@ -146,22 +146,20 @@ pub enum ResizeState {
     Idle,
     Resizing {
         edges: xdg_toplevel::ResizeEdge,
-        initial_window_location: Point<i32, Logical>,
-        initial_window_size: Size<i32, Logical>,
         /// `Some` ⟹ pinned window: top/left-edge repositioning adjusts
         /// the pin site's `screen_pos` (output-relative) instead of the
         /// canvas loc.
         initial_screen_pos: Option<Point<i32, Logical>>,
-        /// Size the last processed commit settled at. `handle_resize_commit`
-        /// bumps the blur generation only when a commit changes this, so a
-        /// continuously-repainting client under a held-still border doesn't
-        /// re-blur every frosted window each repaint frame.
+        /// Size the last processed commit settled at. The settle compensates
+        /// the dragged edge against this rather than against the grab-start
+        /// size, so nothing here needs the grab's origin. It also gates the
+        /// blur bump: `handle_resize_commit` bumps only when a commit changes
+        /// this, so a continuously-repainting client under a held-still border
+        /// doesn't re-blur every frosted window each repaint frame.
         last_committed_size: Size<i32, Logical>,
     },
     WaitingForLastCommit {
         edges: xdg_toplevel::ResizeEdge,
-        initial_window_location: Point<i32, Logical>,
-        initial_window_size: Size<i32, Logical>,
         initial_screen_pos: Option<Point<i32, Logical>>,
         last_committed_size: Size<i32, Logical>,
     },
@@ -421,8 +419,6 @@ impl ResizeGrab {
                 };
                 cell.replace(ResizeState::WaitingForLastCommit {
                     edges: self.edges,
-                    initial_window_location: self.initial_window_location,
-                    initial_window_size: self.initial_window_size,
                     initial_screen_pos: self.pinned_initial_screen_pos,
                     last_committed_size,
                 });

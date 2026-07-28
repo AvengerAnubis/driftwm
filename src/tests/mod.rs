@@ -321,7 +321,6 @@ fn assert_resize_entered(
     f: &mut Fixture,
     window: &Window,
     edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
-    location: smithay::utils::Point<i32, smithay::utils::Logical>,
     size: smithay::utils::Size<i32, smithay::utils::Logical>,
     screen_pos: Option<smithay::utils::Point<i32, smithay::utils::Logical>>,
 ) {
@@ -349,8 +348,6 @@ fn assert_resize_entered(
     });
     let ResizeState::Resizing {
         edges: got_edges,
-        initial_window_location,
-        initial_window_size,
         initial_screen_pos,
         last_committed_size,
     } = state
@@ -358,11 +355,6 @@ fn assert_resize_entered(
         panic!("the resize entry left the surface Resizing");
     };
     assert_eq!(got_edges, edges, "the seeded edge");
-    assert_eq!(
-        initial_window_location, location,
-        "the seeded canvas anchor"
-    );
-    assert_eq!(initial_window_size, size, "the seeded size");
     assert_eq!(
         initial_screen_pos, screen_pos,
         "the seeded screen anchor — `Some` only for a pinned resize"
@@ -408,14 +400,8 @@ fn install_client_resize_grab(
     let initial_window_size = window.geometry().size;
 
     let surface = server_surface(window);
-    f.state().begin_client_resize(
-        window,
-        &surface,
-        edges,
-        initial_window_location,
-        initial_window_size,
-        None,
-    );
+    f.state()
+        .begin_client_resize(window, &surface, edges, initial_window_size, None);
 
     let (start_screen, start_zoom) = resize_screen_anchor(&output, start);
     let grab = ResizeGrab {
