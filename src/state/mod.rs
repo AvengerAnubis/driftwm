@@ -701,6 +701,14 @@ pub struct DriftWm {
     /// first-commit placement, awaiting adoption into the suspended window it
     /// names. Purged with the surface if the client dies before mapping.
     pub pending_adoptions: HashMap<WlSurface, SuspendedId>,
+    /// Adoptions a live interactive grab held back, keyed by the relaunched
+    /// window's root surface. The window keeps whatever placement it was given
+    /// and moves into the stand-in's slot once the grab lets go; nothing revives
+    /// a relaunch that hit its TTL under the grab, so a long enough drag ends
+    /// with the window placed normally and the stand-in left behind as a stale
+    /// duplicate — the same end state as an app that took longer than the TTL to
+    /// come back.
+    pub(crate) deferred_adoptions: HashMap<WlSurface, SuspendedId>,
     /// Durable session store (session restore): the `session.json` path, dirty
     /// timer, carried-forward entries, and fresh-boot camera seed.
     pub session_store: SessionStore,
@@ -951,6 +959,7 @@ impl DriftWm {
             self.interactive_move.remove(i);
         }
         self.flush_deferred_views();
+        self.schedule_deferred_adoptions();
     }
 
     /// Whether `element` is the target of a live move grab. Membership only —
@@ -1124,6 +1133,7 @@ impl DriftWm {
             ("unmap_snapshots", self.unmap_snapshots.len()),
             ("pending_relaunches", self.pending_relaunches.len()),
             ("pending_adoptions", self.pending_adoptions.len()),
+            ("deferred_adoptions", self.deferred_adoptions.len()),
             (
                 "idle_inhibiting_surfaces",
                 self.idle_inhibiting_surfaces.len(),

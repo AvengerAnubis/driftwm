@@ -1177,6 +1177,212 @@ fn mid_move_grab_defers_adoption_then_adopts_when_it_ends() {
     client_close(&mut f, cid, &existing);
 }
 
+/// The first-commit path must not adopt into a stand-in the user is dragging:
+/// the adopt destroys the stand-in, leaving the grab that was driving it pushing
+/// air. The relaunched window takes normal placement instead — a state it can
+/// sit in indefinitely — and the stashed adopt lands the moment the drag ends,
+/// without the app committing or activating again.
+#[test]
+fn first_commit_adopt_defers_under_a_stand_in_drag_then_lands_on_release() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (800, 500), (400, 300));
+    let susp = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let eid = f.state().stage.id_of(&susp).unwrap();
+    f.state().relaunch_suspended(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+
+    // The user grabs the stand-in while the app is still starting up.
+    f.state().arm_interactive_move(&sid);
+
+    // The relaunched app maps, presents its token, and reaches the first sized
+    // commit — the adopt point.
+    let cid = f.add_client();
+    let surface = begin_window(&mut f, cid, "myapp");
+    present_token(&mut f, cid, &surface, token);
+    finish_window(&mut f, cid, &surface, (300, 200));
+
+    let placed = mapped_client(&mut f, "myapp").expect("the window mapped");
+    assert!(
+        suspended_present(&mut f),
+        "the stand-in survived the commit that would have consumed it"
+    );
+    assert_ne!(
+        f.state().stage.id_of(&placed),
+        Some(eid),
+        "the window was placed on its own, not seated in the dragged stand-in's slot"
+    );
+    assert!(
+        f.state().camera_target().is_none(),
+        "the placement staged no camera flight: a pan warps the pointer into the live grab"
+    );
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        1,
+        "the adopt was stashed for the grab's release"
+    );
+    assert_eq!(
+        f.state().debug_counters()["pending_relaunches"],
+        1,
+        "the pending relaunch stays live for its TTL"
+    );
+    assert_eq!(token_count(&mut f), 1, "the token was not deregistered");
+
+    // The drag ends: the adopt lands off the release alone.
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+
+    let adopted = window_by_app_id(&mut f, "myapp").expect("adopted once the grab ended");
+    assert_eq!(
+        f.state().stage.id_of(&adopted),
+        Some(eid),
+        "took the stand-in's ElementId"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&adopted),
+        Some(Point::from((800, 500))),
+        "relocated onto the stand-in rect after the grab cleared"
+    );
+    assert!(
+        !suspended_present(&mut f),
+        "the stand-in was consumed by the adopt"
+    );
+    assert_eq!(f.state().debug_counters()["deferred_adoptions"], 0);
+
+    settle_resize(&mut f, cid, &surface, (400, 300));
+    client_close(&mut f, cid, &surface);
+}
+
+/// The token path defers on the same grab, read from the other side: the window
+/// presenting the token is idle, and it is the *stand-in* the user is dragging.
+/// Adopting would still destroy it mid-drag, so the adopt waits for the release
+/// — and lands there without the app presenting the token a second time.
+#[test]
+fn token_adopt_defers_under_a_stand_in_drag_then_lands_on_release() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    // An existing window of the app is open; a same-app stand-in is relaunched.
+    let cid = f.add_client();
+    let existing = map_window(&mut f, cid, "myapp", (300, 200));
+    let win = window_by_app_id(&mut f, "myapp").unwrap();
+    let pos_before = f.state().stage.position_of(&win);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (800, 500), (400, 300));
+    let susp = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let eid = f.state().stage.id_of(&susp).unwrap();
+    f.state().relaunch_suspended(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+
+    // The stand-in, not the window, is the one under the live grab.
+    f.state().arm_interactive_move(&sid);
+    present_token(&mut f, cid, &existing, token);
+
+    assert_eq!(
+        f.state().stage.position_of(&win),
+        pos_before,
+        "the window was not teleported into the dragged slot"
+    );
+    assert!(
+        suspended_present(&mut f),
+        "the stand-in was retained, not dismissed"
+    );
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        1,
+        "the adopt was stashed for the grab's release"
+    );
+    assert_eq!(
+        f.state().debug_counters()["pending_relaunches"],
+        1,
+        "the pending relaunch stays live for its TTL"
+    );
+    assert_eq!(token_count(&mut f), 1, "the token was not deregistered");
+
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+
+    let adopted = window_by_app_id(&mut f, "myapp").expect("adopted once the drag ended");
+    assert_eq!(
+        f.state().stage.id_of(&adopted),
+        Some(eid),
+        "took the stand-in's ElementId"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&adopted),
+        Some(Point::from((800, 500))),
+        "relocated onto the stand-in rect after the grab cleared"
+    );
+    assert!(
+        !suspended_present(&mut f),
+        "the stand-in was consumed by the adopt"
+    );
+
+    settle_resize(&mut f, cid, &existing, (400, 300));
+    client_close(&mut f, cid, &existing);
+}
+
+/// A drag that outlives the 30s relaunch deadline is the deferral's end state:
+/// the deadline sweep reclaims the pending relaunch, the release finds nothing
+/// to adopt into, and the window keeps the placement it was given while the
+/// stand-in stays behind as a stale duplicate — exactly what an app that took
+/// longer than the TTL to come back leaves behind.
+#[test]
+fn an_adopt_deferred_past_the_relaunch_deadline_leaves_a_stale_stand_in() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (800, 500), (400, 300));
+    let susp = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let eid = f.state().stage.id_of(&susp).unwrap();
+    f.state().relaunch_suspended(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+
+    f.state().arm_interactive_move(&sid);
+    let cid = f.add_client();
+    let surface = begin_window(&mut f, cid, "myapp");
+    present_token(&mut f, cid, &surface, token);
+    finish_window(&mut f, cid, &surface, (300, 200));
+    assert_eq!(f.state().debug_counters()["deferred_adoptions"], 1);
+
+    // The drag is still going when the deadline passes.
+    f.state()
+        .sweep_pending_relaunches(Instant::now() + Duration::from_secs(31));
+    assert_eq!(f.state().debug_counters()["pending_relaunches"], 0);
+
+    f.state().disarm_interactive_move(&sid);
+    f.pump(1);
+
+    assert!(
+        suspended_present(&mut f),
+        "the stand-in stays behind as a stale duplicate"
+    );
+    let placed = mapped_client(&mut f, "myapp").expect("the window kept its own placement");
+    assert_ne!(
+        f.state().stage.id_of(&placed),
+        Some(eid),
+        "the expired relaunch was not revived into an adopt"
+    );
+    assert_eq!(
+        f.state().debug_counters()["deferred_adoptions"],
+        0,
+        "the stash drained on the release instead of lingering"
+    );
+
+    f.state().dismiss_suspended(sid);
+    client_close(&mut f, cid, &surface);
+}
+
 /// A dismiss while a relaunch is in flight cancels it: the token is deregistered
 /// on the spot, so a late presentation is a no-op and the window maps normally.
 #[test]

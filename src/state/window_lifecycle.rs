@@ -115,10 +115,12 @@ impl DriftWm {
             .capture_state
             .remove(&format!("cap-tl:{:?}", id));
         self.image_copy_capture_state.remove_toplevel(surface);
-        // A relaunched surface that died before adoption must not leave its
+        // A relaunched surface that died before adoption — waiting for its first
+        // commit, or for the grab holding the adopt back — must not leave either
         // stash behind (the pending relaunch itself is keyed by suspended id and
         // GC'd on its own deadline).
         self.pending_adoptions.remove(surface);
+        self.deferred_adoptions.remove(surface);
         self.auto_anchor_snapshot.remove(surface);
         // Drop snapshots pointing at the destroyed surface as their anchor.
         // Keep `None`-anchor entries (user had no focus) and stand-in anchors

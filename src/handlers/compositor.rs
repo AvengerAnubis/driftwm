@@ -261,11 +261,23 @@ impl CompositorHandler for DriftWm {
                     // suspended window: it takes that window's slot instead of
                     // being placed fresh. Resolved (and the token stash
                     // consumed) here so it precedes all placement below.
-                    let adopted_sid = if has_size {
+                    let mut adopted_sid = if has_size {
                         self.adoption_target(&root, &window)
                     } else {
                         None
                     };
+                    // Taking a stand-in the user is dragging would destroy it
+                    // under the grab driving it. Place the window normally for
+                    // now — a coherent state it can sit in indefinitely — and
+                    // move it into the slot once the grab lets go.
+                    let mut defer_adopt = false;
+                    if let Some(sid) = adopted_sid
+                        && self.adopt_fights_a_grab(&window, sid)
+                    {
+                        self.deferred_adoptions.insert(root.clone(), sid);
+                        adopted_sid = None;
+                        defer_adopt = true;
+                    }
 
                     // Capture preferred size once; later updated only on
                     // user resize-grab completion. Adoption sets its own
@@ -642,7 +654,13 @@ impl CompositorHandler for DriftWm {
                             // zoomed out and asked for reset).
                             let cursor_overview_rescue =
                                 placed_at_cursor && reset && self.zoom() < 1.0 - 1e-9;
+                            // A deferred adopt means a grab is still live, and a
+                            // camera flight warps the pointer into it — dragging
+                            // the grabbed element from a motionless mouse. Raise
+                            // and focus without the pan; the adopt brings the
+                            // window into view when the grab ends.
                             if self.stage.is_pinned(&window)
+                                || defer_adopt
                                 || placed_at_cursor && !cursor_overview_rescue
                             {
                                 let serial = smithay::utils::SERIAL_COUNTER.next_serial();

@@ -113,15 +113,6 @@ time — see the `unfit_window` guard and the two `adopt_relaunched` fixes.
   `cmd_move`'s single `geometry().size` read also feeds both the read and the
   write arm, so a fix has to decide whether `driftwm msg move` *reporting*
   changes with it, or accept read-then-write being non-idempotent mid-settle.
-- **A stand-in is adopted out from under a live grab.**
-  `element_under_interactive_grab`'s contract is that nothing may reposition an
-  element under a grab, but the activation path only asks about
-  `StageWindow::Client`, and the first-commit path asks nothing. Relaunch a
-  stand-in, drag it while the app starts (1-3 s), and the adopt destroys it
-  mid-drag: the grab degrades to a pass-through and the user drags air until
-  button-up. A *client* under a grab defers to the 30 s TTL; a stand-in does
-  not. No corruption — both grabs anticipate the vanish and `interactive_move`
-  stays balanced — but the asymmetry is a behaviour decision, not a missed line.
 - **Zero-net-change resize strands `ResizeState::WaitingForLastCommit`.**
   Grab start sets `Resizing` in *pending* state only, so a resize that ends
   where it began leaves `send_pending_configure` with nothing to send and the

@@ -4,7 +4,7 @@ pub mod layer_shell;
 pub mod xdg_shell;
 
 use crate::decorations::DecorationKey;
-use crate::state::{DriftWm, FocusIntent, FocusTarget, StageWindow};
+use crate::state::{DriftWm, FocusIntent, FocusTarget};
 use driftwm::window_ext::WindowExt;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::{
@@ -314,35 +314,7 @@ impl XdgActivationHandler for DriftWm {
             // The press expressed placement intent at the stand-in's slot, so
             // adopt the window into it.
             if let Some(window) = window {
-                // A window already fullscreen, pinned, rule-placed as a widget,
-                // or living as a dialog/modal of another window is where policy
-                // (or its parent) wants it; adopting would rip it out of that
-                // membership — and, for a dialog, tear it off its parent. Every
-                // suspend path excludes dialogs, so no stand-in ever stands for
-                // one. Drop the stand-in instead and leave the window alone.
-                if self.is_window_fullscreen(&window)
-                    || self.is_pinned(&window)
-                    || window.is_widget()
-                    || window.parent_surface().is_some()
-                    || window.is_modal()
-                {
-                    tracing::debug!(
-                        "relaunch adopt of {sid:?} skipped: window is fullscreen/pinned/widget/dialog; dismissing stand-in"
-                    );
-                    self.dismiss_suspended(sid);
-                    return;
-                }
-                // About to adopt — but not while the window is under an active
-                // interactive move/resize grab: teleporting it would fight the
-                // grab. Transient (unlike the carve-outs above), so leave the
-                // pending relaunch to its TTL and don't dismiss the stand-in.
-                if self.element_under_interactive_grab(&StageWindow::Client(window.clone())) {
-                    return;
-                }
-                self.adopt_relaunched(&window, &root, sid);
-                if let Some(toplevel) = window.toplevel() {
-                    toplevel.send_configure();
-                }
+                self.adopt_placed_or_defer(&window, &root, sid);
                 return;
             }
         }

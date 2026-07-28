@@ -315,8 +315,9 @@ impl DriftWm {
     /// snaps it back, with button-up reseeding the snap rect), and an animation
     /// entry would re-seed its leg on every motion and rubber-band behind the
     /// cursor. Unlike the durable fullscreen/pinned/widget/dialog carve-outs
-    /// this is transient, so the relaunch caller leaves the pending relaunch to
-    /// its TTL rather than dismissing.
+    /// this is transient, so the relaunch caller stashes the adopt for the
+    /// grab's release rather than dismissing, falling back to the pending
+    /// relaunch's TTL if the grab outlives it.
     pub(crate) fn element_under_interactive_grab(&self, element: &StageWindow) -> bool {
         if self.element_under_interactive_move(element) {
             return true;
@@ -334,6 +335,86 @@ impl DriftWm {
                 )
             })
         })
+    }
+
+    /// Whether adopting into `sid` would fight a live grab — on the window being
+    /// adopted, or on the stand-in whose slot it takes. Either side is destroyed
+    /// or teleported by the adopt, which leaves the grab that was driving it
+    /// pushing air until the button comes back up.
+    pub(crate) fn adopt_fights_a_grab(&self, window: &Window, sid: SuspendedId) -> bool {
+        self.element_under_interactive_grab(&StageWindow::Client(window.clone()))
+            || self
+                .find_suspended(sid)
+                .is_some_and(|s| self.element_under_interactive_grab(&StageWindow::Suspended(s)))
+    }
+
+    /// Adopt an already-placed `window` into stand-in `sid`, or resolve why it
+    /// can't be: a window that has landed somewhere the adopt would rip it out
+    /// of drops the stand-in instead, and a grab on either side defers the adopt
+    /// to [`Self::flush_deferred_adoptions`].
+    pub(crate) fn adopt_placed_or_defer(
+        &mut self,
+        window: &Window,
+        root: &WlSurface,
+        sid: SuspendedId,
+    ) {
+        // A window already fullscreen, pinned, rule-placed as a widget, or
+        // living as a dialog/modal of another window is where policy (or its
+        // parent) wants it; adopting would rip it out of that membership — and,
+        // for a dialog, tear it off its parent. Every suspend path excludes
+        // dialogs, so no stand-in ever stands for one. Drop the stand-in instead
+        // and leave the window alone.
+        if self.is_window_fullscreen(window)
+            || self.is_pinned(window)
+            || window.is_widget()
+            || window.parent_surface().is_some()
+            || window.is_modal()
+        {
+            tracing::debug!(
+                "relaunch adopt of {sid:?} skipped: window is fullscreen/pinned/widget/dialog; dismissing stand-in"
+            );
+            self.dismiss_suspended(sid);
+            return;
+        }
+        // Transient, unlike the carve-outs above: the pending relaunch keeps
+        // running so the grab's release can still land the adopt.
+        if self.adopt_fights_a_grab(window, sid) {
+            self.deferred_adoptions.insert(root.clone(), sid);
+            return;
+        }
+        self.adopt_relaunched(window, root, sid);
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.send_configure();
+        }
+    }
+
+    /// Queue the adoptions a grab held back for the moment the current dispatch
+    /// unwinds. The adopt re-seats pointer focus and a grab's teardown runs
+    /// inside the pointer mutex, so it can't run inline from there.
+    pub(crate) fn schedule_deferred_adoptions(&mut self) {
+        if self.deferred_adoptions.is_empty() {
+            return;
+        }
+        self.loop_handle
+            .insert_idle(|data| data.flush_deferred_adoptions());
+    }
+
+    /// Land the deferred adoptions whose grab has let go. Each entry re-runs the
+    /// full decision, so one still under a grab of its own simply defers again
+    /// rather than blocking the rest. A relaunch the TTL swept while the grab
+    /// was held is not revived: the window keeps the placement it already has
+    /// and the stand-in stays behind as a stale duplicate — the end state of any
+    /// relaunch that outlives its deadline.
+    pub(crate) fn flush_deferred_adoptions(&mut self) {
+        for (root, sid) in std::mem::take(&mut self.deferred_adoptions) {
+            if !self.pending_relaunches.contains_key(&sid) || self.find_suspended(sid).is_none() {
+                continue;
+            }
+            let Some(window) = self.window_for_surface(&root) else {
+                continue;
+            };
+            self.adopt_placed_or_defer(&window, &root, sid);
+        }
     }
 
     /// Adopt `window` (a relaunched client's freshly-mapped toplevel) into
