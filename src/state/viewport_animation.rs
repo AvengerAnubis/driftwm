@@ -12,6 +12,7 @@
 use std::time::{Duration, Instant};
 
 use smithay::input::pointer::CursorImageStatus;
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::utils::{Logical, Point};
 
 use driftwm::canvas::{self, CanvasPos};
@@ -21,17 +22,33 @@ use smithay::output::Output;
 
 use super::{DriftWm, FocusTarget, output_state};
 
+/// How long after the last pan event momentum auto-launches, covering touchpads
+/// that don't send AxisStop on finger lift.
+const MOMENTUM_LAUNCH_DELAY: Duration = Duration::from_millis(50);
+
 impl DriftWm {
     /// Stop `output`'s camera flight where it stands: both targets, the zoom
     /// anchor they lerp around, and any momentum still feeding them.
     /// `overview_return` deliberately survives — it is a place to go back to,
     /// not a motion.
     pub(crate) fn cancel_animations_on(&mut self, output: &Output) {
-        let mut os = output_state(output);
-        os.camera_target = None;
-        os.zoom_target = None;
-        os.zoom_animation_anchor = None;
-        os.momentum.stop();
+        {
+            let mut os = output_state(output);
+            os.camera_target = None;
+            os.zoom_target = None;
+            os.zoom_animation_anchor = None;
+            os.momentum.stop();
+        }
+        // Per-output, so only a launch pending on *this* output is disarmed —
+        // an unconditional clear would let a fit or a navigation on one screen
+        // swallow the finger lift on another.
+        if self
+            .momentum_deadline
+            .as_ref()
+            .is_some_and(|(_, name)| *name == output.name())
+        {
+            self.momentum_deadline = None;
+        }
     }
 
     /// [`Self::cancel_animations_on`] for every output. What a grab install
@@ -309,7 +326,9 @@ impl DriftWm {
             os.camera.y += delta.y;
         });
         self.update_output_from_camera();
-        self.schedule_momentum_timer();
+        if let Some(output) = self.active_output() {
+            self.schedule_momentum_timer(&output);
+        }
     }
 
     /// Apply a viewport pan delta on a specific output (for grabs pinned to an output).
@@ -331,44 +350,60 @@ impl DriftWm {
             os.camera.y += delta.y;
         }
         self.update_output_from_camera();
-        self.schedule_momentum_timer();
+        self.schedule_momentum_timer(output);
     }
 
-    /// Schedule a 50ms one-shot timer that auto-launches momentum.
-    /// Covers touchpads that don't send AxisStop on finger lift.
-    /// Each call resets the timer — only the last one fires.
-    fn schedule_momentum_timer(&mut self) {
-        if let Some(token) = self.momentum_timer.take() {
-            self.loop_handle.remove(token);
+    /// Push the momentum auto-launch out to [`MOMENTUM_LAUNCH_DELAY`] from now,
+    /// arming the timer that serves it if the burst hasn't already.
+    ///
+    /// Pan events arrive at touchpad rates, so re-registering the timer per
+    /// event would pay a source-list scan and a timer-wheel rebuild each time.
+    /// Instead one timer per burst reschedules itself onto whatever deadline it
+    /// finds, and drops once that deadline is met or taken away — an idle
+    /// compositor keeps no armed timer waking the loop.
+    fn schedule_momentum_timer(&mut self, output: &Output) {
+        self.momentum_deadline = Some((Instant::now() + MOMENTUM_LAUNCH_DELAY, output.name()));
+        if self.momentum_timer.is_some() {
+            return;
         }
-        let token = self
+        self.momentum_timer = self
             .loop_handle
             .insert_source(
-                smithay::reexports::calloop::timer::Timer::from_duration(Duration::from_millis(50)),
+                Timer::from_duration(MOMENTUM_LAUNCH_DELAY),
                 |_, _, data: &mut DriftWm| {
-                    data.launch_momentum();
-                    smithay::reexports::calloop::timer::TimeoutAction::Drop
+                    let Some((deadline, name)) = data.momentum_deadline.clone() else {
+                        // Clearing before the drop is what lets the next pan
+                        // re-arm; leaving the token set wedges `is_some()` true
+                        // against a source the loop has already unregistered.
+                        data.momentum_timer = None;
+                        return TimeoutAction::Drop;
+                    };
+                    if Instant::now() < deadline {
+                        return TimeoutAction::ToInstant(deadline);
+                    }
+                    data.momentum_timer = None;
+                    // Resolved by name at fire time, so a burst on a
+                    // non-active output launches there, and one whose output
+                    // has since disconnected launches nowhere.
+                    match data.output_by_name(&name) {
+                        Some(output) => data.launch_momentum_on(&output),
+                        None => data.momentum_deadline = None,
+                    }
+                    TimeoutAction::Drop
                 },
             )
             .ok();
-        self.momentum_timer = token;
-    }
-
-    fn cancel_momentum_timer(&mut self) {
-        if let Some(token) = self.momentum_timer.take() {
-            self.loop_handle.remove(token);
-        }
     }
 
     /// Launch momentum on the active output — called when input ends (finger lift, gesture end).
     pub fn launch_momentum(&mut self) {
-        self.cancel_momentum_timer();
+        self.momentum_deadline = None;
         self.with_output_state(|os| os.momentum.launch());
     }
 
     /// Launch momentum on a specific output.
     pub fn launch_momentum_on(&mut self, output: &smithay::output::Output) {
-        self.cancel_momentum_timer();
+        self.momentum_deadline = None;
         super::output_state(output).momentum.launch();
     }
 

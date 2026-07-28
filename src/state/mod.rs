@@ -793,6 +793,12 @@ pub struct DriftWm {
     pub pending_middle_click: Option<PendingMiddleClick>,
 
     pub momentum_timer: Option<RegistrationToken>,
+    /// When a pan burst's auto-launch is due, and the output it pans. Moves with
+    /// every pan event while `momentum_timer` stays inserted for the whole burst
+    /// — the timer reschedules itself onto this deadline instead of being torn
+    /// down and re-registered per event. Held by name so a launch pending on an
+    /// output that disconnects mid-burst simply resolves to nothing.
+    pub momentum_deadline: Option<(Instant, String)>,
 
     pub session: Option<LibSeatSession>,
     pub input_devices: Vec<smithay::reexports::input::Device>,

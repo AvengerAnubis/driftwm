@@ -379,6 +379,7 @@ impl DriftWm {
             gesture_state: None,
             pending_middle_click: None,
             momentum_timer: None,
+            momentum_deadline: None,
             session: None,
             input_devices: Vec::new(),
             state_file_cameras: HashMap::new(),

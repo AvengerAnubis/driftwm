@@ -847,3 +847,189 @@ fn a_camera_flight_armed_after_a_move_grab_still_carries_the_window() {
     );
     end_grab(&mut f);
 }
+
+/// Long enough for the 50 ms auto-launch deadline to be safely in the past.
+const PAST_MOMENTUM_DEADLINE: Duration = Duration::from_millis(80);
+
+/// Two pans a few ms apart on `output`, which is what the velocity tracker needs
+/// to produce a non-zero launch velocity — one sample launches at zero.
+fn pan_burst(f: &mut Fixture, output: &smithay::output::Output, first_time_ms: u32) {
+    f.state()
+        .drift_pan_on(Point::from((10.0, 0.0)), first_time_ms, output);
+    f.state()
+        .drift_pan_on(Point::from((10.0, 0.0)), first_time_ms + 10, output);
+}
+
+fn coasting(output: &smithay::output::Output) -> bool {
+    output_state(output).momentum.coasting
+}
+
+/// A pan burst arrives at touchpad rates, so the auto-launch timer is inserted
+/// once and left alone; only its deadline moves.
+#[test]
+fn a_pan_burst_arms_the_momentum_timer_once() {
+    let mut f = Fixture::new();
+    f.skip_baseline_check();
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+
+    f.state().drift_pan(Point::from((10.0, 0.0)), 0);
+    let armed = f.state().momentum_timer;
+    assert!(
+        armed.is_some(),
+        "the first pan of the burst armed the timer"
+    );
+    let first_deadline = f.state().momentum_deadline.clone().unwrap().0;
+
+    for n in 1..8 {
+        f.state().drift_pan(Point::from((10.0, 0.0)), n * 5);
+        assert_eq!(
+            f.state().momentum_timer,
+            armed,
+            "pan {n} rode the timer already armed instead of re-registering one"
+        );
+    }
+
+    assert!(
+        f.state().momentum_deadline.clone().unwrap().0 > first_deadline,
+        "the deadline is what the burst moves"
+    );
+}
+
+/// The timer fires once, launches, and drops itself — and clears its own token
+/// on the way out, so the next burst arms a fresh one. Leaving the token set
+/// would wedge the lazy re-arm and silently kill auto-launch for the session.
+#[test]
+fn the_momentum_timer_fires_once_and_a_later_pan_re_arms_it() {
+    let mut f = Fixture::new();
+    f.skip_baseline_check();
+    let out = f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+
+    pan_burst(&mut f, &out, 0);
+    std::thread::sleep(PAST_MOMENTUM_DEADLINE);
+    f.pump(1);
+
+    assert!(
+        f.state().momentum_timer.is_none(),
+        "the fired timer dropped itself"
+    );
+    assert!(
+        f.state().momentum_deadline.is_none(),
+        "and took its deadline with it"
+    );
+    assert!(
+        coasting(&out),
+        "the finger lift the touchpad never reported auto-launched momentum"
+    );
+
+    pan_burst(&mut f, &out, 100);
+    assert!(
+        !coasting(&out),
+        "precondition: the new burst is live input again"
+    );
+    assert!(
+        f.state().momentum_timer.is_some(),
+        "the next burst arms a fresh timer"
+    );
+
+    std::thread::sleep(PAST_MOMENTUM_DEADLINE);
+    f.pump(1);
+    assert!(
+        coasting(&out),
+        "and it fires, so auto-launch survives the first burst"
+    );
+}
+
+/// A pan driven onto a non-active output launches momentum *there*. The deadline
+/// carries the output it was armed for, rather than the callback asking which
+/// output happens to be active when it fires.
+#[test]
+fn a_pan_on_an_inactive_output_auto_launches_momentum_there() {
+    let mut f = Fixture::new();
+    f.skip_baseline_check();
+    let out1 = f.add_output(1, (1920, 1080));
+    let out2 = f.add_output(2, (1280, 720));
+    assert_eq!(
+        f.state().active_output(),
+        Some(out1.clone()),
+        "precondition: the panned output is not the active one"
+    );
+
+    pan_burst(&mut f, &out2, 0);
+    std::thread::sleep(PAST_MOMENTUM_DEADLINE);
+    f.pump(1);
+
+    assert!(coasting(&out2), "the output the hand panned coasts");
+    assert!(
+        !coasting(&out1),
+        "and the active output, which was never panned, does not"
+    );
+}
+
+/// A real finger lift launches immediately and disarms the deadline; the timer
+/// it leaves behind fires once, finds nothing pending, and collects itself
+/// without launching a second time.
+#[test]
+fn an_explicit_launch_leaves_the_armed_timer_to_collect_itself() {
+    let mut f = Fixture::new();
+    f.skip_baseline_check();
+    let out = f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+
+    pan_burst(&mut f, &out, 0);
+    f.state().launch_momentum();
+    assert!(
+        f.state().momentum_deadline.is_none(),
+        "the lift took the pending auto-launch with it"
+    );
+    assert!(coasting(&out), "and launched momentum itself");
+
+    output_state(&out).momentum.stop();
+    std::thread::sleep(PAST_MOMENTUM_DEADLINE);
+    f.pump(1);
+
+    assert!(
+        f.state().momentum_timer.is_none(),
+        "the orphaned timer collected itself"
+    );
+    assert!(
+        !coasting(&out),
+        "and did not launch a second time behind the lift"
+    );
+}
+
+/// `cancel_animations_on` is per-output — fit, navigation and every grab install
+/// route through it — so it must disarm only a launch pending on its own output.
+#[test]
+fn cancelling_one_output_leaves_anothers_pending_launch_armed() {
+    let mut f = Fixture::new();
+    f.skip_baseline_check();
+    let out1 = f.add_output(1, (1920, 1080));
+    let out2 = f.add_output(2, (1280, 720));
+
+    pan_burst(&mut f, &out2, 0);
+    assert!(
+        f.state().momentum_deadline.is_some(),
+        "precondition: a launch is pending on the second output"
+    );
+
+    f.state().cancel_animations_on(&out1);
+    assert!(
+        f.state().momentum_deadline.is_some(),
+        "a cancel on the other output leaves it armed"
+    );
+
+    f.state().cancel_animations_on(&out2);
+    assert!(
+        f.state().momentum_deadline.is_none(),
+        "its own output's cancel disarms it"
+    );
+
+    std::thread::sleep(PAST_MOMENTUM_DEADLINE);
+    f.pump(1);
+    assert!(
+        !coasting(&out2),
+        "so the cancelled burst never coasts after the fact"
+    );
+}

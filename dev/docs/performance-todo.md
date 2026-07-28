@@ -41,9 +41,6 @@ or key on (quantized position, behind-element commits).
   blobs upload regardless of visibility and back up during fast pans
   (`src/render/tile_worker.rs`, `tile_chunks.rs`). Cancel unwanted requests; drop
   off-viewport responses; bound the queue. _Gigapixel-TIFF-wallpaper path only._
-- **B11** Momentum auto-launch timer removed + re-inserted per gesture event
-  (`src/state/viewport_animation.rs`, ~140-1000 Hz during pans). Keep one timer,
-  reschedule.
 - **B12** Output-outline strips rebuild pixel Vecs + `MemoryRenderBuffer` + fresh
   element ids per edge per frame (`src/render/mod.rs`), defeating damage tracking.
   _Multi-monitor only._ Cache per (output, color, size).
