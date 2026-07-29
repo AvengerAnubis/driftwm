@@ -5,6 +5,8 @@ use driftwm::config::{Action, Config, DecorationMode, Direction};
 use smithay::input::pointer::MotionEvent;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
+use smithay::wayland::shell::wlr_layer::Layer;
+use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1;
 
 use crate::ipc::protocol::{Request, Response, WindowSelector};
 use crate::state::StageWindow;
@@ -2852,5 +2854,61 @@ fn ipc_move_refuses_pinned_and_fullscreen_windows() {
         f.state().stage.position_of(&a),
         parked,
         "and stays parked at its camera origin"
+    );
+}
+
+/// A panel that destroys its layer role and takes a fresh one on the same
+/// `wl_surface` gets an initial configure for the new role. Left in the output's
+/// map, the dead role is what the recreate's first commit finds — lookups match
+/// by `wl_surface` in map order — so the configure goes out on the destroyed
+/// proxy while marking the shared attributes as configured, and the client waits
+/// forever for a size it will never hear.
+#[test]
+fn a_recreated_layer_role_gets_its_own_initial_configure() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    let layer = f
+        .client(id)
+        .create_layer(None, zwlr_layer_shell_v1::Layer::Overlay, "panel");
+    let surface = layer.surface.clone();
+    // Unanchored, so the compositor can't derive a size from anchor edges: every
+    // commit needs a non-zero requested size or smithay kills the client.
+    layer.set_configure_props(super::client::LayerConfigureProps {
+        size: Some((400, 300)),
+        ..Default::default()
+    });
+    layer.commit();
+    f.double_roundtrip(id);
+
+    let layer = f.client(id).layer(&surface);
+    layer.set_size(400, 300);
+    layer.attach_new_buffer();
+    layer.ack_last_and_commit();
+    f.double_roundtrip(id);
+
+    // The destroy wipes the role's cached state, so the size has to be
+    // requested again before this commit.
+    let layer =
+        f.client(id)
+            .recreate_layer(&surface, None, zwlr_layer_shell_v1::Layer::Overlay, "panel");
+    layer.set_configure_props(super::client::LayerConfigureProps {
+        size: Some((400, 300)),
+        ..Default::default()
+    });
+    layer.commit();
+    f.double_roundtrip(id);
+
+    let configures = f.client(id).layer(&surface).format_recent_configures();
+    assert!(
+        configures.contains("size: 400 × 300"),
+        "the recreated role must be configured in its own right, got:\n{configures}"
+    );
+    assert_eq!(
+        f.state().layers_on_sorted(&output, Layer::Overlay).len(),
+        1,
+        "and the dead role must not linger in the map, where it would still \
+         claim an exclusive zone and sit above the live one for focus"
     );
 }

@@ -445,6 +445,17 @@ impl Client {
         self.state.create_layer(output, layer, namespace.to_owned())
     }
 
+    pub fn recreate_layer(
+        &mut self,
+        surface: &WlSurface,
+        output: Option<&WlOutput>,
+        layer: zwlr_layer_shell_v1::Layer,
+        namespace: &str,
+    ) -> &mut LayerSurface {
+        self.state
+            .recreate_layer(surface, output, layer, namespace.to_owned())
+    }
+
     pub fn layer(&mut self, surface: &WlSurface) -> &mut LayerSurface {
         self.state.layer(surface)
     }
@@ -593,6 +604,33 @@ impl State {
 
         self.layers.push(layer_surface);
         self.layers.last_mut().unwrap()
+    }
+
+    /// Destroy the layer role on `surface` and take a fresh one on the same
+    /// `wl_surface` — what an OSD does when it re-arms. The role is swapped in
+    /// place: a second entry for one `wl_surface` would shadow the first in
+    /// [`State::layer`] and panic the configure dispatch, and a second
+    /// `wp_viewport` on it is a protocol error.
+    pub fn recreate_layer(
+        &mut self,
+        surface: &WlSurface,
+        output: Option<&WlOutput>,
+        layer: zwlr_layer_shell_v1::Layer,
+        namespace: String,
+    ) -> &mut LayerSurface {
+        let shell = self.layer_shell.clone().unwrap();
+        let entry = self
+            .layers
+            .iter_mut()
+            .find(|l| l.surface == *surface)
+            .unwrap();
+        entry.layer_surface.destroy();
+        entry.layer_surface =
+            shell.get_layer_surface(surface, output, layer, namespace, &self.qh, ());
+        entry.configures_received.clear();
+        entry.configures_looked_at = 0;
+        entry.close_requested = false;
+        entry
     }
 
     pub fn layer(&mut self, surface: &WlSurface) -> &mut LayerSurface {

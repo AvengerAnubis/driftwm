@@ -121,6 +121,25 @@ impl WlrLayerShellHandler for DriftWm {
     fn layer_destroyed(&mut self, surface: LayerSurface) {
         tracing::info!("Layer surface destroyed");
 
+        // Unmap immediately instead of leaving it to post_render's cleanup: a
+        // client that takes a fresh role on the same wl_surface before the
+        // next frame would otherwise get a second map entry behind the dead
+        // one, and since lookups match by wl_surface in map order, its
+        // initial configure would be sent on the destroyed proxy.
+        for output in self.space.outputs() {
+            let mut map = layer_map_for_output(output);
+            // By role, not by `LayerSurface` equality — that compares the
+            // wl_surface alone, which is what put two entries here to begin with.
+            let mapped = map
+                .layers()
+                .find(|l| l.layer_surface().shell_surface() == surface.shell_surface())
+                .cloned();
+            if let Some(layer) = mapped {
+                map.unmap_layer(&layer);
+                break;
+            }
+        }
+
         // Drop any chrome cache entries this layer accumulated. No-op for
         // screen-anchored layers — they never enter these caches — and for
         // canvas layers without chrome opted in via window rule.
