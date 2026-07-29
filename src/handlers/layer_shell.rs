@@ -126,6 +126,7 @@ impl WlrLayerShellHandler for DriftWm {
         // next frame would otherwise get a second map entry behind the dead
         // one, and since lookups match by wl_surface in map order, its
         // initial configure would be sent on the destroyed proxy.
+        let mut unmapped_from = None;
         for output in self.space.outputs() {
             let mut map = layer_map_for_output(output);
             // By role, not by `LayerSurface` equality — that compares the
@@ -136,8 +137,15 @@ impl WlrLayerShellHandler for DriftWm {
                 .cloned();
             if let Some(layer) = mapped {
                 map.unmap_layer(&layer);
+                unmapped_from = Some(output.clone());
                 break;
             }
+        }
+
+        // Unmapping re-arranges the surviving layers and gives back the
+        // exclusive zone straight away, so the output owes a frame for it.
+        if let Some(output) = unmapped_from {
+            self.redraws_needed.insert(output);
         }
 
         // Drop any chrome cache entries this layer accumulated. No-op for
