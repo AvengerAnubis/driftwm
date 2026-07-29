@@ -63,7 +63,11 @@ impl WlrLayerShellHandler for DriftWm {
             .or_else(|| self.active_output());
 
         let Some(resolved_output) = resolved_output else {
-            tracing::warn!("No output available for layer surface");
+            // Dropping it silently would leave the client holding a live role,
+            // waiting on a configure nothing will ever send. Close the contract
+            // so it can retry or give up.
+            tracing::warn!("No output available for layer surface, closing");
+            surface.send_close();
             return;
         };
 

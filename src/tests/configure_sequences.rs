@@ -2912,3 +2912,29 @@ fn a_recreated_layer_role_gets_its_own_initial_configure() {
          claim an exclusive zone and sit above the live one for focus"
     );
 }
+
+/// A layer surface that arrives with no output to host it is closed, not
+/// dropped. The role stays live either way, so a client that hears nothing sits
+/// on a surface it must not commit to and waits on a configure that is never
+/// coming; `closed` is the only thing that lets it retry or exit.
+#[test]
+fn a_layer_surface_with_no_output_is_closed() {
+    let mut f = Fixture::new();
+    let id = f.add_client();
+
+    let layer = f
+        .client(id)
+        .create_layer(None, zwlr_layer_shell_v1::Layer::Overlay, "panel");
+    let surface = layer.surface.clone();
+    f.double_roundtrip(id);
+
+    let layer = f.client(id).layer(&surface);
+    assert!(
+        layer.close_requested,
+        "an unhostable layer surface must be told to close"
+    );
+    assert!(
+        layer.configures_received.is_empty(),
+        "and must not be configured for an output it was never given"
+    );
+}
