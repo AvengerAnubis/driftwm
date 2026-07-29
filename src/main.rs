@@ -51,12 +51,7 @@ enum Sub {
     /// Send a command to the running compositor over its IPC socket.
     ///
     /// Auto-targets the instance named by `WAYLAND_DISPLAY` (override with
-    /// `DRIFTWM_SOCKET`). `camera`, `zoom`, `focus`, `move`, `opacity`, and
-    /// `bookmark` read when given no arguments and write when given arguments.
-    /// The others don't follow that rule: `action` requires its arguments,
-    /// `close`/`suspend`/`relaunch` act on the focused window when given no
-    /// selector, and `layout`, `screenshot`, `state`, `subscribe`, and
-    /// `debug-counters` need no arguments at all.
+    /// `DRIFTWM_SOCKET`).
     ///
     /// A window command selects its target by `app_id` substring
     /// (case-insensitive) or by `--id <n>`, the stable id `state` prints.
