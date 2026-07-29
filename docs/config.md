@@ -701,7 +701,7 @@ Actions:
 - `toggle-fullscreen` — toggle focused window fullscreen
 - `fit-window` — toggle maximize: centers + resets zoom + fills viewport; restore only resizes back
 - `fit-window-snapped` — fit-window for the focused window's whole snap cluster
-- `fill-window` — grow in place to fill free space; edges outside the usable area or overlapping another window pull back to a gap; press again to restore
+- `fill-window` — grow in place to fill free space; edges outside the usable area or overlapping another window pull back to a gap; clears maximize; press again to restore
 - `toggle-pin-to-screen` — pin/unpin the focused window to the screen (ignores pan/zoom, floats above)
 - `reload-config` — hot-reload config file
 - `toggle-cursor-pan` — toggle cursor edge-pan (see [navigation.edge_pan])

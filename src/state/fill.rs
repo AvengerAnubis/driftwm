@@ -132,12 +132,8 @@ impl DriftWm {
         let Some(wl_surface) = window.wl_surface() else {
             return;
         };
-        // A fit (maximized) window is fit's business; a widget or pinned window
-        // has no free canvas space to grow into.
-        if self.is_pinned(window)
-            || self.stage.is_fit(window)
-            || config::applied_rule(&wl_surface).is_some_and(|r| r.widget)
-        {
+        // A widget or pinned window has no free canvas space to grow into.
+        if self.is_pinned(window) || config::applied_rule(&wl_surface).is_some_and(|r| r.widget) {
             return;
         }
 
@@ -151,13 +147,32 @@ impl DriftWm {
         };
 
         // Use the tracked restore size rather than window.geometry().size — for
-        // Chromium the latter shrinks on each round-trip (see fit_window).
-        let saved_size = self
-            .stage
-            .restore_size(window)
+        // Chromium the latter shrinks on each round-trip (see fit_window). On a
+        // window this fill is taking out of fit, the pre-fit size is the only one
+        // worth coming back to, and it has to be read before the clear below —
+        // a fit window that never carried a restore size would otherwise record
+        // the fit size as the rect an unfill restores.
+        let pre_fit_size = self.stage.fit_saved_size(window);
+        let saved_size = pre_fit_size
+            .or_else(|| self.stage.restore_size(window))
             .unwrap_or_else(|| window.geometry().size);
         let Some(saved_pos) = self.stage.position_of(window) else {
             return;
+        };
+        // The pre-fit size against the fit rect's top-left describes no rect the
+        // window ever had, and an unfill would drop it in the viewport's corner.
+        // Re-derive the position around the fit rect's visual center, exactly as
+        // `unfit_window` restores, so the two halves come from one epoch again.
+        let saved_pos = if pre_fit_size.is_some() {
+            let bar = self.window_ssd_bar(window);
+            let center = super::visual_frame_center(
+                saved_pos,
+                super::configured_window_size(window),
+                bar as f64,
+            );
+            super::frame_loc_for_center(center, saved_size, bar)
+        } else {
+            saved_pos
         };
 
         // A fill places the window absolutely.
@@ -167,6 +182,10 @@ impl DriftWm {
         self.send_size_configure(window, new_size);
         self.map_window(window.clone(), new_loc, false);
         self.stage.set_fill(window, saved_pos, saved_size);
+        // The fill above inherited the pre-fit size as its own restore point and
+        // the window no longer occupies the fit rect, so fit membership would
+        // only claim a rect nothing holds — and hand the same size back twice.
+        self.stage.clear_fit(window);
         // Cache the filled rect directly: `geometry().size` is still pre-ack, so
         // `refresh_stable_snap_rect` would cache stale dimensions. Unlike plain
         // fit, the filled rect is the window's new in-place identity — leaving
@@ -220,11 +239,20 @@ impl DriftWm {
     /// keep suppressing their own chrome, and the explicit size keeps SCTK from
     /// reading "Tiled + None" as "hold current size".
     fn send_size_configure(&self, window: &Window, size: Size<i32, Logical>) {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
         let Some(toplevel) = window.toplevel() else {
             return;
         };
         toplevel.with_pending_state(|state| {
             state.size = Some(size);
+            // Load-bearing for `fill_window`, which clears the fit membership it
+            // may have found: a Maximized outliving that is one the client can
+            // never shed — its restore button, or a panel's foreign-toplevel
+            // unset_maximized, dispatches an unmaximize_request that
+            // `unfit_window` drops on the absent saved size. Inert for the other
+            // caller, `unfill_window`: `set_fit` clears fill and `set_fill`
+            // clears fit, so a filled window is never also a fit one.
+            state.states.unset(xdg_toplevel::State::Maximized);
         });
         toplevel.send_configure();
     }

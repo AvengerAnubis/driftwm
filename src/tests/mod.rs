@@ -56,6 +56,8 @@ mod zoom_to_fit;
 
 use fixture::Fixture;
 
+use std::time::Duration;
+
 use driftwm::config::Config;
 use driftwm::window_ext::WindowExt;
 use smithay::desktop::Window;
@@ -63,6 +65,22 @@ use smithay::input::pointer::MotionEvent;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 use smithay::wayland::seat::WaylandFocus;
+
+const TICK: Duration = Duration::from_millis(16);
+const MAX_TICKS: usize = 600;
+
+/// Run both viewport animations to completion, in the order a real frame loop
+/// ticks them (zoom first, so the camera uses the recomputed target).
+fn settle(f: &mut Fixture) {
+    for _ in 0..MAX_TICKS {
+        if f.state().camera_target().is_none() && f.state().zoom_target().is_none() {
+            return;
+        }
+        f.state().apply_zoom_animation(TICK);
+        f.state().apply_camera_animation(TICK);
+    }
+    panic!("viewport animation did not converge within {MAX_TICKS} ticks");
+}
 
 fn config(toml: &str) -> Config {
     Config::from_toml(toml).unwrap()

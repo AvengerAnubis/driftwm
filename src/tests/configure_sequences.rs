@@ -9,7 +9,7 @@ use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
 use crate::ipc::protocol::{Request, Response, WindowSelector};
 use crate::state::StageWindow;
 
-use super::{Fixture, adopt_last_configure, window_by_app_id};
+use super::{Fixture, TICK, adopt_last_configure, client_sees_maximized, settle, window_by_app_id};
 
 /// Map one toplevel with a buffer at `size`, settle, and drain the configure
 /// cursor so tests only see what happens next.
@@ -1392,22 +1392,254 @@ fn fill_shrinks_out_of_overlap_with_neighbor() {
     assert!(f.state().stage.is_fill(&a));
 }
 
+/// Fit `window` and run the handoff to a standstill — ack, tick past the
+/// resize freeze the fit parked its pan behind, then let the camera settle
+/// onto the fit's target. The fill tests below need the camera and window to
+/// agree to the pixel, so nothing short of a genuine settle will do.
+fn fit_and_settle(
+    f: &mut Fixture,
+    window: &smithay::desktop::Window,
+    id: super::client::ClientId,
+    surface: &wayland_client::protocol::wl_surface::WlSurface,
+) {
+    f.state().fit_window(window);
+    f.double_roundtrip(id);
+    adopt_last_configure(f, id, surface);
+    f.double_roundtrip(id);
+    f.state().tick_window_animations(TICK);
+    settle(f);
+}
+
+/// A fit window's rect spans nearly the whole usable area, so any other
+/// window in view overlaps it. Fill must shrink the fit window out of that
+/// overlap instead of refusing to touch a fit (maximized) window.
 #[test]
-fn fill_on_fit_window_is_noop() {
+fn fill_on_fit_window_with_a_neighbor_fires() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
     let id = f.add_client();
 
-    let _surface = map_settled(&mut f, id, "fit", (800, 600));
-    let window = window_by_app_id(&mut f, "fit").unwrap();
+    let a_surface = map_settled(&mut f, id, "a", (800, 600));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(a.clone(), Point::from((400, 300)), false);
 
-    f.state().toggle_fit_window(&window);
-    assert!(f.state().stage.is_fit(&window));
+    fit_and_settle(&mut f, &a, id, &a_surface);
+    assert!(f.state().stage.is_fit(&a), "precondition: fit");
+    assert!(
+        client_sees_maximized(&mut f, id, &a_surface),
+        "precondition: the fit told the client it is maximized"
+    );
+    let fit_loc = f.state().stage.position_of(&a).unwrap();
+    let fit_size = crate::state::configured_window_size(&a);
 
-    // A maximized-by-fit window is fit's business; fill leaves it untouched.
+    // A wall inside the fit rect's left half, spanning most of its height:
+    // pulling A's left edge past it is the least-travel escape, and the wall
+    // then caps regrowth at the same edge.
+    let _b_surface = map_settled(&mut f, id, "b", (300, 800));
+    let b = window_by_app_id(&mut f, "b").unwrap();
+    f.state().map_window(
+        b.clone(),
+        Point::from((fit_loc.x + 200, fit_loc.y + 100)),
+        false,
+    );
+
+    f.state().fill_window(&a);
+    f.double_roundtrip(id);
+
+    let gap = f.state().config.snap_gap as i32;
+    let a_loc = f.state().stage.position_of(&a).unwrap();
+    let b_loc = f.state().stage.position_of(&b).unwrap();
+    let b_w = b.geometry().size.w;
+    let (w, _h) = f
+        .client(id)
+        .window(&a_surface)
+        .configures_received
+        .last()
+        .unwrap()
+        .1
+        .size;
+    // A's left content edge ends exactly a gap past B's right edge, and its
+    // right edge stays where the fit put it — nothing over there to retreat
+    // from.
+    assert_eq!(a_loc.x, b_loc.x + b_w + gap);
+    assert_eq!(a_loc.x + w, fit_loc.x + fit_size.w);
+    assert!(!f.state().stage.is_fit(&a));
+    assert!(f.state().stage.is_fill(&a));
+    assert!(
+        !client_sees_maximized(&mut f, id, &a_surface),
+        "fill must clear the client's Maximized state"
+    );
+}
+
+/// With nothing else in view, and the camera genuinely settled on the fit's
+/// own target (not merely animating toward it), a fit window already fills
+/// its usable space — fill must leave it untouched.
+///
+/// The exact no-op needs the fit's truncated canvas rect and its untruncated
+/// camera to land on the same integers, which needs every input to that
+/// centering half-pixel-free: even pre-fit dimensions, an even usable area, an
+/// integral snap gap, no SSD bar. See
+/// `fill_on_lone_fit_window_nudges_it_when_the_fit_left_a_subpixel_gap` for
+/// what one half-pixel does instead.
+#[test]
+fn fill_on_lone_fit_window_with_settled_camera_is_inert() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+
+    let surface = map_settled(&mut f, id, "a", (800, 600));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((400, 300)), false);
+
+    fit_and_settle(&mut f, &window, id, &surface);
+    assert!(f.state().stage.is_fit(&window), "precondition: fit");
+    assert!(
+        client_sees_maximized(&mut f, id, &surface),
+        "precondition: the fit told the client it is maximized"
+    );
+    let before_loc = f.state().stage.position_of(&window).unwrap();
+    let before_size = crate::state::configured_window_size(&window);
+
     f.state().fill_window(&window);
+    f.double_roundtrip(id);
+
+    assert_eq!(f.state().stage.position_of(&window), Some(before_loc));
+    assert_eq!(crate::state::configured_window_size(&window), before_size);
+    assert!(
+        f.state().stage.is_fit(&window),
+        "an inert fill must leave fit membership alone"
+    );
     assert!(!f.state().stage.is_fill(&window));
-    assert!(f.state().stage.is_fit(&window));
+    assert!(
+        client_sees_maximized(&mut f, id, &surface),
+        "an inert fill must not touch the client's Maximized state"
+    );
+}
+
+/// The odd-dimension twin of the test above — and empirically not a no-op.
+/// `fit_window` maps the window at `target_camera.x as i32` while animating
+/// the camera onto the untruncated value, and `compute_fill_geometry` reads
+/// that camera back as an exact `f64`. An odd pre-fit width/height gives the
+/// pre-fit visual center — and so `target_camera` — a `.5` fraction on that
+/// axis, so the fit leaves the window half a pixel off the usable area it was
+/// meant to fill. With no neighbor to blame, fill closes that gap on its own:
+/// it nudges the window, drops fit membership, and clears the client's
+/// Maximized state.
+///
+/// This characterises a known defect. When `fit_window` stops truncating
+/// `target_camera`, this test becomes a duplicate of the even-dims inert test
+/// above and should be deleted rather than re-aimed.
+///
+/// `as i32` truncates toward zero, so which way the half-pixel lands follows
+/// the sign of `target_camera` — the fit here is off-center enough that x is
+/// negative and y positive, so the two axes are nudged opposite ways.
+#[test]
+fn fill_on_lone_fit_window_nudges_it_when_the_fit_left_a_subpixel_gap() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+
+    let surface = map_settled(&mut f, id, "a", (801, 601));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(window.clone(), Point::from((400, 300)), false);
+
+    fit_and_settle(&mut f, &window, id, &surface);
+    assert!(f.state().stage.is_fit(&window), "precondition: fit");
+    let before_loc = f.state().stage.position_of(&window).unwrap();
+    let before_size = crate::state::configured_window_size(&window);
+
+    f.state().fill_window(&window);
+    f.double_roundtrip(id);
+
+    let loc = f.state().stage.position_of(&window).unwrap();
+    assert_ne!(loc, before_loc, "the sub-pixel gap must be taken up");
+    assert!(
+        (loc.x - before_loc.x).abs() <= 1 && (loc.y - before_loc.y).abs() <= 1,
+        "taking it up must cost at most a pixel per axis, moved {before_loc:?} → {loc:?}"
+    );
+    assert_eq!(
+        crate::state::configured_window_size(&window),
+        before_size,
+        "half a pixel at each end leaves the size alone"
+    );
+    assert!(!f.state().stage.is_fit(&window));
+    assert!(f.state().stage.is_fill(&window));
+    assert!(
+        !client_sees_maximized(&mut f, id, &surface),
+        "the nudge clears the client's Maximized state too"
+    );
+}
+
+/// A fill taken straight out of fit inherits the *pre-fit* size as its
+/// restore point — not `restore_size`, and not the fit's own viewport-
+/// spanning size — paired with the position that size occupied, not the fit
+/// rect's top-left. Unfilling must land back on the whole pre-fit rect.
+#[test]
+fn unfill_after_fill_on_fit_restores_the_pre_fit_rect() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+
+    let a_surface = map_settled(&mut f, id, "a", (800, 600));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    f.state()
+        .map_window(a.clone(), Point::from((400, 300)), false);
+    // The fit preserves the visual center, so the restore point the fill
+    // derives from the fit rect is this position again.
+    let pre_fit_loc = f.state().stage.position_of(&a).unwrap();
+
+    fit_and_settle(&mut f, &a, id, &a_surface);
+    let fit_loc = f.state().stage.position_of(&a).unwrap();
+    f.client(id).window(&a_surface).format_recent_configures();
+
+    // A neighbor inside the fit rect forces a real (non-no-op) fill.
+    let _b_surface = map_settled(&mut f, id, "b", (300, 800));
+    let b = window_by_app_id(&mut f, "b").unwrap();
+    f.state().map_window(
+        b.clone(),
+        Point::from((fit_loc.x + 200, fit_loc.y + 100)),
+        false,
+    );
+
+    f.state().fill_window(&a);
+    assert!(
+        f.state().stage.is_fill(&a),
+        "precondition: the fill on the fit window ran"
+    );
+    adopt_last_configure(&mut f, id, &a_surface);
+    f.client(id).window(&a_surface).format_recent_configures();
+
+    f.state().toggle_fill_window(&a);
+    f.double_roundtrip(id);
+    let configures = f.client(id).window(&a_surface).format_recent_configures();
+    adopt_last_configure(&mut f, id, &a_surface);
+
+    assert!(!f.state().stage.is_fill(&a));
+    assert!(
+        !f.state().stage.is_fit(&a),
+        "the fill dropped fit membership and the unfill must not resurrect it"
+    );
+    assert!(
+        configures.contains("size: 800 × 600"),
+        "unfill must restore the pre-fit size, not the fit's viewport-spanning \
+         size, got:\n{configures}"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&a),
+        Some(pre_fit_loc),
+        "and the pre-fit position, not the fit rect's corner"
+    );
+    assert!(
+        !client_sees_maximized(&mut f, id, &a_surface),
+        "a restored window is not maximized"
+    );
 }
 
 #[test]

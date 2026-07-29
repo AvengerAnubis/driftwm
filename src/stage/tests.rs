@@ -1534,7 +1534,6 @@ mod harness {
                     if w.is_widget()
                         || self.stage.is_fullscreen(&w)
                         || self.stage.is_pinned(&w)
-                        || self.stage.is_fit(&w)
                         || !self.stage.contains(&w)
                     {
                         return;
@@ -1543,8 +1542,16 @@ mod harness {
                         self.stage.take_fill_saved(&w);
                     } else {
                         let pos = self.stage.position_of(&w).unwrap_or_default();
-                        let size = StageElement::size(&w);
+                        // A fill on a fit window inherits its pre-fit size and
+                        // clears the fit, so `Op::ToggleFit`'s pre-fit-restore
+                        // assertion must stop expecting a saved size here.
+                        let size = self
+                            .stage
+                            .fit_saved_size(&w)
+                            .unwrap_or_else(|| StageElement::size(&w));
                         self.stage.set_fill(&w, pos, size);
+                        self.stage.clear_fit(&w);
+                        self.fit_expect.remove(&w.label());
                     }
                 }
                 Op::ResizeGrabEnd { idx, w: nw, h: nh } => {

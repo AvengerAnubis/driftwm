@@ -6,26 +6,9 @@
 //! sizes or centers from live geometry, or that a stale recenter can still move,
 //! has to take its numbers from the restore authority instead.
 
-use std::time::Duration;
-
 use smithay::utils::{Logical, Point, Size};
 
-use super::{Fixture, map_window, window_by_app_id};
-
-const TICK: Duration = Duration::from_millis(16);
-const MAX_TICKS: usize = 600;
-
-/// Run the viewport animations to completion, in frame-loop order.
-fn settle(f: &mut Fixture) {
-    for _ in 0..MAX_TICKS {
-        if f.state().camera_target().is_none() && f.state().zoom_target().is_none() {
-            return;
-        }
-        f.state().apply_zoom_animation(TICK);
-        f.state().apply_camera_animation(TICK);
-    }
-    panic!("viewport animation did not converge within {MAX_TICKS} ticks");
-}
+use super::{Fixture, map_window, settle, window_by_app_id};
 
 /// The focused window's stage rect once the client has caught up with every
 /// configure in flight and any owed settle has fired.
