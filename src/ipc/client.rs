@@ -20,7 +20,7 @@ pub enum Msg {
     /// inventories, layer-shell namespaces, and each output's viewport. Every
     /// window entry carries the stable `id` other commands take as a selector.
     ///
-    /// Reply: `{"Ok":{"State":{"camera":[..],"zoom":1.0,"windows":[..],"outputs":[..]}}}`.
+    /// `--json` reply: `{"Ok":{"State":{"camera":[..],"zoom":1.0,"windows":[..],"outputs":[..]}}}`.
     State,
     /// Stream state snapshots as they change (one JSON line per event with --json).
     ///
@@ -39,7 +39,7 @@ pub enum Msg {
     /// Focusing pans the camera to the window unless it is already fully
     /// visible. Widgets cannot be focused.
     ///
-    /// Reply: `{"Ok":{"Focused":{"id":5,"app_id":"alacritty"}}}` (or `{"Ok":{"Focused":null}}`).
+    /// `--json` reply: `{"Ok":{"Focused":{"id":5,"app_id":"alacritty"}}}` (or `{"Ok":{"Focused":null}}`).
     Focus {
         app_id: Option<String>,
         /// Target this window id.
@@ -51,7 +51,7 @@ pub enum Msg {
     /// Pinned and fullscreen windows live in screen space, not on the canvas, so
     /// `move` refuses to reposition them.
     ///
-    /// Reply: `{"Ok":{"Position":{"x":100,"y":200}}}`.
+    /// `--json` reply: `{"Ok":{"Position":{"x":100,"y":200}}}`.
     #[command(allow_negative_numbers = true)]
     Move {
         x: Option<i32>,
@@ -64,7 +64,7 @@ pub enum Msg {
     ///
     /// Errors when nothing matches.
     ///
-    /// Reply: `{"Ok":"Ok"}`.
+    /// `--json` reply: `{"Ok":"Ok"}`.
     Close {
         app_id: Option<String>,
         /// Target this window id.
@@ -77,7 +77,7 @@ pub enum Msg {
     /// or the compositor restarts. Out-of-range values are rejected. Default
     /// `1`.
     ///
-    /// Reply: `{"Ok":{"Opacity":0.85}}`.
+    /// `--json` reply: `{"Ok":{"Opacity":0.85}}`.
     Opacity {
         value: Option<f64>,
         /// Target this window id.
@@ -90,7 +90,7 @@ pub enum Msg {
     /// and a compositor-drawn stand-in holds its place, to be brought back with
     /// `relaunch`, `Enter`, or a click.
     ///
-    /// Reply: `{"Ok":"Ok"}`.
+    /// `--json` reply: `{"Ok":"Ok"}`.
     Suspend {
         app_id: Option<String>,
         /// Target this window id.
@@ -105,7 +105,7 @@ pub enum Msg {
     /// an `app_id` substring never resolves to a live client. Errors when
     /// nothing matches.
     ///
-    /// Reply: `{"Ok":"Ok"}`.
+    /// `--json` reply: `{"Ok":"Ok"}`.
     Relaunch {
         app_id: Option<String>,
         /// Target this window id.
@@ -116,7 +116,7 @@ pub enum Msg {
     ///
     /// Panning is animated, and takes both coordinates or neither.
     ///
-    /// Reply: `{"Ok":{"Camera":{"x":500.0,"y":300.0}}}`.
+    /// `--json` reply: `{"Ok":{"Camera":{"x":500.0,"y":300.0}}}`.
     #[command(allow_negative_numbers = true)]
     Camera { x: Option<f64>, y: Option<f64> },
     /// Get the zoom level, or set it with `<level>`.
@@ -124,7 +124,7 @@ pub enum Msg {
     /// Setting is animated and clamped: out to fit-all, in to native resolution
     /// (no magnification).
     ///
-    /// Reply: `{"Ok":{"Zoom":0.5}}`.
+    /// `--json` reply: `{"Ok":{"Zoom":0.5}}`.
     Zoom { level: Option<f64> },
     /// List bookmarks, get or set one by `<name>`, or delete with `--delete`.
     ///
@@ -133,7 +133,7 @@ pub enum Msg {
     /// stores a position only, never zoom — jump to one with the
     /// `go-to-bookmark` action or a `mod+<n>` keybinding.
     ///
-    /// Reply: `{"Ok":{"Bookmark":{"x":500.0,"y":300.0}}}` (get/set), or
+    /// `--json` reply: `{"Ok":{"Bookmark":{"x":500.0,"y":300.0}}}` (get/set), or
     /// `{"Ok":{"Bookmarks":{"home":[0.0,0.0]}}}` (list), or `{"Ok":"Ok"}` (delete).
     #[command(allow_negative_numbers = true)]
     Bookmark {
@@ -150,7 +150,7 @@ pub enum Msg {
     },
     /// Print the active keyboard layout (full XKB name, e.g. `English (US)`).
     ///
-    /// Reply: `{"Ok":{"Layout":"English (US)"}}` (or `"us"` with `--short`).
+    /// `--json` reply: `{"Ok":{"Layout":"English (US)"}}` (or `"us"` with `--short`).
     Layout {
         /// Print the configured code for the active group instead (e.g. `us`, `ru`).
         #[arg(long)]
@@ -169,7 +169,7 @@ pub enum Msg {
     /// The socket is a full control surface: `action` can `exec`/`spawn`, `quit`,
     /// and `reload-config`. It is safe only because the socket is `0600`.
     ///
-    /// Reply: `{"Ok":"Ok"}`.
+    /// `--json` reply: `{"Ok":"Ok"}`.
     #[command(allow_negative_numbers = true)]
     Action {
         /// Action and arguments, exactly as written in config (e.g. `nudge-window up`).
@@ -191,7 +191,7 @@ pub enum Msg {
     /// a coarse pyramid level, softening at extreme `--scale`. Captures tile
     /// internally but cap at 16384 px/side.
     ///
-    /// Reply: `{"Ok":{"Screenshot":{"path":"/abs/shot.png","width":1920,"height":1080}}}`.
+    /// `--json` reply: `{"Ok":{"Screenshot":{"path":"/abs/shot.png","width":1920,"height":1080}}}`.
     Screenshot {
         #[command(subcommand)]
         target: Option<ShotTarget>,
@@ -210,7 +210,7 @@ pub enum Msg {
     /// (output-keyed counters follow output lifetimes instead and can persist
     /// across hotplug).
     ///
-    /// Reply: `{"Ok":{"DebugCounters":{"decorations":2,"stage_entries":2}}}`.
+    /// `--json` reply: `{"Ok":{"DebugCounters":{"decorations":2,"stage_entries":2}}}`.
     DebugCounters,
 }
 
@@ -221,7 +221,7 @@ pub enum ShotTarget {
     ///
     /// Composed alone on transparency, so overlapping windows never appear;
     /// pinned and fullscreen windows capture like any other (a fullscreen window
-    /// has no chrome). Reply shape is the shared `Screenshot` reply above.
+    /// has no chrome). `--json` reply shape is the shared `Screenshot` reply above.
     Window {
         app_id: Option<String>,
         /// Target this window id.
@@ -231,7 +231,7 @@ pub enum ShotTarget {
     /// The bounding box of all non-widget windows.
     ///
     /// A scene with the canvas background plus every window's chrome, framed with
-    /// a `[zoom] fit_padding` margin. Reply shape is the shared `Screenshot`
+    /// a `[zoom] fit_padding` margin. `--json` reply shape is the shared `Screenshot`
     /// reply above.
     All,
     /// A rectangle — `X Y W H` (canvas coords, center/Y-up) or slurp's native
@@ -239,7 +239,7 @@ pub enum ShotTarget {
     /// drops in directly. Treated as output-screen pixels with `--from-screen`.
     ///
     /// Captures a scene (canvas background plus window chrome) over the rectangle.
-    /// Reply shape is the shared `Screenshot` reply above.
+    /// `--json` reply shape is the shared `Screenshot` reply above.
     #[command(allow_negative_numbers = true)]
     Region {
         /// Four ints `X Y W H`, or slurp's `X,Y WxH` (quoted or not).
