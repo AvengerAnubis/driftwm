@@ -501,8 +501,8 @@ fn stream_events(
 
 fn print_response(response: Response) {
     match response {
-        Response::Camera { x, y } => println!("camera {x} {y}"),
-        Response::Zoom(zoom) => println!("zoom {zoom}"),
+        Response::Camera { x, y } => println!("{x} {y}"),
+        Response::Zoom(zoom) => println!("{zoom}"),
         Response::Layout(layout) => println!("{layout}"),
         Response::Focused(Some(w)) => {
             println!("#{} {}", w.id, w.app_id.as_deref().unwrap_or("(no app_id)"))
