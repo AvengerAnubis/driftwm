@@ -88,6 +88,7 @@ use std::time::Instant;
 
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::GlesTexture;
+use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1;
 use smithay::utils::Physical;
 use smithay::wayland::background_effect::BackgroundEffectState;
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufState};
@@ -202,8 +203,30 @@ pub enum SessionLock {
     Unlocked,
     /// Lock requested; screen goes black until lock surface commits.
     Pending(SessionLocker),
-    /// Lock confirmed; rendering only the lock surface.
-    Locked,
+    /// Lock confirmed; rendering only the lock surface. Carries the client's
+    /// lock object purely so a later lock request can tell a live locker (which
+    /// it must not displace) from one whose client died (which it may).
+    Locked(ExtSessionLockV1),
+}
+
+impl SessionLock {
+    /// Whether the session is locked at all — pending and confirmed alike. Both
+    /// blank the screen, so every input/navigation gate wants this, not a
+    /// specific variant.
+    pub fn is_locked(&self) -> bool {
+        !matches!(self, SessionLock::Unlocked)
+    }
+
+    /// The lock object of the client that owns the session, pending or
+    /// confirmed. Identifies the incumbent: whether it is still alive, and which
+    /// client may put surfaces on the lock.
+    pub fn incumbent(&self) -> Option<&ExtSessionLockV1> {
+        match self {
+            SessionLock::Unlocked => None,
+            SessionLock::Pending(locker) => Some(locker.ext_session_lock()),
+            SessionLock::Locked(lock) => Some(lock),
+        }
+    }
 }
 
 #[inline]

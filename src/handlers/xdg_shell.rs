@@ -634,7 +634,7 @@ impl DriftWm {
         &self,
         root: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     ) -> bool {
-        if !matches!(self.session_lock, crate::state::SessionLock::Unlocked) {
+        if self.session_lock.is_locked() {
             return self
                 .lock_surfaces
                 .values()

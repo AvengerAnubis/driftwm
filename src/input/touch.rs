@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -6,7 +7,7 @@ use crate::decorations::DecorationHit;
 use crate::grabs::{MoveGrab, ResizeGrab, TouchGestureGrab, edge_from_origin};
 use crate::input::DecoTarget;
 use crate::state::{
-    ClusterMember, DriftWm, FocusTarget, SessionLock, StageWindow, SuspendedWindow, output_state,
+    ClusterMember, DriftWm, FocusTarget, StageWindow, SuspendedWindow, output_state,
 };
 use driftwm::canvas::{CanvasPos, ScreenPos, canvas_to_screen, screen_to_canvas};
 use driftwm::window_ext::WindowExt;
@@ -111,6 +112,20 @@ pub struct TouchState {
     /// gesture grab passes replayed events straight through instead of
     /// re-processing them.
     pub replaying_holdback: bool,
+    /// Slots whose `down` landed *after* the session locked — the only ones
+    /// whose motion/up may be forwarded while locked. `TouchHandle` routes by
+    /// its own stored per-slot focus and ignores the focus argument, so a finger
+    /// already down when the lock arrived would keep delivering to the window it
+    /// started on, and `cancel` cannot revoke it (it skips every slot whose last
+    /// event was already framed, which a resting finger's always is). Empty
+    /// outside a lock: the lock and unlock paths each clear it.
+    ///
+    /// A pre-lock finger is therefore dropped, not ended: the app never sees its
+    /// touch point finish, and the slot keeps its stale focus until a later
+    /// `down` reuses it. Deliberate — ending it properly needs the synthetic
+    /// motion replay `CancelAppSequence` runs, which would report the finger's
+    /// position to the app behind the lock screen.
+    pub lock_slots: HashSet<TouchSlot>,
 }
 
 impl TouchState {
@@ -123,6 +138,7 @@ impl TouchState {
             output: None,
             holdback: None,
             replaying_holdback: false,
+            lock_slots: HashSet::new(),
         }
     }
 }
@@ -206,6 +222,30 @@ impl DriftWm {
         }
     }
 
+    /// Tear down everything the live touch sequence owns: withheld events, the
+    /// grab, touch focus, and a close armed at `down`. Shared by the backend
+    /// cancel and the session-lock path so the two can't drift apart.
+    ///
+    /// `cancel` alone does *not* end the sequence as far as the app is
+    /// concerned: it skips every slot whose last event was already framed, which
+    /// is every settled finger. So it revokes an unsettled slot and nothing
+    /// else, and on the lock path [`TouchState::lock_slots`] is what actually
+    /// stops those fingers reaching the window they landed on.
+    pub(crate) fn cancel_touch_sequence(&mut self) {
+        self.discard_touch_holdback();
+        if let Some(touch) = self.seat.get_touch() {
+            // Cancel first: all three touch grabs self-unset from their own
+            // `cancel`, so the `unset_grab` after it is belt-and-braces against
+            // one that forgets to. The other order would silently skip every
+            // grab's `cancel` instead.
+            touch.cancel(self);
+            touch.unset_grab(self);
+        }
+        // A pending close installs no grab — it's plain state set at `down` — so
+        // nothing above can reach it.
+        self.touch_state.pending_close = None;
+    }
+
     /// Withhold a touch event from the app. A `Down` (re-)arms the flush
     /// deadline: each landing finger buys the next one `HOLDBACK_MS` to
     /// register before the sequence is handed to the app.
@@ -233,8 +273,9 @@ impl DriftWm {
         }
     }
 
-    /// Drop the withheld events unsent — a gesture claimed the sequence, so
-    /// the app must never see them.
+    /// Drop the withheld events unsent — the sequence was claimed (a gesture) or
+    /// ended outright (session lock, hardware cancel), so the app must never see
+    /// them.
     pub(crate) fn discard_touch_holdback(&mut self) {
         let Some(buffer) = self.touch_state.holdback.take() else {
             return;
@@ -242,10 +283,7 @@ impl DriftWm {
         if let Some(token) = buffer.timer {
             self.loop_handle.remove(token);
         }
-        tracing::debug!(
-            "touch holdback: discarded {} events (gesture claim)",
-            buffer.events.len()
-        );
+        tracing::debug!("touch holdback: discarded {} events", buffer.events.len());
     }
 
     /// Deliver every withheld event to the app, in order. Runs outside grab
@@ -452,7 +490,7 @@ impl DriftWm {
         let serial = SERIAL_COUNTER.next_serial();
 
         // Locked session: forward straight to the lock surface, no gestures.
-        if !matches!(self.session_lock, SessionLock::Unlocked) {
+        if self.session_lock.is_locked() {
             let Some(ls) = self.lock_surfaces.get(&output) else {
                 return;
             };
@@ -460,6 +498,9 @@ impl DriftWm {
             // No hit-test runs on this path; clear the stale flag so a live
             // gesture grab can't capture a bogus screen delta for this slot.
             self.pointer_over_screen_space = false;
+            // This `down` is what re-points the slot's stored focus at the lock
+            // surface, so from here its motion/up are safe to forward.
+            self.touch_state.lock_slots.insert(slot);
             let touch = self.seat.get_touch().unwrap();
             touch.down(
                 self,
@@ -790,7 +831,12 @@ impl DriftWm {
         let slot = event.slot();
         let time = Event::time_msec(&event);
 
-        if !matches!(self.session_lock, SessionLock::Unlocked) {
+        if self.session_lock.is_locked() {
+            // A finger that was already down goes to the window it landed on,
+            // not the lock surface — the focus argument below is ignored.
+            if !self.touch_state.lock_slots.contains(&slot) {
+                return;
+            }
             let touch = self.seat.get_touch().unwrap();
             touch.motion(
                 self,
@@ -837,7 +883,13 @@ impl DriftWm {
         let time = Event::time_msec(&event);
         let serial = SERIAL_COUNTER.next_serial();
 
-        if !matches!(self.session_lock, SessionLock::Unlocked) {
+        if self.session_lock.is_locked() {
+            // Same as motion: an up on a pre-lock slot would be delivered to the
+            // window that slot went down on, completing a tap the lock was
+            // supposed to have ended.
+            if !self.touch_state.lock_slots.remove(&slot) {
+                return;
+            }
             let touch = self.seat.get_touch().unwrap();
             touch.up(self, &UpEvent { slot, serial, time });
             touch.frame(self);
@@ -873,10 +925,7 @@ impl DriftWm {
     }
 
     pub fn on_touch_cancel<I: InputBackend>(&mut self, _event: I::TouchCancelEvent) {
-        if let Some(touch) = self.seat.get_touch() {
-            touch.cancel(self);
-        }
-        self.touch_state.pending_close = None;
+        self.cancel_touch_sequence();
     }
 
     pub fn on_touch_frame<I: InputBackend>(&mut self, _event: I::TouchFrameEvent) {

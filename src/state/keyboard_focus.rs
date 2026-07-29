@@ -11,7 +11,7 @@ use smithay::wayland::seat::WaylandFocus;
 
 use driftwm::window_ext::WindowExt;
 
-use super::{DriftWm, FocusIntent, FocusTarget, SessionLock, StageWindow, SuspendedId};
+use super::{DriftWm, FocusIntent, FocusTarget, StageWindow, SuspendedId};
 
 impl DriftWm {
     /// Innermost modal descendant for focus redirect. Chases modal chains
@@ -166,7 +166,7 @@ impl DriftWm {
     /// state, in priority order: session lock (handled imperatively, so we
     /// bail) → exclusive layer → on-demand layer → focused window.
     pub fn update_keyboard_focus(&mut self, serial: smithay::utils::Serial) {
-        if !matches!(self.session_lock, SessionLock::Unlocked) {
+        if self.session_lock.is_locked() {
             return;
         }
 

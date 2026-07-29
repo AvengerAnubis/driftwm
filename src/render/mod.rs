@@ -703,7 +703,7 @@ pub fn compose_frame(
         state.dnd_icon = None;
     }
 
-    if !matches!(state.session_lock, crate::state::SessionLock::Unlocked) {
+    if state.session_lock.is_locked() {
         return compose_lock_frame(state, renderer, output, cursor_elements);
     }
 

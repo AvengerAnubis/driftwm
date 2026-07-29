@@ -1,0 +1,770 @@
+//! `SessionLockHandler::lock` must not leave input pointed at the app behind
+//! the lock screen: pointer focus restored by `unset_grab`, a finger already
+//! down, or a camera pan a grab's teardown lands after the per-output clear
+//! that was supposed to be the last word on it. Also: `lock` refuses to hand
+//! a live session over to a second client, but must still let a replacement
+//! take over once the incumbent's client has died.
+//!
+//! Most scenarios here never commit a lock surface, so `session_lock` stays
+//! `Pending` throughout — that's already where every defect under test
+//! manifests. A second `lock_session()` from the same client's session lock
+//! object is refused outright while the first is alive, so the teardown runs
+//! once per test; don't call it twice expecting it to run again.
+
+use std::time::{Duration, Instant};
+
+use driftwm::canvas::{CanvasPos, canvas_to_screen};
+use smithay::desktop::Window;
+use smithay::output::Output;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::Point;
+
+use smithay::wayland::input_method::InputMethodKeyboardGrab;
+use smithay::wayland::session_lock::SessionLockHandler;
+
+use crate::state::{SessionLock, StageWindow};
+
+use super::client::{ClientId, LockEvent, TouchEvent};
+use super::input_backend::{
+    FakeDevice, pointer_to, pointer_to_screen, touch_cancel, touch_down, touch_up,
+};
+use super::{
+    Fixture, give_ssd, keyboard_focus, map_window, pointer_focus, server_surface, window_by_app_id,
+};
+
+fn origin_view(f: &mut Fixture) {
+    f.state().set_camera(Point::from((0.0, 0.0)));
+    f.state().with_output_state(|os| {
+        os.zoom = 1.0;
+        os.camera = Point::from((0.0, 0.0));
+    });
+}
+
+/// Like [`origin_view`], but with an explicit camera/zoom — needed wherever a
+/// missing coordinate-space conversion would otherwise be numerically
+/// invisible under the identity view.
+fn custom_view(f: &mut Fixture, camera: Point<f64, smithay::utils::Logical>, zoom: f64) {
+    f.state().set_camera(camera);
+    f.state().with_output_state(move |os| {
+        os.zoom = zoom;
+        os.camera = camera;
+    });
+}
+
+/// A click or scroll landing between `lock()` and the first locked motion must
+/// not reach the app behind the lock screen — `unset_grab`'s restored focus
+/// has to be cleared by `lock()` itself, not left for the next motion to
+/// overwrite.
+#[test]
+fn lock_clears_pointer_focus_from_the_window_under_the_cursor() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    window_under_pointer(&mut f, id);
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    assert!(f.state().session_lock.is_locked(), "the lock handler ran");
+    assert_eq!(
+        pointer_focus(&mut f),
+        None,
+        "pointer focus must not survive lock() pointing at the app behind the lock screen"
+    );
+}
+
+/// A finger already down when the session locks must not keep reaching the
+/// window it landed on — see [`TouchState::lock_slots`] for why neither
+/// smithay's own touch-focus routing nor `cancel()` stops it on their own,
+/// and why the app never sees this touch point end.
+///
+/// [`TouchState::lock_slots`]: crate::input::touch::TouchState::lock_slots
+#[test]
+fn lock_stops_a_settled_touch_from_reaching_the_window_it_landed_on() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    origin_view(&mut f);
+
+    let center = center_of(&mut f, &window);
+    touch_down(&mut f, center, 0);
+    f.double_roundtrip(id);
+
+    assert!(
+        f.state().seat.get_touch().unwrap().is_grabbed(),
+        "precondition: the finger down installed a live touch grab"
+    );
+
+    // The down is withheld from the wire for `HOLDBACK_MS`, in case a second
+    // finger turns this into a multi-finger gesture — wait past the deadline
+    // so the finger is a genuine, server-tracked touch before locking, not
+    // merely a withheld event our own buffer would otherwise discard.
+    std::thread::sleep(Duration::from_millis(80));
+    f.pump(5);
+    f.roundtrip(id);
+    assert!(
+        f.client(id).state.touch_events.contains(&TouchEvent::Down),
+        "precondition: the client's wl_touch saw the finger land — a live, \
+         server-tracked touch, not a withheld one"
+    );
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    assert!(f.state().session_lock.is_locked(), "the lock handler ran");
+    assert!(
+        !f.state().seat.get_touch().unwrap().is_grabbed(),
+        "a touch grab from before the lock must not survive it"
+    );
+
+    let events_before_lift = f.client(id).state.touch_events.clone();
+    touch_up(&mut f, 0);
+    f.roundtrip(id);
+
+    assert_eq!(
+        f.client(id).state.touch_events,
+        events_before_lift,
+        "a lift on a slot that was already down when the session locked must not \
+         reach the window it landed on"
+    );
+}
+
+const TICK: Duration = Duration::from_millis(16);
+const PAST_HOLD: Duration = Duration::from_millis(600);
+const MAX_TICKS: usize = 600;
+
+/// Canvas-space center of `window`'s current geometry.
+fn center_of(
+    f: &mut Fixture,
+    window: &smithay::desktop::Window,
+) -> Point<f64, smithay::utils::Logical> {
+    let pos = f.state().stage.position_of(window).unwrap();
+    let size = window.geometry().size;
+    Point::from((
+        pos.x as f64 + size.w as f64 / 2.0,
+        pos.y as f64 + size.h as f64 / 2.0,
+    ))
+}
+
+/// Map a 400×300 window, reset to the identity view, and point the mouse at
+/// its center — the setup every "does pointer focus survive lock/unlock"
+/// scenario shares. Asserts the precondition that the pointer is focused on
+/// the window before returning it.
+fn window_under_pointer(f: &mut Fixture, id: ClientId) -> Window {
+    map_window(f, id, "a", (400, 300));
+    let window = window_by_app_id(f, "a").unwrap();
+    origin_view(f);
+
+    let center = center_of(f, &window);
+    pointer_to(f, &FakeDevice::mouse(), center);
+    assert_eq!(
+        pointer_focus(f),
+        Some(server_surface(&window)),
+        "precondition: the pointer is focused on the window under the cursor"
+    );
+    window
+}
+
+/// A fit's camera pan can still be parked behind a live grab on a *different*
+/// window when the session locks — `disarm_interactive_move` (run from that
+/// grab's `unset` during `lock()`'s own pointer teardown) lands it straight
+/// into `camera_target`. The per-output clear has to be the last word on that
+/// state, or the pan survives as a live flight under the lock screen.
+///
+/// This test never lets the fit's animation converge, so it deliberately ends
+/// off the fixture's teardown baseline — `skip_baseline_check` is the
+/// documented escape for exactly that.
+#[test]
+fn lock_does_not_leave_a_deferred_camera_pan_flying() {
+    let mut f = Fixture::new();
+    f.skip_baseline_check();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    map_window(&mut f, id, "fit-me", (400, 300));
+    let fit_target = window_by_app_id(&mut f, "fit-me").unwrap();
+    f.state().map_window(
+        StageWindow::Client(fit_target.clone()),
+        Point::from((0, 0)),
+        false,
+    );
+
+    // Far outside the fit's near-fullscreen bounds, so fitting "fit-me" can
+    // never cover it — the grab below must land on a window the fit does not
+    // own, or `end_element_animation`'s same-element exemption would apply the
+    // pan immediately instead of deferring it.
+    map_window(&mut f, id, "drag-me", (400, 300));
+    let dragged = window_by_app_id(&mut f, "drag-me").unwrap();
+    f.state().map_window(
+        StageWindow::Client(dragged.clone()),
+        Point::from((5000, 0)),
+        false,
+    );
+
+    f.state().with_output_state(|os| {
+        os.camera = Point::from((0.0, 0.0));
+        os.camera_target = None;
+        os.zoom = 1.0;
+        os.zoom_target = None;
+    });
+
+    let target_id = f.state().stage.id_of(&fit_target).unwrap();
+    f.state().fit_window(&fit_target);
+    let base = Instant::now();
+    f.state().tick_window_animations_at(TICK, base);
+    assert!(
+        f.state().window_animations.start_held(target_id),
+        "precondition: the fit is frozen, waiting on the client's redraw"
+    );
+
+    let drag_pos = center_of(&mut f, &dragged);
+    assert!(
+        f.state().try_start_gesture_move(drag_pos, false),
+        "precondition: the move grab installed on the other window"
+    );
+
+    let past = base + PAST_HOLD;
+    for _ in 0..MAX_TICKS {
+        f.state().tick_window_animations_at(TICK, past);
+        if !f.state().window_animations.start_held(target_id) {
+            break;
+        }
+    }
+    assert!(
+        !f.state().window_animations.start_held(target_id),
+        "precondition: the freeze budget expired, releasing the fit's pan"
+    );
+    assert!(
+        !f.state().deferred_views.is_empty(),
+        "precondition: the released pan is deferred behind the live grab"
+    );
+    assert!(
+        f.state().seat.get_pointer().unwrap().is_grabbed(),
+        "precondition: the move grab is still live when the session locks"
+    );
+    assert!(
+        f.state().camera_target().is_none(),
+        "precondition: nothing has landed the pan yet"
+    );
+
+    // `apply_pending_view` only lands the deferred pan if the viewport hasn't
+    // drifted from the camera/zoom it was staged against — without this, a
+    // future change to the staging conditions could make the guard reject the
+    // pan on its own, and the assertion below would pass whether or not the
+    // per-output clear ordering this test targets is even correct.
+    let output_name = f.state().active_output().unwrap().name();
+    let pending = f.state().deferred_views.get(&output_name).unwrap().clone();
+    let (camera, zoom) = f
+        .state()
+        .with_output_state(|os| (os.camera, os.zoom))
+        .unwrap();
+    assert_eq!(
+        (camera, zoom),
+        (pending.staged_camera, pending.staged_zoom),
+        "precondition: the deferred pan's camera/zoom guard must still pass at landing time"
+    );
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    assert!(f.state().session_lock.is_locked(), "the lock handler ran");
+    assert!(
+        f.state().camera_target().is_none(),
+        "a pan the grab teardown lands during lock() must not survive as a \
+         live camera flight under the lock screen"
+    );
+}
+
+/// A live keyboard grab must not survive `lock()`. The canonical offender is a
+/// `zwp_input_method_v2` grab: it forwards every key straight to the IME
+/// client and never lets it reach the lock surface, so the password would be
+/// typed into the wrong client and the session could never be unlocked from
+/// the keyboard. Installed here is smithay's real `InputMethodKeyboardGrab` —
+/// the same type production input-method handling installs — but wired
+/// directly through `KeyboardHandle::set_grab` rather than through a live
+/// `zwp_input_method_v2` client, which the harness doesn't stand up; `lock()`
+/// only needs a grab installed to exercise its teardown, and any
+/// `KeyboardGrab` impl demonstrates that.
+#[test]
+fn lock_unsets_a_live_keyboard_grab() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    let keyboard = f.state().seat.get_keyboard().unwrap();
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    keyboard.set_grab(f.state(), InputMethodKeyboardGrab::default(), serial);
+    assert!(
+        keyboard.is_grabbed(),
+        "precondition: the keyboard grab is installed"
+    );
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    assert!(
+        !f.state().seat.get_keyboard().unwrap().is_grabbed(),
+        "a live keyboard grab must not survive lock() — otherwise it would swallow \
+         every keypress meant for the lock surface's password prompt"
+    );
+}
+
+/// Drive a client's already-issued lock through to `Locked`: create a lock
+/// surface for `output`, ack its configure, attach a buffer sized to match,
+/// and commit — the ritual a real lock screen runs on startup. Returns the
+/// server-side lock surface.
+fn confirm_lock(f: &mut Fixture, id: ClientId, output: &Output) -> WlSurface {
+    let wl_output = f.client(id).output(&output.name());
+    let surface = f.client(id).create_lock_surface(&wl_output).surface.clone();
+    f.roundtrip(id);
+
+    let lock_surface = f.client(id).lock_surface(&surface);
+    let (w, h) = lock_surface.configures_received.last().unwrap().1;
+    lock_surface.set_size(w, h);
+    lock_surface.attach_new_buffer();
+    lock_surface.ack_last_and_commit();
+    f.double_roundtrip(id);
+
+    f.state()
+        .lock_surfaces
+        .get(output)
+        .unwrap()
+        .wl_surface()
+        .clone()
+}
+
+/// Kill `dead`'s connection and let a fresh client take over its lock: the
+/// replacement locks, creates a lock surface for `output`, and commits it
+/// through to `Locked`. Returns the replacement's id and its server-side lock
+/// surface.
+fn crash_and_replace(f: &mut Fixture, dead: ClientId, output: &Output) -> (ClientId, WlSurface) {
+    f.kill_client(dead);
+    f.pump(10);
+
+    let replacement = f.add_client();
+    f.client(replacement).lock_session();
+    f.roundtrip(replacement);
+    let surface = confirm_lock(f, replacement, output);
+    (replacement, surface)
+}
+
+/// A second `lock` from another client while the first is alive must be
+/// refused outright: the incumbent keeps the session, and the newcomer only
+/// ever sees `finished`, never `locked`. Before this guard, the second lock
+/// would displace the first — whose surfaces `lock_surfaces` still held — and
+/// could then unlock a session it never earned.
+#[test]
+fn second_lock_is_refused_while_the_first_client_is_alive() {
+    let mut f = Fixture::new();
+    // `confirm_lock` populates `lock_surfaces`, and this scenario never
+    // unlocks to drain it.
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    let a = f.add_client();
+    let b = f.add_client();
+
+    f.client(a).lock_session();
+    f.roundtrip(a);
+    let a_surface = confirm_lock(&mut f, a, &output);
+    assert_eq!(
+        keyboard_focus(&mut f),
+        Some(a_surface.clone()),
+        "precondition: the first client's lock surface holds keyboard focus"
+    );
+
+    f.client(b).lock_session();
+    f.roundtrip(b);
+
+    assert_eq!(
+        f.client(b).lock_events(),
+        &[LockEvent::Finished],
+        "a second client must be refused outright while the first lock is alive — it \
+         may only ever see `finished`, never `locked`"
+    );
+    assert_eq!(
+        keyboard_focus(&mut f),
+        Some(a_surface),
+        "the original client's lock surface must keep keyboard focus after a refused \
+         takeover attempt"
+    );
+}
+
+/// The crash-recovery path: a locking client dying must not permanently wedge
+/// the session — its outputs are blanked with nothing left to drive them and
+/// no way back short of a VT switch. A replacement is allowed to take over,
+/// and must actually complete its lock, not just get past the refusal guard.
+#[test]
+fn a_lock_whose_client_died_can_be_replaced() {
+    let mut f = Fixture::new();
+    // `crash_and_replace` confirms the replacement's lock, populating
+    // `lock_surfaces`, and this scenario never unlocks to drain it.
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    let a = f.add_client();
+
+    f.client(a).lock_session();
+    f.roundtrip(a);
+
+    let (b, _surface) = crash_and_replace(&mut f, a, &output);
+
+    assert_eq!(
+        f.client(b).lock_events(),
+        &[LockEvent::Locked],
+        "a lock whose client died must be replaceable, and the replacement must \
+         actually reach `locked`"
+    );
+    assert!(
+        matches!(f.state().session_lock, SessionLock::Locked(_)),
+        "the session must be `Locked` again once the replacement's surface commits"
+    );
+}
+
+/// The replacement's lock surface must receive keyboard focus, the same as a
+/// first-ever lock does. The takeover deliberately routes through `Pending`
+/// rather than confirming immediately: `update_keyboard_focus` bails while
+/// locked, so only the `Pending` → `Locked` commit in `CompositorHandler`
+/// grants the lock surface the keyboard. An earlier confirmation would still
+/// render the lock screen but leave it unable to receive a password.
+#[test]
+fn replacement_lock_surface_receives_keyboard_focus() {
+    let mut f = Fixture::new();
+    // `crash_and_replace` confirms the replacement's lock, populating
+    // `lock_surfaces`, and this scenario never unlocks to drain it.
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    let a = f.add_client();
+
+    f.client(a).lock_session();
+    f.roundtrip(a);
+
+    let (_b, surface) = crash_and_replace(&mut f, a, &output);
+
+    assert_eq!(
+        keyboard_focus(&mut f),
+        Some(surface),
+        "the replacement lock surface must hold keyboard focus once its commit \
+         confirms the lock"
+    );
+}
+
+/// `new_surface` must refuse a lock surface from any client other than the
+/// one holding the lock — see the comment on that guard for why smithay's own
+/// `locked_outputs` check doesn't already cover this.
+#[test]
+fn new_surface_from_a_refused_client_does_not_overwrite_the_incumbent_lock_surface() {
+    let mut f = Fixture::new();
+    // `confirm_lock` populates `lock_surfaces`, and this scenario never
+    // unlocks to drain it.
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    let a = f.add_client();
+    let b = f.add_client();
+
+    f.client(a).lock_session();
+    f.roundtrip(a);
+    let a_surface = confirm_lock(&mut f, a, &output);
+
+    f.client(b).lock_session();
+    f.roundtrip(b);
+    assert_eq!(
+        f.client(b).lock_events(),
+        &[LockEvent::Finished],
+        "precondition: b's lock request was refused while a's is alive"
+    );
+
+    let wl_output = f.client(b).output(&output.name());
+    f.client(b).create_lock_surface(&wl_output);
+    f.roundtrip(b);
+
+    assert_eq!(
+        f.state()
+            .lock_surfaces
+            .get(&output)
+            .unwrap()
+            .wl_surface()
+            .clone(),
+        a_surface,
+        "a refused client's get_lock_surface must not overwrite the incumbent's lock \
+         surface"
+    );
+
+    pointer_to_screen(&mut f, &FakeDevice::mouse(), Point::from((10.0, 10.0)));
+    assert_eq!(
+        pointer_focus(&mut f),
+        Some(a_surface),
+        "locked pointer input must keep routing to the incumbent's lock surface, not \
+         the refused client's"
+    );
+}
+
+/// A pointer resync deferred by `warp_pointer` and flushed on the next
+/// rendered frame must not re-target focus at the app behind the lock screen —
+/// `focus_under` is lock-unaware, so the gate has to live in the flush itself.
+#[test]
+fn flush_pointer_resync_does_not_restore_focus_to_the_window_behind_the_lock_screen() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    window_under_pointer(&mut f, id);
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    assert_eq!(
+        pointer_focus(&mut f),
+        None,
+        "precondition: lock() cleared pointer focus"
+    );
+
+    f.state().pending_pointer_resync = true;
+    f.state().flush_pointer_resync();
+
+    assert_eq!(
+        pointer_focus(&mut f),
+        None,
+        "a resync flushed mid-lock must not restore pointer focus to the app behind \
+         the lock screen"
+    );
+}
+
+/// Fullscreen entered while locked must not move pointer focus onto the
+/// fullscreening app — the locked input path sends `button`/`axis` events
+/// straight at `current_focus()`, so focusing the app here would hand it every
+/// click and scroll (and activate its cursor lock) under the lock screen.
+#[test]
+fn enter_fullscreen_while_locked_does_not_focus_the_pointer_on_the_window() {
+    let mut f = Fixture::new();
+    // `enter_fullscreen` moves the output's camera, seeding a per-output blur
+    // generation that only clears on output disconnect.
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let window = window_under_pointer(&mut f, id);
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    assert_eq!(
+        pointer_focus(&mut f),
+        None,
+        "precondition: lock() cleared pointer focus"
+    );
+
+    f.state().enter_fullscreen(&window, Some(output));
+
+    assert_eq!(
+        pointer_focus(&mut f),
+        None,
+        "entering fullscreen while locked must not hand pointer focus to the app"
+    );
+}
+
+/// `unlock()` must re-seat pointer focus without the pointer moving — the
+/// first click after unlocking has to reach the window under the cursor, not
+/// wait for a motion event to notice it's there.
+#[test]
+fn unlock_reseats_pointer_focus_without_the_pointer_moving() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let window = window_under_pointer(&mut f, id);
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    assert_eq!(
+        pointer_focus(&mut f),
+        None,
+        "precondition: lock() cleared pointer focus"
+    );
+
+    f.state().unlock();
+
+    assert_eq!(
+        pointer_focus(&mut f),
+        Some(server_surface(&window)),
+        "unlock() must restore pointer focus to the window under the cursor without \
+         waiting for the pointer to move"
+    );
+}
+
+/// While locked, the stored pointer location is screen coords — the locked
+/// motion handlers hand the lock surface screen-space positions — and
+/// `unlock` converts it back to canvas coords. A non-origin camera and a
+/// non-1.0 zoom make a missing (or backwards) conversion visible; at the
+/// identity view canvas and screen coincide and either bug would go unnoticed.
+#[test]
+fn lock_and_unlock_convert_the_stored_pointer_location_between_screen_and_canvas_space() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+
+    let canvas_center = center_of(&mut f, &window);
+
+    let zoom = 2.0;
+    let camera = Point::from((
+        canvas_center.x - 1920.0 / 2.0 / zoom,
+        canvas_center.y - 1080.0 / 2.0 / zoom,
+    ));
+    custom_view(&mut f, camera, zoom);
+
+    pointer_to(&mut f, &FakeDevice::mouse(), canvas_center);
+    assert_eq!(
+        pointer_focus(&mut f),
+        Some(server_surface(&window)),
+        "precondition: the pointer is focused on the window under the cursor"
+    );
+    assert_eq!(
+        f.state().seat.get_pointer().unwrap().current_location(),
+        canvas_center,
+        "precondition: the stored location is canvas-space before the lock"
+    );
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    let expected_screen = canvas_to_screen(CanvasPos(canvas_center), camera, zoom).0;
+    assert_eq!(
+        f.state().seat.get_pointer().unwrap().current_location(),
+        expected_screen,
+        "the stored location must become screen coords while locked"
+    );
+
+    f.state().unlock();
+
+    assert_eq!(
+        f.state().seat.get_pointer().unwrap().current_location(),
+        canvas_center,
+        "unlock() must convert the stored location back to canvas space"
+    );
+}
+
+/// A close armed by a finger on the close button must not survive the lock —
+/// otherwise a touch-up after unlocking closes a window whose press predates
+/// the lock entirely, hit-tested against stale pre-lock coordinates.
+#[test]
+fn lock_clears_a_touch_close_armed_before_it() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let id = f.add_client();
+
+    let surface = map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+    // y = 30 leaves room above the window for its title bar to land on-screen
+    // — the chrome sits above `window_loc.y`, and a touch device can't report
+    // a position off the top of the viewport.
+    f.state().map_window(
+        StageWindow::Client(window.clone()),
+        Point::from((0, 30)),
+        false,
+    );
+    give_ssd(&mut f, &window);
+
+    // Close button, bar 25px tall: x in [400-25-8, 400-8), y in [30-25, 30).
+    let close = Point::from((400.0 - 20.0, 30.0 - 12.0));
+    touch_down(&mut f, close, 0);
+    f.double_roundtrip(id);
+
+    assert!(
+        f.state().touch_state.pending_close.is_some(),
+        "precondition: the finger landed on the close button and armed a pending close"
+    );
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    assert!(
+        f.state().touch_state.pending_close.is_none(),
+        "a close armed before the lock must not survive it"
+    );
+
+    // The lift happens after unlocking, not before — while still locked,
+    // `on_touch_up` forwards straight to the lock surface and never even
+    // looks at `pending_close`; the stale close would fire on the first
+    // lift *after* unlock, which is the scenario this test is about.
+    f.state().unlock();
+    f.roundtrip(id);
+    touch_up(&mut f, 0);
+    f.roundtrip(id);
+
+    assert!(
+        !f.client(id).window(&surface).close_requested,
+        "a touch-up after unlock must not close a window whose armed close predates \
+         the lock"
+    );
+}
+
+/// A deferred single-tap center armed before the lock must not fire mid-lock:
+/// its timer outlives the fingers that armed it, and firing would arm
+/// `camera_target` under the lock screen via `navigate_to_window`.
+#[test]
+fn lock_cancels_a_pending_deferred_touch_center() {
+    let mut f = Fixture::new();
+    f.skip_baseline_check();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    let window = window_by_app_id(&mut f, "a").unwrap();
+
+    f.state()
+        .schedule_pending_center(window.clone(), Duration::from_millis(10));
+    assert!(
+        f.state().touch_state.pending_center_timer.is_some(),
+        "precondition: a deferred center is armed"
+    );
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    assert!(
+        f.state().touch_state.pending_center_timer.is_none(),
+        "a deferred center armed before the lock must not survive it"
+    );
+
+    std::thread::sleep(Duration::from_millis(50));
+    f.pump(5);
+
+    assert!(
+        f.state().camera_target().is_none(),
+        "the cancelled timer must not later arm a camera pan mid-lock"
+    );
+}
+
+/// A hardware `TouchCancel` mid-lock must not touch [`TouchState::lock_slots`]
+/// — see the comment on that clear in `lock()` for why only `lock()`/`unlock()`
+/// may drain it, not `cancel_touch_sequence`.
+///
+/// [`TouchState::lock_slots`]: crate::input::touch::TouchState::lock_slots
+#[test]
+fn a_touch_cancel_mid_lock_does_not_strip_a_post_lock_touch_of_its_up() {
+    let mut f = Fixture::new();
+    // `confirm_lock` populates `lock_surfaces`, and this scenario never
+    // unlocks to drain it.
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    confirm_lock(&mut f, id, &output);
+
+    touch_down(&mut f, Point::from((10.0, 10.0)), 0);
+    f.roundtrip(id);
+    assert!(
+        f.client(id).state.touch_events.contains(&TouchEvent::Down),
+        "precondition: the post-lock finger reached the lock surface"
+    );
+
+    touch_cancel(&mut f);
+    f.roundtrip(id);
+    touch_up(&mut f, 0);
+    f.roundtrip(id);
+
+    assert!(
+        f.client(id).state.touch_events.contains(&TouchEvent::Up),
+        "a touch that began after the lock must still receive its up after a \
+         hardware TouchCancel mid-lock"
+    );
+}

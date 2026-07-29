@@ -15,6 +15,12 @@ impl DriftWm {
         window_size: Size<i32, Logical>,
         bar: i32,
     ) -> Option<(i32, i32)> {
+        // A locked session keeps *screen* coords in `current_location` (see
+        // `SessionLockHandler::lock`), which read as canvas would spawn the
+        // window at a position nobody pointed at. Fall back to centering.
+        if self.session_lock.is_locked() {
+            return None;
+        }
         self.active_output()?;
 
         let pointer = self.seat.get_pointer()?;

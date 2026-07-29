@@ -227,11 +227,15 @@ impl CompositorHandler for DriftWm {
                 .values()
                 .any(|ls| ls.wl_surface() == surface);
             if is_lock_surface {
-                // locker.lock() consumes — take it out of the enum.
+                // locker.lock() consumes — take it out of the enum. The lock
+                // object outlives it in `Locked`, where a later lock request
+                // reads its liveness.
                 let old =
-                    std::mem::replace(&mut self.session_lock, crate::state::SessionLock::Locked);
+                    std::mem::replace(&mut self.session_lock, crate::state::SessionLock::Unlocked);
                 if let crate::state::SessionLock::Pending(locker) = old {
+                    let lock = locker.ext_session_lock().clone();
                     locker.lock();
+                    self.session_lock = crate::state::SessionLock::Locked(lock);
                     tracing::info!("Session lock confirmed");
                     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                     self.set_keyboard_focus(Some(FocusTarget(surface.clone())), serial);

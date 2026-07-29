@@ -285,8 +285,16 @@ impl DriftWm {
         // cursor is on the fullscreen output. For a fullscreen on a different
         // monitor, don't lock the pointer to a surface it isn't over — the
         // constraint activates naturally when the pointer arrives there.
+        //
+        // Never while locked: the locked input path sends `button` and `axis`
+        // straight at `current_focus()`, so pointing it at the fullscreening app
+        // here would hand that app every click and scroll until the next
+        // physical motion, and activate its cursor lock under the lock screen.
         let on_active_output = self.active_output().as_ref() == Some(&output);
-        if on_active_output && let Some(wl_surface) = window.wl_surface() {
+        if on_active_output
+            && !self.session_lock.is_locked()
+            && let Some(wl_surface) = window.wl_surface()
+        {
             let pointer = self.seat.get_pointer().unwrap();
             // Deactivate any constraint on the old focused surface
             if let Some(old) = pointer.current_focus() {

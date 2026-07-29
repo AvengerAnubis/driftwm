@@ -263,7 +263,7 @@ impl DriftWm {
 
         // When locked, forward keyboard (VT switch + lock surface input) and
         // pointer events directly to smithay — no compositor grabs or gestures.
-        if !matches!(self.session_lock, crate::state::SessionLock::Unlocked) {
+        if self.session_lock.is_locked() {
             match event {
                 InputEvent::Keyboard { event } => self.on_keyboard::<I>(event),
                 InputEvent::PointerMotion { event } => self.on_pointer_motion_relative::<I>(event),
@@ -628,6 +628,13 @@ impl DriftWm {
     /// Activate a pointer constraint if the pointer is over the constraining surface
     /// and within the constraint region.
     pub(crate) fn maybe_activate_pointer_constraint(&self) {
+        // Nothing behind the lock screen may capture the pointer, and the region
+        // test below reads `current_location` as canvas coords, which a locked
+        // session doesn't hold. `unlock` re-runs this via
+        // `refresh_pointer_focus`.
+        if self.session_lock.is_locked() {
+            return;
+        }
         let pointer = self.seat.get_pointer().unwrap();
         let Some(focus) = pointer.current_focus() else {
             return;
@@ -661,7 +668,7 @@ impl DriftWm {
     /// this, button/axis events keep routing to the destroyed surface until the
     /// user physically moves the pointer.
     pub(crate) fn refresh_pointer_focus(&mut self) {
-        if !matches!(self.session_lock, crate::state::SessionLock::Unlocked) {
+        if self.session_lock.is_locked() {
             return;
         }
         let pointer = self.seat.get_pointer().unwrap();
@@ -709,7 +716,7 @@ impl DriftWm {
         let canvas_pos = screen_to_canvas(ScreenPos(screen_pos), self.camera(), self.zoom()).0;
 
         // When locked, pointer only targets the lock surface
-        if !matches!(self.session_lock, crate::state::SessionLock::Unlocked) {
+        if self.session_lock.is_locked() {
             let serial = SERIAL_COUNTER.next_serial();
             let time = Event::time_msec(&event);
             let pointer = self.seat.get_pointer().unwrap();
@@ -766,7 +773,7 @@ impl DriftWm {
         // Real pointer motion restores the cursor that touch input hid.
         self.cursor.hidden_by_touch = false;
         // When locked, pointer only targets the lock surface
-        if !matches!(self.session_lock, crate::state::SessionLock::Unlocked) {
+        if self.session_lock.is_locked() {
             let pointer = self.seat.get_pointer().unwrap();
             let old_pos = pointer.current_location();
             let delta = event.delta();
@@ -1016,6 +1023,13 @@ impl DriftWm {
     /// disarmed, so a monitor the cursor leaves stops panning immediately
     /// instead of drifting on its own.
     pub(super) fn refresh_cursor_edge_pan(&mut self) {
+        // A cursor left resting in an edge zone would otherwise re-arm the pan
+        // every frame and slide the camera around under the lock surface,
+        // warping the pointer as it goes. `lock` clears the velocity once; this
+        // is what keeps it cleared.
+        if self.session_lock.is_locked() {
+            return;
+        }
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };

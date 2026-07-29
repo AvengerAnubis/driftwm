@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use driftwm::canvas::{CanvasPos, canvas_to_screen};
 use smithay::backend::input::{
     AbsolutePositionEvent, ButtonState, Device, DeviceCapability, Event, InputBackend, InputEvent,
-    PointerButtonEvent, PointerMotionAbsoluteEvent, TouchDownEvent, TouchEvent, TouchSlot,
-    TouchUpEvent, UnusedEvent,
+    PointerButtonEvent, PointerMotionAbsoluteEvent, TouchCancelEvent, TouchDownEvent, TouchEvent,
+    TouchSlot, TouchUpEvent, UnusedEvent,
 };
 use smithay::utils::{Logical, Point};
 
@@ -206,11 +206,31 @@ impl TouchEvent<FakeInput> for FakeTouchUpEvent {
 
 impl TouchUpEvent<FakeInput> for FakeTouchUpEvent {}
 
+/// A hardware-level touch cancel — libinput sends one when it loses track of
+/// the whole sequence. `on_touch_cancel` ignores the event entirely (it only
+/// exists to run
+/// [`DriftWm::cancel_touch_sequence`](crate::state::DriftWm::cancel_touch_sequence)),
+/// so the slot carried here is never read.
+pub struct FakeTouchCancelEvent {
+    device: FakeDevice,
+    slot: TouchSlot,
+    time: u32,
+}
+
+impl TouchEvent<FakeInput> for FakeTouchCancelEvent {
+    fn slot(&self) -> TouchSlot {
+        self.slot
+    }
+}
+
+impl TouchCancelEvent<FakeInput> for FakeTouchCancelEvent {}
+
 impl_event!(
     FakeButtonEvent,
     FakeAbsoluteEvent,
     FakeTouchDownEvent,
     FakeTouchUpEvent,
+    FakeTouchCancelEvent,
 );
 impl_absolute_position!(FakeAbsoluteEvent, FakeTouchDownEvent);
 
@@ -220,6 +240,7 @@ impl InputBackend for FakeInput {
     type PointerMotionAbsoluteEvent = FakeAbsoluteEvent;
     type TouchDownEvent = FakeTouchDownEvent;
     type TouchUpEvent = FakeTouchUpEvent;
+    type TouchCancelEvent = FakeTouchCancelEvent;
 
     type KeyboardKeyEvent = UnusedEvent;
     type PointerAxisEvent = UnusedEvent;
@@ -233,7 +254,6 @@ impl InputBackend for FakeInput {
     type GestureHoldBeginEvent = UnusedEvent;
     type GestureHoldEndEvent = UnusedEvent;
     type TouchMotionEvent = UnusedEvent;
-    type TouchCancelEvent = UnusedEvent;
     type TouchFrameEvent = UnusedEvent;
     type TabletToolAxisEvent = UnusedEvent;
     type TabletToolProximityEvent = UnusedEvent;
@@ -344,6 +364,18 @@ pub fn touch_up(f: &mut Fixture, slot: u32) {
             event: FakeTouchUpEvent {
                 device: FakeDevice::touchscreen(),
                 slot: TouchSlot::from(Some(slot)),
+                time: next_time(),
+            },
+        });
+}
+
+/// A hardware touch cancel, covering the whole sequence rather than one slot.
+pub fn touch_cancel(f: &mut Fixture) {
+    f.state()
+        .process_input_event::<FakeInput>(InputEvent::TouchCancel {
+            event: FakeTouchCancelEvent {
+                device: FakeDevice::touchscreen(),
+                slot: TouchSlot::from(Some(0)),
                 time: next_time(),
             },
         });

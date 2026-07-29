@@ -43,6 +43,7 @@ mod real_clients;
 mod relaunch;
 mod resize_parity;
 mod send_to_output;
+mod session_lock;
 mod session_restore;
 mod soak;
 mod stand_in_parity;
@@ -209,6 +210,16 @@ fn keyboard_focus(f: &mut Fixture) -> Option<WlSurface> {
     f.state()
         .seat
         .get_keyboard()
+        .unwrap()
+        .current_focus()
+        .map(|t| t.0)
+}
+
+/// Server-side surface that currently holds pointer focus, if any.
+fn pointer_focus(f: &mut Fixture) -> Option<WlSurface> {
+    f.state()
+        .seat
+        .get_pointer()
         .unwrap()
         .current_focus()
         .map(|t| t.0)

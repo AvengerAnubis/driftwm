@@ -25,7 +25,13 @@ use wayland_client::protocol::wl_output::{self, WlOutput};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_seat::{self, WlSeat};
 use wayland_client::protocol::wl_surface::{self, WlSurface};
+use wayland_client::protocol::wl_touch::{self, WlTouch};
 use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
+use wayland_protocols::ext::session_lock::v1::client::{
+    ext_session_lock_manager_v1::ExtSessionLockManagerV1,
+    ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
+    ext_session_lock_v1::{self, ExtSessionLockV1},
+};
 use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1::{self, ExtWorkspaceGroupHandleV1},
     ext_workspace_handle_v1::{self, ExtWorkspaceHandleV1},
@@ -74,11 +80,18 @@ pub struct State {
     pub spbm: Option<WpSinglePixelBufferManagerV1>,
     pub viewporter: Option<WpViewporter>,
     pub seat: Option<WlSeat>,
+    /// Bound alongside the seat, so every scenario can observe touch delivery
+    /// without opting in.
+    pub touch: Option<WlTouch>,
     pub xdg_activation: Option<XdgActivationV1>,
+    pub ext_session_lock_manager: Option<ExtSessionLockManagerV1>,
 
     pub windows: Vec<Window>,
     pub layers: Vec<LayerSurface>,
     pub popups: Vec<Popup>,
+    pub session_locks: Vec<Lock>,
+    /// Every `wl_touch` event this client has received, oldest first.
+    pub touch_events: Vec<TouchEvent>,
 
     /// The token string from the most recent `xdg_activation_token_v1.done`.
     pub activation_token: Option<String>,
@@ -197,6 +210,44 @@ pub struct Popup {
     pub popup_done: bool,
 
     pub configures_looked_at: usize,
+}
+
+/// A client-side `ext_session_lock_v1`, plus the (at most one) lock surface
+/// created on it. `events` records every `locked`/`finished` this object has
+/// received, oldest first.
+pub struct Lock {
+    pub qh: QueueHandle<State>,
+    pub spbm: WpSinglePixelBufferManagerV1,
+    pub lock: ExtSessionLockV1,
+    pub events: Vec<LockEvent>,
+    pub surface: Option<LockSurface>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockEvent {
+    Locked,
+    Finished,
+}
+
+/// A `wl_touch` event, recorded without its payload — these scenarios only
+/// care which events arrived, not their coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TouchEvent {
+    Down,
+    Up,
+    Motion,
+    Frame,
+    Cancel,
+}
+
+pub struct LockSurface {
+    pub qh: QueueHandle<State>,
+    pub spbm: WpSinglePixelBufferManagerV1,
+
+    pub surface: WlSurface,
+    pub lock_surface: ExtSessionLockSurfaceV1,
+    pub viewport: WpViewport,
+    pub configures_received: Vec<(u32, (u32, u32))>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -338,10 +389,14 @@ impl Client {
             spbm: None,
             viewporter: None,
             seat: None,
+            touch: None,
             xdg_activation: None,
+            ext_session_lock_manager: None,
             windows: Vec::new(),
             layers: Vec::new(),
             popups: Vec::new(),
+            session_locks: Vec::new(),
+            touch_events: Vec::new(),
             activation_token: None,
             ext_workspace: ExtWorkspace::default(),
         };
@@ -443,6 +498,30 @@ impl Client {
             .unwrap()
             .0
             .clone()
+    }
+
+    /// Send `ext_session_lock_manager_v1.lock`, entering
+    /// `SessionLockHandler::lock` on the compositor. The created lock object
+    /// is tracked as this client's most recent [`Lock`]; its `locked`/
+    /// `finished` events land in [`Client::lock_events`].
+    pub fn lock_session(&mut self) {
+        self.state.lock_session();
+    }
+
+    /// Every `locked`/`finished` event received on this client's most recent
+    /// [`Lock`], oldest first.
+    pub fn lock_events(&mut self) -> &[LockEvent] {
+        &self.state.session_locks.last().unwrap().events
+    }
+
+    /// Create a lock surface for `output` on this client's most recent
+    /// [`Lock`] (`ext_session_lock_v1.get_lock_surface`).
+    pub fn create_lock_surface(&mut self, output: &WlOutput) -> &mut LockSurface {
+        self.state.create_lock_surface(output)
+    }
+
+    pub fn lock_surface(&mut self, surface: &WlSurface) -> &mut LockSurface {
+        self.state.lock_surface(surface)
     }
 }
 
@@ -640,6 +719,49 @@ impl State {
         let activation = self.xdg_activation.as_ref().unwrap();
         let token = self.activation_token.clone().unwrap();
         activation.activate(token, target);
+    }
+
+    pub fn lock_session(&mut self) {
+        let manager = self.ext_session_lock_manager.as_ref().unwrap();
+        let lock = manager.lock(&self.qh, ());
+        self.session_locks.push(Lock {
+            qh: self.qh.clone(),
+            spbm: self.spbm.clone().unwrap(),
+            lock,
+            events: Vec::new(),
+            surface: None,
+        });
+    }
+
+    pub fn create_lock_surface(&mut self, output: &WlOutput) -> &mut LockSurface {
+        let compositor = self.compositor.as_ref().unwrap();
+        let viewporter = self.viewporter.as_ref().unwrap();
+        let lock = self.session_locks.last().unwrap().lock.clone();
+
+        let surface = compositor.create_surface(&self.qh, ());
+        let lock_surface = lock.get_lock_surface(&surface, output, &self.qh, ());
+        let viewport = viewporter.get_viewport(&surface, &self.qh, ());
+
+        let lock_surface = LockSurface {
+            qh: self.qh.clone(),
+            spbm: self.spbm.clone().unwrap(),
+
+            surface,
+            lock_surface,
+            viewport,
+            configures_received: Vec::new(),
+        };
+
+        let lock = self.session_locks.last_mut().unwrap();
+        lock.surface = Some(lock_surface);
+        lock.surface.as_mut().unwrap()
+    }
+
+    pub fn lock_surface(&mut self, surface: &WlSurface) -> &mut LockSurface {
+        self.session_locks
+            .iter_mut()
+            .find_map(|l| l.surface.as_mut().filter(|s| s.surface == *surface))
+            .unwrap()
     }
 }
 
@@ -870,6 +992,33 @@ impl Popup {
     }
 }
 
+impl LockSurface {
+    pub fn commit(&self) {
+        self.surface.commit();
+    }
+
+    pub fn ack_last(&self) {
+        let serial = self.configures_received.last().unwrap().0;
+        self.lock_surface.ack_configure(serial);
+    }
+
+    pub fn ack_last_and_commit(&self) {
+        self.ack_last();
+        self.commit();
+    }
+
+    pub fn attach_new_buffer(&self) {
+        let buffer = self.spbm.create_u32_rgba_buffer(0, 0, 0, 0, &self.qh, ());
+        self.surface.attach(Some(&buffer), 0, 0);
+    }
+
+    /// Scale the 1×1 buffer to `(w, h)` via `wp_viewport`, matching a
+    /// `LockSurfaceState` size — the compositor rejects a mismatch.
+    pub fn set_size(&self, w: u32, h: u32) {
+        self.viewport.set_destination(w as i32, h as i32);
+    }
+}
+
 impl Dispatch<WlCallback, Arc<SyncData>> for State {
     fn event(
         _state: &mut Self,
@@ -918,7 +1067,9 @@ impl Dispatch<WlRegistry, ()> for State {
                     state.viewporter = Some(registry.bind(name, version, qh, ()));
                 } else if interface == WlSeat::interface().name {
                     let version = min(version, WlSeat::interface().version);
-                    state.seat = Some(registry.bind(name, version, qh, ()));
+                    let seat: WlSeat = registry.bind(name, version, qh, ());
+                    state.touch = Some(seat.get_touch(qh, ()));
+                    state.seat = Some(seat);
                 } else if interface == XdgActivationV1::interface().name {
                     let version = min(version, XdgActivationV1::interface().version);
                     state.xdg_activation = Some(registry.bind(name, version, qh, ()));
@@ -929,6 +1080,9 @@ impl Dispatch<WlRegistry, ()> for State {
                 } else if interface == ExtWorkspaceManagerV1::interface().name {
                     let version = min(version, ExtWorkspaceManagerV1::interface().version);
                     state.ext_workspace.manager = Some(registry.bind(name, version, qh, ()));
+                } else if interface == ExtSessionLockManagerV1::interface().name {
+                    let version = min(version, ExtSessionLockManagerV1::interface().version);
+                    state.ext_session_lock_manager = Some(registry.bind(name, version, qh, ()));
                 }
 
                 let global = Global {
@@ -1314,6 +1468,27 @@ impl Dispatch<WlSeat, ()> for State {
     }
 }
 
+impl Dispatch<WlTouch, ()> for State {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlTouch,
+        event: <WlTouch as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        let recorded = match event {
+            wl_touch::Event::Down { .. } => TouchEvent::Down,
+            wl_touch::Event::Up { .. } => TouchEvent::Up,
+            wl_touch::Event::Motion { .. } => TouchEvent::Motion,
+            wl_touch::Event::Frame => TouchEvent::Frame,
+            wl_touch::Event::Cancel => TouchEvent::Cancel,
+            _ => unreachable!(),
+        };
+        state.touch_events.push(recorded);
+    }
+}
+
 impl Dispatch<XdgPositioner, ()> for State {
     fn event(
         _state: &mut Self,
@@ -1354,6 +1529,76 @@ impl Dispatch<XdgPopup, ()> for State {
             }
             xdg_popup::Event::PopupDone => popup.popup_done = true,
             xdg_popup::Event::Repositioned { .. } => (),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<ExtSessionLockManagerV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ExtSessionLockManagerV1,
+        _event: <ExtSessionLockManagerV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        unreachable!()
+    }
+}
+
+impl Dispatch<ExtSessionLockV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &ExtSessionLockV1,
+        event: <ExtSessionLockV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        let lock = state
+            .session_locks
+            .iter_mut()
+            .find(|l| l.lock == *proxy)
+            .unwrap();
+
+        match event {
+            ext_session_lock_v1::Event::Locked => lock.events.push(LockEvent::Locked),
+            ext_session_lock_v1::Event::Finished => lock.events.push(LockEvent::Finished),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<ExtSessionLockSurfaceV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        lock_surface: &ExtSessionLockSurfaceV1,
+        event: <ExtSessionLockSurfaceV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        let lock_surface = state
+            .session_locks
+            .iter_mut()
+            .find_map(|l| {
+                l.surface
+                    .as_mut()
+                    .filter(|s| s.lock_surface == *lock_surface)
+            })
+            .unwrap();
+
+        match event {
+            ext_session_lock_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                lock_surface
+                    .configures_received
+                    .push((serial, (width, height)));
+            }
             _ => unreachable!(),
         }
     }

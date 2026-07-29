@@ -150,6 +150,15 @@ impl DriftWm {
     /// now (hit-testing stays correct) but defer the client-facing motion to
     /// [`Self::flush_pointer_resync`], coalescing to one motion per frame.
     pub(crate) fn warp_pointer(&mut self, new_pos: Point<f64, Logical>) {
+        // `new_pos` is canvas-space, but a locked session keeps screen coords in
+        // `current_location` (the invariant `SessionLockHandler::lock` sets up),
+        // so writing one here would strand the pointer at unlock. An output
+        // hotplug is the reachable caller — the input and animation ones are all
+        // gated already — and it has nothing to hold still: the lock surface is
+        // screen-fixed, which is what a warp exists to preserve.
+        if self.session_lock.is_locked() {
+            return;
+        }
         let pointer = self.seat.get_pointer().unwrap();
 
         if self.pointer_constraint_active() {
@@ -204,6 +213,14 @@ impl DriftWm {
     /// refreshing focus/hover and enter/leave. Called once per rendered frame.
     pub(crate) fn flush_pointer_resync(&mut self) {
         if !std::mem::take(&mut self.pending_pointer_resync) {
+            return;
+        }
+        // `focus_under` is lock-unaware, so a flush while locked would re-target
+        // pointer focus at the app behind the lock surface. Swallowed after the
+        // take rather than deferred past it: a flag left standing keeps udev's
+        // render loop out of its idle path for the whole lock, and `unlock`
+        // re-seats pointer focus anyway.
+        if self.session_lock.is_locked() {
             return;
         }
         // A constraint may have activated since the deferred warp.
