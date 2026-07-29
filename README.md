@@ -377,18 +377,19 @@ dependencies plus the `.cargo/config.toml` that points at them, for building
 without network access:
 
 ```bash
-tar xf driftwm-<version>.tar.gz                            # source tarball from the release
 sha256sum -c driftwm-<version>-vendor.tar.xz.sha256 &&
-  tar xf driftwm-<version>-vendor.tar.xz -C driftwm-<version>  # overlays vendor/ and .cargo/
-cd driftwm-<version>
-cargo build --offline --locked --release
-sudo make install
+  tar xf driftwm-<version>.tar.gz &&
+  tar xf driftwm-<version>-vendor.tar.xz -C driftwm-<version> &&
+  cd driftwm-<version> &&
+  cargo build --offline --locked --release &&
+  sudo make install
 ```
 
 > [!IMPORTANT]
-> The vendor tarball has no top-level directory — it unpacks straight into the
-> current one. Always extract it with `-C <source dir>`, or it will overwrite a
-> `.cargo/config.toml` you already have there.
+> The vendor tarball has no top-level directory: it unpacks `vendor/` and
+> `.cargo/` into whatever directory it is extracted in, hence the `-C`. Don't
+> prune `vendor/` either — cargo checksums it against `Cargo.lock`, so dropping
+> a crate you think is unused, or a file inside one, breaks `--offline`.
 
 System build dependencies still come from your distro.
 

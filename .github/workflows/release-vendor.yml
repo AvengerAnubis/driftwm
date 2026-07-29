@@ -34,10 +34,13 @@ jobs:
     steps:
       - name: Resolve version
         id: ver
+        # Through the environment, not `${{ }}` in the body: a dispatch input is
+        # attacker-controlled text and this job can write to releases.
+        env:
+          RAW_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
         run: |
-          TAG="${{ github.event.release.tag_name || github.event.inputs.tag }}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "tag=$RAW_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${RAW_TAG#v}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v5
         with:
@@ -79,7 +82,7 @@ jobs:
           # same bytes. -T1 because multi-threaded xz splits the stream by
           # thread count, which would tie the output to the runner's core count.
           tar --sort=name --format=gnu --numeric-owner --owner=0 --group=0 \
-              --mtime="@$MTIME" \
+              --mtime="@${MTIME:?}" \
               -cf - .cargo vendor \
             | xz -9 -T1 > "$ASSET"
           sha256sum "$ASSET" > "$ASSET.sha256"
@@ -99,4 +102,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.ver.outputs.tag }}
-        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
+        # Tarball first: a failure part-way then leaves the release without a
+        # checksum, rather than with one that describes the previous asset.
+        run: |
+          gh release upload "$TAG" "$ASSET" --clobber
+          gh release upload "$TAG" "$ASSET.sha256" --clobber
