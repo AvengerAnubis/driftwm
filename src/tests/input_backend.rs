@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use driftwm::canvas::{CanvasPos, canvas_to_screen};
 use smithay::backend::input::{
     AbsolutePositionEvent, ButtonState, Device, DeviceCapability, Event, InputBackend, InputEvent,
-    PointerButtonEvent, PointerMotionAbsoluteEvent, TouchCancelEvent, TouchDownEvent, TouchEvent,
-    TouchSlot, TouchUpEvent, UnusedEvent,
+    PointerButtonEvent, PointerMotionAbsoluteEvent, PointerMotionEvent, TouchCancelEvent,
+    TouchDownEvent, TouchEvent, TouchMotionEvent, TouchSlot, TouchUpEvent, UnusedEvent,
 };
 use smithay::utils::{Logical, Point};
 
@@ -173,6 +173,33 @@ pub struct FakeAbsoluteEvent {
 
 impl PointerMotionAbsoluteEvent<FakeInput> for FakeAbsoluteEvent {}
 
+/// Relative pointer motion, e.g. from a mouse. `delta` is screen-pixel
+/// movement; accelerated and unaccelerated are the same value here, since
+/// nothing under test reads the unaccelerated pair.
+pub struct FakeRelativeEvent {
+    device: FakeDevice,
+    delta: Point<f64, Logical>,
+    time: u32,
+}
+
+impl PointerMotionEvent<FakeInput> for FakeRelativeEvent {
+    fn delta_x(&self) -> f64 {
+        self.delta.x
+    }
+
+    fn delta_y(&self) -> f64 {
+        self.delta.y
+    }
+
+    fn delta_x_unaccel(&self) -> f64 {
+        self.delta.x
+    }
+
+    fn delta_y_unaccel(&self) -> f64 {
+        self.delta.y
+    }
+}
+
 /// A finger landing, in the same screen-space convention as
 /// [`FakeAbsoluteEvent`].
 pub struct FakeTouchDownEvent {
@@ -189,6 +216,23 @@ impl TouchEvent<FakeInput> for FakeTouchDownEvent {
 }
 
 impl TouchDownEvent<FakeInput> for FakeTouchDownEvent {}
+
+/// A finger already down moving, in the same screen-space convention as
+/// [`FakeAbsoluteEvent`].
+pub struct FakeTouchMotionEvent {
+    device: FakeDevice,
+    screen: Point<f64, Logical>,
+    slot: TouchSlot,
+    time: u32,
+}
+
+impl TouchEvent<FakeInput> for FakeTouchMotionEvent {
+    fn slot(&self) -> TouchSlot {
+        self.slot
+    }
+}
+
+impl TouchMotionEvent<FakeInput> for FakeTouchMotionEvent {}
 
 /// A finger lifting. A real touch-up reports only its slot — where the finger
 /// was is the sequence's business, not the event's.
@@ -228,23 +272,26 @@ impl TouchCancelEvent<FakeInput> for FakeTouchCancelEvent {}
 impl_event!(
     FakeButtonEvent,
     FakeAbsoluteEvent,
+    FakeRelativeEvent,
     FakeTouchDownEvent,
+    FakeTouchMotionEvent,
     FakeTouchUpEvent,
     FakeTouchCancelEvent,
 );
-impl_absolute_position!(FakeAbsoluteEvent, FakeTouchDownEvent);
+impl_absolute_position!(FakeAbsoluteEvent, FakeTouchDownEvent, FakeTouchMotionEvent);
 
 impl InputBackend for FakeInput {
     type Device = FakeDevice;
     type PointerButtonEvent = FakeButtonEvent;
     type PointerMotionAbsoluteEvent = FakeAbsoluteEvent;
+    type PointerMotionEvent = FakeRelativeEvent;
     type TouchDownEvent = FakeTouchDownEvent;
     type TouchUpEvent = FakeTouchUpEvent;
     type TouchCancelEvent = FakeTouchCancelEvent;
+    type TouchMotionEvent = FakeTouchMotionEvent;
 
     type KeyboardKeyEvent = UnusedEvent;
     type PointerAxisEvent = UnusedEvent;
-    type PointerMotionEvent = UnusedEvent;
     type GestureSwipeBeginEvent = UnusedEvent;
     type GestureSwipeUpdateEvent = UnusedEvent;
     type GestureSwipeEndEvent = UnusedEvent;
@@ -253,7 +300,6 @@ impl InputBackend for FakeInput {
     type GesturePinchEndEvent = UnusedEvent;
     type GestureHoldBeginEvent = UnusedEvent;
     type GestureHoldEndEvent = UnusedEvent;
-    type TouchMotionEvent = UnusedEvent;
     type TouchFrameEvent = UnusedEvent;
     type TabletToolAxisEvent = UnusedEvent;
     type TabletToolProximityEvent = UnusedEvent;
@@ -312,6 +358,19 @@ pub fn pointer_to(f: &mut Fixture, device: &FakeDevice, at: Point<f64, Logical>)
     pointer_to_screen(f, device, screen);
 }
 
+/// Report relative motion of `delta` — what a mouse hands over between the
+/// last position and this one, unclamped and unmapped to any output.
+pub fn pointer_relative_motion(f: &mut Fixture, device: &FakeDevice, delta: Point<f64, Logical>) {
+    f.state()
+        .process_input_event::<FakeInput>(InputEvent::PointerMotion {
+            event: FakeRelativeEvent {
+                device: device.clone(),
+                delta,
+                time: next_time(),
+            },
+        });
+}
+
 fn button(f: &mut Fixture, device: &FakeDevice, button: u32, state: ButtonState) {
     f.state()
         .process_input_event::<FakeInput>(InputEvent::PointerButton {
@@ -348,6 +407,20 @@ pub fn touch_down(f: &mut Fixture, at: Point<f64, Logical>, slot: u32) {
     f.state()
         .process_input_event::<FakeInput>(InputEvent::TouchDown {
             event: FakeTouchDownEvent {
+                device: FakeDevice::touchscreen(),
+                screen,
+                slot: TouchSlot::from(Some(slot)),
+                time: next_time(),
+            },
+        });
+}
+
+/// Move the finger holding `slot` to canvas-space `at`.
+pub fn touch_motion(f: &mut Fixture, at: Point<f64, Logical>, slot: u32) {
+    let screen = screen_of(f, at);
+    f.state()
+        .process_input_event::<FakeInput>(InputEvent::TouchMotion {
+            event: FakeTouchMotionEvent {
                 device: FakeDevice::touchscreen(),
                 screen,
                 slot: TouchSlot::from(Some(slot)),

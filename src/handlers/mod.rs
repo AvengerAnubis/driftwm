@@ -1254,6 +1254,10 @@ impl SessionLockHandler for DriftWm {
 
         self.cursor.exec_cursor_show_at = None;
         self.cursor.exec_cursor_deadline = None;
+        // Only physical pointer motion lifts the touch hide, so locking any
+        // time after a touch — including from a touch gesture — would leave the
+        // lock screen with no cursor at all.
+        self.cursor.hidden_by_touch = false;
         self.cursor.cursor_status = smithay::input::pointer::CursorImageStatus::default_named();
         // `unset_grab` above restores pointer focus to the window under the
         // cursor, and nothing re-targets it until the first locked motion — so a

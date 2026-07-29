@@ -821,14 +821,21 @@ impl DriftWm {
         let Some(output_geo) = self.space.output_geometry(&output) else {
             return;
         };
-        self.cursor.hidden_by_touch = true;
+        let slot = event.slot();
+        // A finger the lock disowned — still down from the gesture that locked
+        // the session — must not hide the pointer on its way out: only physical
+        // pointer motion clears this, so a touch-only device would be left with
+        // a cursorless lock screen for the rest of the lock. A finger that goes
+        // down *on* the lock screen owns its slot and still hides it.
+        if !self.session_lock.is_locked() || self.touch_state.lock_slots.contains(&slot) {
+            self.cursor.hidden_by_touch = true;
+        }
         let screen_pos = event.position_transformed(output_geo.size);
         let (camera, zoom) = {
             let os = output_state(&output);
             (os.camera, os.zoom)
         };
         let canvas_pos = screen_to_canvas(ScreenPos(screen_pos), camera, zoom).0;
-        let slot = event.slot();
         let time = Event::time_msec(&event);
 
         if self.session_lock.is_locked() {

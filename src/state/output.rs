@@ -5,6 +5,7 @@ use smithay::output::Output;
 use smithay::utils::{Logical, Point};
 use smithay::wayland::seat::WaylandFocus;
 
+use driftwm::canvas::{ScreenPos, clamp_to_output};
 use driftwm::config::OutputPosition;
 use driftwm::stage::StageElement;
 
@@ -327,11 +328,23 @@ impl DriftWm {
                         let sz = output_logical_size(new_out);
                         (os.camera, os.zoom, sz)
                     };
-                    let center = Point::from((
-                        cam.x + size.w as f64 / (2.0 * zoom),
-                        cam.y + size.h as f64 / (2.0 * zoom),
-                    ));
-                    self.warp_pointer(center);
+                    if self.session_lock.is_locked() {
+                        // `warp_pointer` declines under a lock, and the stored
+                        // location is screen-space against the output that just
+                        // left — on a smaller survivor it would render outside
+                        // the framebuffer until some relative motion clamped it
+                        // back. Nothing to re-center on here: the lock surface
+                        // is screen-fixed.
+                        let pointer = self.seat.get_pointer().unwrap();
+                        let clamped = clamp_to_output(ScreenPos(pointer.current_location()), size);
+                        pointer.set_location(clamped.0);
+                    } else {
+                        let center = Point::from((
+                            cam.x + size.w as f64 / (2.0 * zoom),
+                            cam.y + size.h as f64 / (2.0 * zoom),
+                        ));
+                        self.warp_pointer(center);
+                    }
                 }
             }
         }

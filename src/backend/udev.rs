@@ -1315,11 +1315,16 @@ fn render_frame(
     // Build cursor + compose frame
     let cursor_alpha = if data.active_output().as_ref() == Some(output) {
         1.0
-    } else if data.is_output_fullscreen(output) || data.is_fullscreen() {
+    } else if data.is_output_fullscreen(output)
+        || data.is_fullscreen()
+        || data.session_lock.is_locked()
+    {
         // The ghost cursor shows where the pointer sits on the shared canvas,
         // which only applies between canvas viewports. A fullscreen output is
         // not one — don't ghost the pointer onto a fullscreen output's window,
-        // nor project a fullscreen output's pointer onto other monitors.
+        // nor project a fullscreen output's pointer onto other monitors. Nor is
+        // a locked one: the pointer's location is then screen-space on the
+        // active output alone, and means nothing on any other.
         0.0
     } else {
         data.config.inactive_cursor_opacity as f32

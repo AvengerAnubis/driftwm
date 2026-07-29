@@ -26,7 +26,8 @@ use crate::state::{SessionLock, StageWindow};
 
 use super::client::{ClientId, LockEvent, TouchEvent};
 use super::input_backend::{
-    FakeDevice, pointer_to, pointer_to_screen, touch_cancel, touch_down, touch_up,
+    FakeDevice, pointer_relative_motion, pointer_to, pointer_to_screen, touch_cancel, touch_down,
+    touch_motion, touch_up,
 };
 use super::{
     Fixture, give_ssd, keyboard_focus, map_window, pointer_focus, server_surface, window_by_app_id,
@@ -766,5 +767,191 @@ fn a_touch_cancel_mid_lock_does_not_strip_a_post_lock_touch_of_its_up() {
         f.client(id).state.touch_events.contains(&TouchEvent::Up),
         "a touch that began after the lock must still receive its up after a \
          hardware TouchCancel mid-lock"
+    );
+}
+
+/// A pointer hide left by touch before the lock must not survive it — see
+/// the `hidden_by_touch` reset in `SessionLockHandler::lock`.
+#[test]
+fn lock_lifts_a_pointer_hide_left_by_a_touch_before_it() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    touch_down(&mut f, Point::from((10.0, 10.0)), 0);
+    assert!(
+        f.state().cursor.hidden_by_touch,
+        "precondition: the touch hid the pointer"
+    );
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    assert!(
+        !f.state().cursor.hidden_by_touch,
+        "a pointer hide left by a touch before the lock must not survive it"
+    );
+}
+
+/// Relative motion must clamp to the output bounds while locked — see the
+/// clamp in `on_pointer_motion_relative`. Pins the top-left corner.
+#[test]
+fn locked_relative_motion_clamps_at_the_top_left_of_the_output() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    pointer_to_screen(&mut f, &FakeDevice::mouse(), Point::from((5.0, 5.0)));
+    pointer_relative_motion(&mut f, &FakeDevice::mouse(), Point::from((-500.0, -500.0)));
+
+    assert_eq!(
+        f.state().seat.get_pointer().unwrap().current_location(),
+        Point::from((0.0, 0.0)),
+        "a large negative relative delta must clamp at the output's top-left \
+         corner, not carry the cursor off it"
+    );
+}
+
+/// The bottom-right counterpart of
+/// [`locked_relative_motion_clamps_at_the_top_left_of_the_output`].
+#[test]
+fn locked_relative_motion_clamps_at_the_bottom_right_of_the_output() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    pointer_to_screen(&mut f, &FakeDevice::mouse(), Point::from((1900.0, 1070.0)));
+    pointer_relative_motion(&mut f, &FakeDevice::mouse(), Point::from((500.0, 500.0)));
+
+    assert_eq!(
+        f.state().seat.get_pointer().unwrap().current_location(),
+        Point::from((1919.0, 1079.0)),
+        "a large positive relative delta must clamp at the output's \
+         bottom-right corner, not carry the cursor off it"
+    );
+}
+
+/// An in-bounds relative delta must land exactly, not merely stay within
+/// bounds — the two clamp tests above only pin the boundaries, which a clamp
+/// that also mangled ordinary in-range motion would still pass.
+#[test]
+fn locked_relative_motion_lands_exactly_when_in_bounds() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    pointer_to_screen(&mut f, &FakeDevice::mouse(), Point::from((5.0, 5.0)));
+    pointer_relative_motion(&mut f, &FakeDevice::mouse(), Point::from((10.0, 10.0)));
+
+    assert_eq!(
+        f.state().seat.get_pointer().unwrap().current_location(),
+        Point::from((15.0, 15.0)),
+        "an in-bounds relative delta must land exactly"
+    );
+}
+
+/// A finger already down when the lock engages is disowned (absent from
+/// `lock_slots`) — motion on it must not re-hide the pointer. See the gate
+/// in `on_touch_motion`.
+#[test]
+fn locked_touch_motion_on_a_disowned_finger_does_not_re_hide_the_pointer() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    touch_down(&mut f, Point::from((10.0, 10.0)), 0);
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    assert!(
+        !f.state().cursor.hidden_by_touch,
+        "precondition: lock() lifted the hide left by the pre-lock touch"
+    );
+
+    touch_motion(&mut f, Point::from((20.0, 20.0)), 0);
+
+    assert!(
+        !f.state().cursor.hidden_by_touch,
+        "motion from a finger the lock disowned must not re-hide the pointer"
+    );
+}
+
+/// The other half of the rule under
+/// [`locked_touch_motion_on_a_disowned_finger_does_not_re_hide_the_pointer`].
+/// Pinned so a future simplification to a blanket `!is_locked()` gate fails
+/// loudly — this one may already hold before the disowned-finger fix, since
+/// `on_touch_down` alone hides the pointer; it is a characterization test,
+/// not a regression test.
+#[test]
+fn locked_touch_motion_on_a_finger_that_owns_its_slot_still_hides_the_pointer() {
+    let mut f = Fixture::new();
+    // `confirm_lock` populates `lock_surfaces`, and this scenario never
+    // unlocks to drain it.
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    confirm_lock(&mut f, id, &output);
+
+    touch_down(&mut f, Point::from((10.0, 10.0)), 0);
+    // Isolate what motion does, independent of `on_touch_down` also setting
+    // this unconditionally.
+    f.state().cursor.hidden_by_touch = false;
+
+    touch_motion(&mut f, Point::from((20.0, 20.0)), 0);
+
+    assert!(
+        f.state().cursor.hidden_by_touch,
+        "a finger that went down on the lock screen must still hide the pointer on motion"
+    );
+}
+
+/// Uses a survivor *smaller* than the disconnected output so a missing
+/// clamp is visible: the stored screen-space coordinates would otherwise
+/// land out of the survivor's bounds.
+#[test]
+fn output_disconnect_while_locked_clamps_the_pointer_into_the_survivor() {
+    let mut f = Fixture::new();
+    let out1 = f.add_output(1, (1920, 1080));
+    let out2 = f.add_output(2, (800, 600));
+    let id = f.add_client();
+
+    f.state().focused_output = Some(out1.clone());
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    pointer_to_screen(&mut f, &FakeDevice::mouse(), Point::from((1500.0, 900.0)));
+    assert_eq!(
+        f.state().seat.get_pointer().unwrap().current_location(),
+        Point::from((1500.0, 900.0)),
+        "precondition: the pointer sits where the disconnected output put it, \
+         out of the survivor's bounds"
+    );
+
+    f.remove_output(&out1);
+
+    assert_eq!(
+        f.state().focused_output.as_ref().map(|o| o.name()),
+        Some(out2.name()),
+        "precondition: focus moved to the smaller survivor"
+    );
+    let pointer = f.state().seat.get_pointer().unwrap().current_location();
+    assert_eq!(
+        (pointer.x, pointer.y),
+        (799.0, 599.0),
+        "the disconnect must clamp the stored screen-space pointer into the \
+         smaller survivor, not leave coordinates that only made sense on the \
+         output that just left"
     );
 }

@@ -28,7 +28,9 @@ use std::rc::Rc;
 
 use crate::decorations::{DecorationHit, DecorationKey};
 use crate::state::{DriftWm, FocusTarget, PickTarget, StageWindow, SuspendedWindow};
-use driftwm::canvas::{CanvasPos, ScreenPos, screen_space_focus_loc, screen_to_canvas};
+use driftwm::canvas::{
+    CanvasPos, ScreenPos, clamp_to_output, screen_space_focus_loc, screen_to_canvas,
+};
 use driftwm::config::HotCorner;
 use driftwm::protocols::output_power::OutputPowerHandler;
 
@@ -697,6 +699,21 @@ impl DriftWm {
         self.update_pointer_constraint(old_focus);
     }
 
+    /// Pointer focus while locked: `output`'s lock surface at a zero origin,
+    /// since the locked handlers hand it screen coords it can use as-is.
+    /// `None` on an output the lock client has not put a surface on yet.
+    fn lock_surface_focus(
+        &self,
+        output: &smithay::output::Output,
+    ) -> Option<(FocusTarget, Point<f64, Logical>)> {
+        self.lock_surfaces.get(output).map(|ls| {
+            (
+                FocusTarget(ls.wl_surface().clone()),
+                Point::from((0.0, 0.0)),
+            )
+        })
+    }
+
     fn on_pointer_motion_absolute<I: InputBackend>(
         &mut self,
         event: I::PointerMotionAbsoluteEvent,
@@ -713,22 +730,13 @@ impl DriftWm {
 
         // position_transformed gives screen-local coords (0..width, 0..height)
         let screen_pos = event.position_transformed(output_geo.size);
-        let canvas_pos = screen_to_canvas(ScreenPos(screen_pos), self.camera(), self.zoom()).0;
 
         // When locked, pointer only targets the lock surface
         if self.session_lock.is_locked() {
             let serial = SERIAL_COUNTER.next_serial();
             let time = Event::time_msec(&event);
+            let focus = self.lock_surface_focus(&output);
             let pointer = self.seat.get_pointer().unwrap();
-            let focus = self
-                .active_output()
-                .and_then(|o| self.lock_surfaces.get(&o))
-                .map(|ls| {
-                    (
-                        FocusTarget(ls.wl_surface().clone()),
-                        Point::<f64, smithay::utils::Logical>::from((0.0, 0.0)),
-                    )
-                });
             pointer.motion(
                 self,
                 focus,
@@ -741,6 +749,8 @@ impl DriftWm {
             pointer.frame(self);
             return;
         }
+
+        let canvas_pos = screen_to_canvas(ScreenPos(screen_pos), self.camera(), self.zoom()).0;
         let serial = SERIAL_COUNTER.next_serial();
         let time = Event::time_msec(&event);
         let pointer = self.seat.get_pointer().unwrap();
@@ -774,22 +784,25 @@ impl DriftWm {
         self.cursor.hidden_by_touch = false;
         // When locked, pointer only targets the lock surface
         if self.session_lock.is_locked() {
+            let Some(output) = self.active_output() else {
+                return;
+            };
+            let output_size = crate::state::output_logical_size(&output);
             let pointer = self.seat.get_pointer().unwrap();
             let old_pos = pointer.current_location();
             let delta = event.delta();
-            let new_pos: Point<f64, smithay::utils::Logical> =
-                (old_pos.x + delta.x, old_pos.y + delta.y).into();
+            // Screen-space while locked, and nothing else bounds it. The
+            // unlocked path clamps via the output it lands on; here there is no
+            // such lookup, so a mouse would walk the cursor off the output with
+            // no absolute event ever coming to put it back.
+            let new_pos = clamp_to_output(
+                ScreenPos((old_pos.x + delta.x, old_pos.y + delta.y).into()),
+                output_size,
+            )
+            .0;
             let serial = SERIAL_COUNTER.next_serial();
             let time = Event::time_msec(&event);
-            let focus = self
-                .active_output()
-                .and_then(|o| self.lock_surfaces.get(&o))
-                .map(|ls| {
-                    (
-                        FocusTarget(ls.wl_surface().clone()),
-                        Point::<f64, smithay::utils::Logical>::from((0.0, 0.0)),
-                    )
-                });
+            let focus = self.lock_surface_focus(&output);
             pointer.motion(
                 self,
                 focus,
@@ -918,11 +931,11 @@ impl DriftWm {
         } else {
             // No output at new pos, or a confined pointer staying put →
             // clamp to the current output.
-            let clamped: Point<f64, smithay::utils::Logical> = (
-                (old_screen.x + delta.x).clamp(0.0, output_size.w as f64 - 1.0),
-                (old_screen.y + delta.y).clamp(0.0, output_size.h as f64 - 1.0),
+            let clamped = clamp_to_output(
+                ScreenPos((old_screen.x + delta.x, old_screen.y + delta.y).into()),
+                output_size,
             )
-                .into();
+            .0;
             (cur_output.clone(), clamped)
         };
 

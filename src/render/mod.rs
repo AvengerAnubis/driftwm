@@ -134,15 +134,18 @@ use crate::state::StageWindow;
 use driftwm::canvas;
 use driftwm::window_ext::WindowExt;
 
-/// Render elements for a locked session: only the lock surface (the lock
-/// client provides its own cursor).
+/// Render elements for a locked session: the lock surface, with the cursor
+/// over it. A lock client's `wl_pointer.set_cursor` arrives as a
+/// `CursorImageStatus` we composite ourselves, exactly as for any other
+/// client — nothing draws a cursor here but us.
 fn compose_lock_frame(
     state: &crate::state::DriftWm,
     renderer: &mut GlesRenderer,
     output: &Output,
-    _cursor_elements: Vec<OutputRenderElements>,
+    cursor_elements: Vec<OutputRenderElements>,
 ) -> Vec<OutputRenderElements> {
-    let mut elements = Vec::new();
+    // Cursor first, as in `compose_frame`, so it draws topmost.
+    let mut elements = cursor_elements;
 
     if let Some(lock_surface) = state.lock_surfaces.get(output) {
         let output_scale = output.current_scale().fractional_scale();

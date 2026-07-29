@@ -37,6 +37,17 @@ pub fn canvas_to_screen(canvas: CanvasPos, camera: Point<f64, Logical>, zoom: f6
     )))
 }
 
+/// Clamp a screen-local position into an output of `size`. The far bound is one
+/// short of the edge so the result stays an addressable pixel of that output
+/// rather than the first one of whatever sits beyond it.
+#[inline]
+pub fn clamp_to_output(pos: ScreenPos, size: Size<i32, Logical>) -> ScreenPos {
+    ScreenPos(Point::from((
+        pos.0.x.clamp(0.0, size.w as f64 - 1.0),
+        pos.0.y.clamp(0.0, size.h as f64 - 1.0),
+    )))
+}
+
 /// Focus location for a screen-space surface (wlr layer, screen-pinned window):
 /// smithay derives surface-local coords as `location - focus_loc` with the
 /// pointer/touch location in canvas coords, so the surface's screen origin is
