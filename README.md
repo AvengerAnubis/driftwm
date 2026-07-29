@@ -370,6 +370,28 @@ sudo make install
 
 To uninstall, run `sudo make uninstall` from the repository.
 
+### Offline build
+
+Every release carries a `driftwm-<version>-vendor.tar.xz` asset holding all Rust
+dependencies plus the `.cargo/config.toml` that points at them, for building
+without network access:
+
+```bash
+tar xf driftwm-<version>.tar.gz                            # source tarball from the release
+sha256sum -c driftwm-<version>-vendor.tar.xz.sha256 &&
+  tar xf driftwm-<version>-vendor.tar.xz -C driftwm-<version>  # overlays vendor/ and .cargo/
+cd driftwm-<version>
+cargo build --offline --locked --release
+sudo make install
+```
+
+> [!IMPORTANT]
+> The vendor tarball has no top-level directory — it unpacks straight into the
+> current one. Always extract it with `-C <source dir>`, or it will overwrite a
+> `.cargo/config.toml` you already have there.
+
+System build dependencies still come from your distro.
+
 ### Running
 
 driftwm auto-detects whether it's running nested (inside an existing Wayland
