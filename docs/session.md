@@ -200,11 +200,6 @@ stand-in by, in order:
 - **An app that reports a different `app_id` on relaunch** than it was
   suspended under only adopts via the activation token — the identity
   fallback won't recognize it as the same app.
-- **Touch can't grab a stand-in's resize border**, which is far thinner than a
-  fingertip — the same limit a live window's border has. Use the touch resize
-  gesture instead. Everything else is at parity: a stand-in moves and resizes by
-  pointer, by trackpad gesture, and by touch gesture, and its title bar drags
-  with a finger.
 
 ## Nested sessions
 
