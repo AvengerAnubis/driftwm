@@ -5,6 +5,7 @@ use crate::grabs::{ResizeState, has_left, has_top};
 use crate::handlers::layer_shell::LayerDestroyedMarker;
 use crate::state::{ClientState, DriftWm, FocusTarget, PendingRecenter, StageWindow};
 use driftwm::window_ext::WindowExt;
+use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::desktop::layer_map_for_output;
 use smithay::utils::{Logical, Point, Rectangle};
 use smithay::wayland::shell::wlr_layer::{Anchor, LayerSurfaceCachedState, LayerSurfaceData};
@@ -69,8 +70,12 @@ impl CompositorHandler for DriftWm {
         surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     ) {
         // Registered before get_layer_surface installs smithay's validation
-        // hook, so this fires first. For destroyed layer surfaces, sets full
-        // anchors so size validation passes on the orphaned final commit.
+        // hook, so this fires first. smithay never unregisters that hook, so
+        // every commit after a layer role is destroyed still runs it against
+        // the state `destroyed` zeroed, posting errors on the dead proxy.
+        // Neutralise those commits: full anchors satisfy size validation, and
+        // dropping the buffer satisfies the ack-before-attach check — which
+        // is what killed clients that re-arm an OSD.
         add_pre_commit_hook::<DriftWm, _>(surface, |_state, _dh, surface| {
             with_states(surface, |states| {
                 if states
@@ -81,6 +86,46 @@ impl CompositorHandler for DriftWm {
                     let mut guard = states.cached_state.get::<LayerSurfaceCachedState>();
                     guard.pending().anchor =
                         Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT;
+                    drop(guard);
+                    // Removed rather than None: it also drives
+                    // on_commit_buffer_handler through RendererSurfaceState::reset,
+                    // which drops — and so releases — the buffer committed
+                    // before the destroy. None would leak that one.
+                    //
+                    // Chained, not bound to a variable: holding this guard
+                    // while we lock the renderer state below would take the
+                    // two locks in the reverse order on_commit_buffer_handler
+                    // uses.
+                    let discarded = states
+                        .cached_state
+                        .get::<SurfaceAttributes>()
+                        .pending()
+                        .buffer
+                        .replace(BufferAssignment::Removed);
+                    if let Some(BufferAssignment::NewBuffer(buffer)) = discarded {
+                        // Nothing else releases what we discard here:
+                        // release-on-replace lives in SurfaceAttributes'
+                        // merge_into, which runs on the cache merge, not on a
+                        // hook write. A client recycling a one-buffer shm pool
+                        // would wait forever.
+                        //
+                        // Skip the buffer the renderer is still holding —
+                        // reset() above already releases it, so releasing it
+                        // again here would double-release a buffer the client
+                        // re-attached. This still misses one case, a same
+                        // buffer queued behind a transaction blocker
+                        // releasing it again later, but a doubled release
+                        // isn't a protocol error.
+                        let held_by_renderer = states
+                            .data_map
+                            .get::<RendererSurfaceStateUserData>()
+                            .is_some_and(|data| {
+                                data.lock().unwrap().buffer().is_some_and(|b| b == buffer)
+                            });
+                        if !held_by_renderer {
+                            buffer.release();
+                        }
+                    }
                 }
             });
         });
