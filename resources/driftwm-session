@@ -40,7 +40,9 @@ if [ "$has_systemd" -eq 1 ]; then
 
     systemctl --user unset-environment WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP
 else
-    # No systemd user manager — run compositor directly (runit, OpenRC, etc.).
-    # Environment is already set up via the login-shell re-exec above.
-    exec driftwm --backend udev
+    # No systemd user manager — start dbus session bus so pipewire's
+    # D-Bus API and portals work (runit, OpenRC, etc.). Services like
+    # pipewire/wireplumber are started by the compositor's autostart
+    # config, inheriting the session bus from dbus-run-session.
+    exec dbus-run-session driftwm --backend udev
 fi
