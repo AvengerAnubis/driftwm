@@ -252,8 +252,10 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
         for (output, on) in &pending {
             let Some((&crtc, surface)) = dev.surfaces.iter_mut().find(|(_, s)| s.output == *output)
             else {
-                // The drained entry is gone with no surface to apply it to; an
-                // output awaiting a lock frame is now stranded on the backstop.
+                // No surface left to apply the transition to, and no later pass
+                // will find one — the request is simply lost. A lock is
+                // unaffected: an output goes surface-less by being removed, and
+                // removal already drops it from the awaited set.
                 tracing::warn!(
                     "DPMS {}: no DRM surface for '{}', dropping the transition",
                     if *on { "on" } else { "off" },
@@ -265,28 +267,32 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
                 data.redraws_needed.insert(output.clone());
             } else {
                 let cleared = surface.compositor.clear();
-                data.redraws_needed.remove(output);
-                data.frames_pending.remove(&crtc);
-                if let Some(token) = data.estimated_vblank_timers.remove(&crtc) {
-                    data.loop_handle.remove(token);
-                }
                 match cleared {
-                    // A dark panel satisfies the lock as well as a lock frame
-                    // does, and this output will never render again while it is
-                    // off — so an awaited one has to report in here or the
-                    // confirmation waits out the whole timeout for a frame that
-                    // cannot come.
                     Ok(()) => {
+                        // Only now is the panel dark and idle: smithay drops its
+                        // `pending_frame` inside a successful `clear`, so no flip
+                        // is outstanding and nothing will render here again while
+                        // the output is off. Forgetting a flight that is still in
+                        // the air would let the render gate re-enter
+                        // `render_frame` inside the in-flight window and credit
+                        // the next VBlank to the wrong frame.
+                        data.redraws_needed.remove(output);
+                        data.frames_pending.remove(&crtc);
+                        if let Some(token) = data.estimated_vblank_timers.remove(&crtc) {
+                            data.loop_handle.remove(token);
+                        }
+                        // A dark panel satisfies the lock as well as a lock frame
+                        // does, and this output will never render again while it
+                        // is off — so an awaited one has to report in here or the
+                        // confirmation waits out the whole timeout for a frame
+                        // that cannot come.
                         data.forget_lock_frame(crtc);
                         data.stop_awaiting_lock_frame(output);
                     }
                     // The panel may still be lit on whatever it last scanned
                     // out, which on the backstop path is precisely the frame
                     // that was never a lock frame — confirming here would put
-                    // the desktop behind a `locked` event. Residual: a `clear()`
-                    // that keeps failing leaves the lock unconfirmed while the
-                    // backstop keeps retrying, which takes a DRM device
-                    // refusing commits outright.
+                    // the desktop behind a `locked` event.
                     Err(e) => {
                         tracing::error!(
                             "DPMS off: compositor.clear failed for '{}': {e:?} — leaving it lit \
@@ -294,11 +300,14 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
                             output.name()
                         );
                         // Recording an output as off when its panel is still lit
-                        // freezes it out of the render gate forever and stops
-                        // the backstop asking again (it skips outputs already
-                        // marked off). Put the bookkeeping back on reality so
-                        // the output keeps rendering and the next backstop pass
-                        // re-requests the clear.
+                        // would freeze it out of the render gate forever. Put the
+                        // bookkeeping back on reality so the output keeps
+                        // rendering; the `refresh` below then tells the client
+                        // the output is still on. Only a lock retries from here —
+                        // its backstop asks again next pass (and skips outputs
+                        // already marked off, which is the other reason to undo
+                        // the mark). An ordinary `wlopm --off` gets this error
+                        // and nothing more.
                         data.dpms_off_outputs.remove(output);
                         data.redraws_needed.insert(output.clone());
                     }

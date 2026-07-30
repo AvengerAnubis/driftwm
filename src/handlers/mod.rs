@@ -874,8 +874,18 @@ impl OutputPowerHandler for DriftWm {
             return;
         }
         let already = !self.dpms_off_outputs.contains(output);
-        if already == on {
-            self.pending_dpms.remove(output);
+        // The pending check is what keeps this early return honest: only the
+        // drain's `compositor.clear()` darkens a panel, so a queued transition
+        // the backend hasn't applied yet still has to run. Returning on the
+        // bookkeeping alone would drop it — leaving the output recorded as off
+        // while it is still lit, and `confirmed_dark` vouching for a panel that
+        // is showing the desktop.
+        if already == on
+            && self
+                .pending_dpms
+                .get(output)
+                .is_none_or(|&queued| queued == on)
+        {
             return;
         }
         // Reflect the new state immediately so the inline `mode` event the

@@ -122,7 +122,7 @@ impl DriftWm {
             return;
         }
         let locker = pending_confirmation.take();
-        self.finish_lock_confirmation(locker);
+        self.finish_lock_confirmation(locker, "every awaited output reported in");
     }
 
     /// Another VT owns the CRTCs, so none of our frames are on any panel and no
@@ -142,7 +142,7 @@ impl DriftWm {
         }
         awaiting_present.clear();
         let locker = pending_confirmation.take();
-        self.finish_lock_confirmation(locker);
+        self.finish_lock_confirmation(locker, "another session took the CRTCs");
     }
 
     /// A CRTC's frame provenance no longer describes anything on a panel — it
@@ -158,11 +158,11 @@ impl DriftWm {
         self.lock_frame_on_screen.clear();
     }
 
-    fn finish_lock_confirmation(&mut self, locker: Option<SessionLocker>) {
+    fn finish_lock_confirmation(&mut self, locker: Option<SessionLocker>, reason: &str) {
         self.cancel_lock_confirm_timer();
         if let Some(locker) = locker {
             locker.lock();
-            tracing::info!("Session lock confirmed: every awaited output reported in");
+            tracing::info!("Session lock confirmed: {reason}");
         }
     }
 
