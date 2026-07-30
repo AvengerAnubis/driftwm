@@ -2913,6 +2913,130 @@ fn a_recreated_layer_role_gets_its_own_initial_configure() {
     );
 }
 
+/// An orphaned commit that also attaches a buffer hits smithay's
+/// ack-before-attach check on the destroyed role (see
+/// `dev/docs/smithay-api.md`'s Layer Shell section) — an OSD re-arming
+/// (destroy + recreate the role on the same `wl_surface`) commits a buffer
+/// in between and used to get killed.
+///
+/// Without the fix, this doesn't fail on a caught protocol error —
+/// `post_error` on a destroyed proxy is never serialized (its id is already
+/// gone from the wire's object map), so the client only sees the socket EOF.
+/// That surfaces as `Client::dispatch`'s `self.event_loop.dispatch(...)
+/// .unwrap()` (`src/tests/client.rs:359-362`) panicking with a bare
+/// `Broken pipe (os error 32)` — not a `protocol_error()`, which maps
+/// `Io(_)` to `None` and so never sees it either way. Don't assert on it.
+#[test]
+fn an_orphaned_layer_commit_with_a_buffer_does_not_kill_the_client() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    let layer = f
+        .client(id)
+        .create_layer(None, zwlr_layer_shell_v1::Layer::Overlay, "panel");
+    let surface = layer.surface.clone();
+    // Unanchored, so the compositor can't derive a size from anchor edges: every
+    // commit needs a non-zero requested size or smithay kills the client.
+    layer.set_configure_props(super::client::LayerConfigureProps {
+        size: Some((400, 300)),
+        ..Default::default()
+    });
+    layer.commit();
+    f.double_roundtrip(id);
+
+    let layer = f.client(id).layer(&surface);
+    layer.set_size(400, 300);
+    layer.attach_new_buffer();
+    layer.ack_last_and_commit();
+    f.double_roundtrip(id);
+
+    // Destroy the role but leave the wl_surface alive, as an OSD re-arming does.
+    f.client(id).layer(&surface).layer_surface.destroy();
+    f.double_roundtrip(id);
+
+    // An orphaned commit that also attaches a buffer — no live role to ack or
+    // configure it.
+    let layer = f.client(id).layer(&surface);
+    layer.attach_new_buffer();
+    layer.commit();
+    f.double_roundtrip(id);
+
+    // The client survives: map an unrelated plain toplevel afterwards and
+    // confirm it actually reaches the compositor, not just that the call
+    // returned.
+    map_settled(&mut f, id, "still-alive", (400, 300));
+    assert!(
+        window_by_app_id(&mut f, "still-alive").is_some(),
+        "the client must survive the orphaned buffered commit"
+    );
+}
+
+/// The buffer-stripping fix above has its own poison: `LayerSurfaceCachedState`
+/// never resets `pending` on commit, so the full anchors our hook writes to
+/// neutralise the orphaned commit survive into the *next* role taken on the
+/// same `wl_surface`. Anchored on all four edges, the recreated role would be
+/// sized to the whole output regardless of what it requests — an OSD re-arming
+/// would survive the crash only to render fullscreen. The fix must reset the
+/// anchor when the new role is taken.
+#[test]
+fn a_role_recreated_after_an_orphaned_buffered_commit_is_not_poisoned_to_full_output_size() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    let layer = f
+        .client(id)
+        .create_layer(None, zwlr_layer_shell_v1::Layer::Overlay, "panel");
+    let surface = layer.surface.clone();
+    layer.set_configure_props(super::client::LayerConfigureProps {
+        size: Some((400, 300)),
+        ..Default::default()
+    });
+    layer.commit();
+    f.double_roundtrip(id);
+
+    let layer = f.client(id).layer(&surface);
+    layer.set_size(400, 300);
+    layer.attach_new_buffer();
+    layer.ack_last_and_commit();
+    f.double_roundtrip(id);
+
+    // Destroy the role, then an orphaned commit that attaches a buffer — this
+    // is what writes the full anchors into the shared cached state.
+    f.client(id).layer(&surface).layer_surface.destroy();
+    f.double_roundtrip(id);
+    let layer = f.client(id).layer(&surface);
+    layer.attach_new_buffer();
+    layer.commit();
+    f.double_roundtrip(id);
+
+    // Recreate the role on the same wl_surface and request a small size again,
+    // as the destroy wipes the role's own cached state either way.
+    // (recreate_layer opens by destroying the proxy it tracks — already dead
+    // from the destroy above, so that call is inert; it is not a second
+    // destroy the compositor sees.)
+    let layer =
+        f.client(id)
+            .recreate_layer(&surface, None, zwlr_layer_shell_v1::Layer::Overlay, "panel");
+    layer.set_configure_props(super::client::LayerConfigureProps {
+        size: Some((400, 300)),
+        ..Default::default()
+    });
+    layer.commit();
+    f.double_roundtrip(id);
+
+    let configures = f.client(id).layer(&surface).format_recent_configures();
+    assert!(
+        configures.contains("size: 400 × 300"),
+        "the recreated role must be configured at its own requested size, got:\n{configures}"
+    );
+    assert!(
+        !configures.contains("1920 × 1080"),
+        "not resurrected full anchors sizing it to the whole output, got:\n{configures}"
+    );
+}
+
 /// A layer surface that arrives with no output to host it is closed, not
 /// dropped. The role stays live either way, so a client that hears nothing sits
 /// on a surface it must not commit to and waits on a configure that is never
