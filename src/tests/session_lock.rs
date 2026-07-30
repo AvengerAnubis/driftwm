@@ -417,7 +417,7 @@ fn a_lock_whose_client_died_can_be_replaced() {
          actually reach `locked`"
     );
     assert!(
-        matches!(f.state().session_lock, SessionLock::Locked(_)),
+        matches!(f.state().session_lock, SessionLock::Locked { .. }),
         "the session must be `Locked` again once the replacement's surface commits"
     );
 }
@@ -953,5 +953,283 @@ fn output_disconnect_while_locked_clamps_the_pointer_into_the_survivor() {
         "the disconnect must clamp the stored screen-space pointer into the \
          smaller survivor, not leave coordinates that only made sense on the \
          output that just left"
+    );
+}
+
+/// CHARACTERIZATION, not a regression test: it passes whether or not the
+/// render-gate confirmation exists at all, because `active_outputs` is only
+/// ever populated by the udev backend, so under the fixture the wait set is
+/// always empty and confirmation is always immediate. Recorded so a future
+/// change that starts populating `active_outputs` outside udev doesn't
+/// silently stall every fixture test that locks.
+#[test]
+fn locked_arrives_on_the_lock_surfaces_first_commit_with_no_active_outputs() {
+    let mut f = Fixture::new();
+    // `confirm_lock` populates `lock_surfaces`, and this scenario never
+    // unlocks to drain it.
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    confirm_lock(&mut f, id, &output);
+
+    assert_eq!(
+        f.client(id).lock_events(),
+        &[LockEvent::Locked],
+        "characterization: with no active outputs the wait set is always \
+         empty, so locked still arrives on the lock surface's first commit"
+    );
+}
+
+/// The protocol forbids `locked` until a lock frame has been presented on
+/// every output — an active output must hold the event back until it reports
+/// one in, not confirm on the strength of the commit alone.
+#[test]
+fn locked_is_withheld_until_the_sole_active_output_presents_a_lock_frame() {
+    let mut f = Fixture::new();
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    f.state().active_outputs.insert(output.clone());
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    confirm_lock(&mut f, id, &output);
+
+    assert_eq!(
+        f.client(id).lock_events(),
+        &[],
+        "locked must be withheld while the sole active output still owes a \
+         presented lock frame"
+    );
+
+    f.state().stop_awaiting_lock_frame(&output);
+    f.roundtrip(id);
+
+    assert_eq!(
+        f.client(id).lock_events(),
+        &[LockEvent::Locked],
+        "locked arrives once the sole awaited output reports its lock frame \
+         presented"
+    );
+}
+
+/// The counterpart of
+/// [`locked_is_withheld_until_the_sole_active_output_presents_a_lock_frame`]
+/// with two outputs: one reporting in must not be mistaken for all of them.
+#[test]
+fn locked_is_withheld_until_every_active_output_presents_a_lock_frame() {
+    let mut f = Fixture::new();
+    f.skip_baseline_check();
+    let out1 = f.add_output(1, (1920, 1080));
+    let out2 = f.add_output(2, (1920, 1080));
+    f.state().active_outputs.insert(out1.clone());
+    f.state().active_outputs.insert(out2.clone());
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    confirm_lock(&mut f, id, &out1);
+
+    f.state().stop_awaiting_lock_frame(&out1);
+    f.roundtrip(id);
+    assert_eq!(
+        f.client(id).lock_events(),
+        &[],
+        "one of two active outputs presenting must not confirm the lock on \
+         its own"
+    );
+
+    f.state().stop_awaiting_lock_frame(&out2);
+    f.roundtrip(id);
+    assert_eq!(
+        f.client(id).lock_events(),
+        &[LockEvent::Locked],
+        "locked arrives only once every active output has presented a lock \
+         frame"
+    );
+}
+
+/// Disconnecting one awaited output must not strand the lock behind an
+/// output that no longer exists — only the survivor's own presented frame
+/// should be left to confirm it.
+#[test]
+fn disconnecting_an_awaited_output_does_not_block_confirmation_on_the_survivor() {
+    let mut f = Fixture::new();
+    f.skip_baseline_check();
+    let leaving = f.add_output(1, (1920, 1080));
+    let staying = f.add_output(2, (1920, 1080));
+    f.state().active_outputs.insert(leaving.clone());
+    f.state().active_outputs.insert(staying.clone());
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    confirm_lock(&mut f, id, &leaving);
+
+    assert!(
+        f.state().is_awaiting_lock_frame(&leaving) && f.state().is_awaiting_lock_frame(&staying),
+        "precondition: both active outputs are in the wait set"
+    );
+
+    f.remove_output(&leaving);
+
+    // Assert on the wait set directly rather than only on the eventual
+    // `locked` — `Fixture::remove_output` never touches `active_outputs`, so
+    // an implementation that re-derives the wait set from it on every check,
+    // instead of maintaining `awaiting_present` and hooking the disconnect,
+    // could still reach `locked` correctly here for the wrong reason.
+    assert!(
+        !f.state().is_awaiting_lock_frame(&leaving),
+        "a disconnected output must drop out of the wait set immediately"
+    );
+    assert!(
+        f.state().is_awaiting_lock_frame(&staying),
+        "the surviving output must remain awaited — only its own presented \
+         frame may confirm the lock"
+    );
+
+    f.state().stop_awaiting_lock_frame(&staying);
+    f.roundtrip(id);
+
+    assert_eq!(
+        f.client(id).lock_events(),
+        &[LockEvent::Locked],
+        "the survivor's presented lock frame must confirm the lock once the \
+         other awaited output has disconnected"
+    );
+}
+
+/// The keyboard-focus handoff in `CompositorHandler` hangs off entering
+/// `Locked`, not off confirmation — a first commit must switch out of
+/// `Pending` (and hand the lock surface the keyboard) even while an active
+/// output still owes a presented lock frame and `locked` hasn't gone out.
+#[test]
+fn locked_is_entered_and_keyboard_focus_handed_over_before_confirmation() {
+    let mut f = Fixture::new();
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    f.state().active_outputs.insert(output.clone());
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    let surface = confirm_lock(&mut f, id, &output);
+
+    assert!(
+        matches!(f.state().session_lock, SessionLock::Locked { .. }),
+        "the lock surface's first commit must enter Locked even though the \
+         output hasn't presented a lock frame yet"
+    );
+    assert_eq!(
+        f.client(id).lock_events(),
+        &[],
+        "precondition: locked has not been confirmed yet"
+    );
+    assert_eq!(
+        keyboard_focus(&mut f),
+        Some(surface),
+        "the keyboard-focus handoff hangs off entering Locked, not off \
+         confirmation, and must not wait for the output to present"
+    );
+}
+
+/// `lock_confirm_timer` is a single field, not keyed by which client armed
+/// it. A's commit arms a timer for A's lock; A's client then dies and B
+/// replaces it. B's own commit must claim a fresh slot in that field rather
+/// than leaving A's registered token sitting there.
+///
+/// Structural only: it asserts the token is replaced and that B stays awaiting
+/// until its own output reports in. It does *not* exercise the backstop firing
+/// — the fixture has no seat session, so the timer's blanking is inert whatever
+/// token is registered, and the callback's identity check needs the TTY smoke.
+#[test]
+fn a_dead_clients_confirm_timer_does_not_confirm_the_replacement_lock() {
+    let mut f = Fixture::new();
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    f.state().active_outputs.insert(output.clone());
+    let a = f.add_client();
+
+    f.client(a).lock_session();
+    f.roundtrip(a);
+    confirm_lock(&mut f, a, &output);
+    assert_eq!(
+        f.client(a).lock_events(),
+        &[],
+        "precondition: A's lock is still awaiting the output's presented frame"
+    );
+    let a_timer = f.state().lock_confirm_timer;
+    assert!(
+        a_timer.is_some(),
+        "precondition: A's own confirmation timer is armed"
+    );
+
+    let (b, _surface) = crash_and_replace(&mut f, a, &output);
+    assert_eq!(
+        f.client(b).lock_events(),
+        &[],
+        "precondition: B's replacement lock is likewise still awaiting a \
+         presented frame"
+    );
+    assert_ne!(
+        f.state().lock_confirm_timer,
+        a_timer,
+        "B's commit must arm its own confirmation timer, not leave A's \
+         registered token sitting in the slot"
+    );
+
+    f.pump(10);
+    assert_eq!(
+        f.client(b).lock_events(),
+        &[],
+        "B's lock must not confirm before B's own output has presented a frame"
+    );
+
+    f.state().stop_awaiting_lock_frame(&output);
+    f.roundtrip(b);
+    assert_eq!(
+        f.client(b).lock_events(),
+        &[LockEvent::Locked],
+        "B's lock must still confirm normally once its own output presents"
+    );
+}
+
+/// `confirmed_dark` must not trust `dpms_off_outputs` alone: it is written at
+/// request time, while the render loop's `compositor.clear()` that actually
+/// darkens the panel happens later — an output whose DPMS-off is still
+/// pending may still be lit and showing the desktop.
+#[test]
+fn confirmed_dark_output_is_excluded_but_a_pending_dpms_off_output_is_still_awaited() {
+    let mut f = Fixture::new();
+    f.skip_baseline_check();
+    let dark = f.add_output(1, (1920, 1080));
+    let dimming = f.add_output(2, (1920, 1080));
+    f.state().active_outputs.insert(dark.clone());
+    f.state().active_outputs.insert(dimming.clone());
+
+    // `dark`: DPMS-off was requested and the render loop already drained it —
+    // the panel is genuinely black.
+    f.state().dpms_off_outputs.insert(dark.clone());
+    // `dimming`: DPMS-off was requested but the render loop hasn't drained it
+    // yet — the panel is still lit and may still show the desktop.
+    f.state().dpms_off_outputs.insert(dimming.clone());
+    f.state().pending_dpms.insert(dimming.clone(), false);
+
+    let id = f.add_client();
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    confirm_lock(&mut f, id, &dimming);
+
+    assert!(
+        !f.state().is_awaiting_lock_frame(&dark),
+        "a confirmed-dark output must be excluded from the wait set"
+    );
+    assert!(
+        f.state().is_awaiting_lock_frame(&dimming),
+        "an output whose DPMS-off is still pending (not yet drained) must \
+         stay in the wait set — the panel may still be lit"
     );
 }

@@ -1157,6 +1157,13 @@ impl SessionLockHandler for DriftWm {
             // the new lock surface the keyboard on its first commit.
             Some(_) => {
                 tracing::info!("Replacing a session lock whose client died");
+                // Assigning over `Locked` drops the dead client's unconsumed
+                // locker but not its repeating confirmation timer, which would
+                // go on waking the loop for as long as the newcomer sits in
+                // `Pending`. Harmless if it fired — the timer's identity check
+                // sees a lock it no longer matches — but there is no reason to
+                // keep it armed.
+                self.cancel_lock_confirm_timer();
                 self.session_lock = SessionLock::Pending(confirmation);
                 return;
             }
@@ -1308,6 +1315,7 @@ impl SessionLockHandler for DriftWm {
         )
         .0;
         pointer.set_location(canvas_pos);
+        self.cancel_lock_confirm_timer();
         self.session_lock = SessionLock::Unlocked;
         self.lock_surfaces.clear();
         // A finger still down at unlock would otherwise leave its slot

@@ -295,6 +295,7 @@ impl DriftWm {
         self.render.remove_output(&output.name());
         self.lock_surfaces.remove(output);
         self.redraws_needed.remove(output);
+        self.stop_awaiting_lock_frame(output);
 
         if is_last {
             // Keep the Output mapped as a virtual placeholder so active_output()

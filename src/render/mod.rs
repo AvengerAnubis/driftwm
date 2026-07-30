@@ -706,7 +706,7 @@ pub fn compose_frame(
         state.dnd_icon = None;
     }
 
-    if state.session_lock.is_locked() {
+    if state.session_lock.renders_lock_frame() {
         return compose_lock_frame(state, renderer, output, cursor_elements);
     }
 

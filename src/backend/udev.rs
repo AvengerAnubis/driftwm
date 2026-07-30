@@ -109,6 +109,16 @@ fn apply_gamma(
 }
 
 impl UdevDevice {
+    /// The CRTC driving `output`, for callers that hold output-keyed state and
+    /// need to consult the CRTC-keyed frame bookkeeping.
+    pub(crate) fn crtc_for_output(&self, output: &Output) -> Option<crtc::Handle> {
+        let dev = self.0.borrow();
+        dev.surfaces
+            .iter()
+            .find(|(_, s)| s.output == *output)
+            .map(|(crtc, _)| *crtc)
+    }
+
     /// Look up the per-output gamma LUT size. Prefers atomic GAMMA_LUT_SIZE;
     /// falls back to the CRTC's legacy `gamma_length`. Returns `None` if the
     /// CRTC reports size 0 (e.g. Apple DCP on Asahi, virtual outputs without
@@ -242,21 +252,56 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
         for (output, on) in &pending {
             let Some((&crtc, surface)) = dev.surfaces.iter_mut().find(|(_, s)| s.output == *output)
             else {
+                // The drained entry is gone with no surface to apply it to; an
+                // output awaiting a lock frame is now stranded on the backstop.
+                tracing::warn!(
+                    "DPMS {}: no DRM surface for '{}', dropping the transition",
+                    if *on { "on" } else { "off" },
+                    output.name()
+                );
                 continue;
             };
             if *on {
                 data.redraws_needed.insert(output.clone());
             } else {
-                if let Err(e) = surface.compositor.clear() {
-                    tracing::warn!(
-                        "DPMS off: compositor.clear failed for '{}': {e:?}",
-                        output.name()
-                    );
-                }
+                let cleared = surface.compositor.clear();
                 data.redraws_needed.remove(output);
                 data.frames_pending.remove(&crtc);
                 if let Some(token) = data.estimated_vblank_timers.remove(&crtc) {
                     data.loop_handle.remove(token);
+                }
+                match cleared {
+                    // A dark panel satisfies the lock as well as a lock frame
+                    // does, and this output will never render again while it is
+                    // off — so an awaited one has to report in here or the
+                    // confirmation waits out the whole timeout for a frame that
+                    // cannot come.
+                    Ok(()) => {
+                        data.forget_lock_frame(crtc);
+                        data.stop_awaiting_lock_frame(output);
+                    }
+                    // The panel may still be lit on whatever it last scanned
+                    // out, which on the backstop path is precisely the frame
+                    // that was never a lock frame — confirming here would put
+                    // the desktop behind a `locked` event. Residual: a `clear()`
+                    // that keeps failing leaves the lock unconfirmed while the
+                    // backstop keeps retrying, which takes a DRM device
+                    // refusing commits outright.
+                    Err(e) => {
+                        tracing::error!(
+                            "DPMS off: compositor.clear failed for '{}': {e:?} — leaving it lit \
+                             and awaiting a lock frame",
+                            output.name()
+                        );
+                        // Recording an output as off when its panel is still lit
+                        // freezes it out of the render gate forever and stops
+                        // the backstop asking again (it skips outputs already
+                        // marked off). Put the bookkeeping back on reality so
+                        // the output keeps rendering and the next backstop pass
+                        // re-requests the clear.
+                        data.dpms_off_outputs.remove(output);
+                        data.redraws_needed.insert(output.clone());
+                    }
                 }
             }
         }
@@ -674,6 +719,15 @@ pub fn init_udev(
                         Err(e) => tracing::warn!("frame_submitted error: {e:?}"),
                     }
                     data.frames_pending.remove(&crtc);
+                    // The VBlank event itself is the proof the frame flipped —
+                    // `frame_submitted` returning `Ok(None)` is a real flip that
+                    // simply carries no feedback.
+                    if data.lock_frame_queued.remove(&crtc) {
+                        data.lock_frame_on_screen.insert(crtc);
+                        data.stop_awaiting_lock_frame(&surface.output);
+                    } else {
+                        data.lock_frame_on_screen.remove(&crtc);
+                    }
                     // Real VBlank beat any estimated-VBlank timer we might have armed.
                     if let Some(token) = data.estimated_vblank_timers.remove(&crtc) {
                         data.loop_handle.remove(token);
@@ -702,6 +756,8 @@ pub fn init_udev(
                     for (_, token) in data.estimated_vblank_timers.drain() {
                         data.loop_handle.remove(token);
                     }
+                    data.clear_lock_frames();
+                    data.confirm_lock_on_session_pause();
                     // Releases for held keys / cycle modifiers may not be delivered
                     // when the session is paused.
                     data.suppressed_keys.clear();
@@ -718,8 +774,10 @@ pub fn init_udev(
                         tracing::error!("Failed to activate DRM: {e}");
                         return;
                     }
-                    // VBlanks for pre-switch frames never arrive
+                    // VBlanks for pre-switch frames never arrive, so nothing
+                    // would ever retire their provenance either.
                     data.frames_pending.clear();
+                    data.clear_lock_frames();
                     for (_, token) in data.estimated_vblank_timers.drain() {
                         data.loop_handle.remove(token);
                     }
@@ -830,6 +888,7 @@ pub fn init_udev(
                                         teardown_output(data, surface, is_last);
                                     }
                                     data.frames_pending.remove(&crtc);
+                                    data.forget_lock_frame(crtc);
                                     if let Some(token) = data.estimated_vblank_timers.remove(&crtc)
                                     {
                                         data.loop_handle.remove(token);
@@ -1347,6 +1406,9 @@ fn render_frame(
     );
     #[cfg(feature = "profile-with-tracy")]
     drop(_cursor_span);
+    // Read the same predicate `compose_frame` is about to branch on, so the
+    // bookkeeping below can never disagree with what was actually painted.
+    let lock_frame = data.session_lock.renders_lock_frame();
     let renderer = backend.renderer();
     let elements = crate::render::compose_frame(data, renderer, output, cursor_elements);
 
@@ -1408,21 +1470,44 @@ fn render_frame(
             match queue_result {
                 Ok(()) => {
                     data.frames_pending.insert(crtc);
+                    if lock_frame {
+                        data.lock_frame_queued.insert(crtc);
+                    } else {
+                        data.lock_frame_queued.remove(&crtc);
+                    }
                 }
                 Err(FrameError::EmptyFrame) => {
                     // No page flip - no real VBlank to wake us. Always arm the
                     // estimated timer so the render gate paces re-renders to the refresh
                     // period; otherwise a dirty-but-unchanged output spins render_frame.
+                    //
+                    // Nothing was queued, so whatever is scanned out stays — and
+                    // if that was already a lock frame, this output owes nothing
+                    // more. Load-bearing, not belt-and-braces: an output with no
+                    // lock surface of its own paints black in both lock states,
+                    // so the redraw that seeds the wait produces no damage, no
+                    // flip and therefore no VBlank, ever. Reading
+                    // `lock_frame_on_screen` is only sound because the render
+                    // gate keeps `render_frame` out of the in-flight window, so
+                    // smithay's `pending_frame` is `None` at every reachable
+                    // `EmptyFrame` — an invariant of the gate, not of
+                    // `EmptyFrame`, and it stops holding if triple-buffering
+                    // relaxes the gate.
+                    if lock_frame && data.lock_frame_on_screen.contains(&crtc) {
+                        data.stop_awaiting_lock_frame(output);
+                    }
                     queue_estimated_vblank_timer(data, output, crtc);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to queue frame: {e:?}");
+                    retry_dropped_lock_frame(data, output);
                     queue_estimated_vblank_timer(data, output, crtc);
                 }
             }
         }
         Err(e) => {
             tracing::warn!("Render frame error: {e:?}");
+            retry_dropped_lock_frame(data, output);
             queue_estimated_vblank_timer(data, output, crtc);
         }
     }
@@ -1509,6 +1594,19 @@ fn deliver_presentation(
             // can't be reported safely against that clock id.
             feedback.discarded();
         }
+    }
+}
+
+/// A frame that never reached the screen leaves `redraws_needed` already drained
+/// (`render_frame` removes the entry before compositing), so nothing retries it.
+/// While the output still owes a lock frame that would stall the confirmation to
+/// the timeout — re-arm it so the post-dispatch `render_if_needed` in `main`
+/// composites again (the estimated-VBlank timer only supplies the wake-up; its
+/// callback does nothing but drop its own token). Scoped to the awaiting case;
+/// dropped frames are otherwise not retried.
+fn retry_dropped_lock_frame(data: &mut DriftWm, output: &Output) {
+    if data.is_awaiting_lock_frame(output) {
+        data.redraws_needed.insert(output.clone());
     }
 }
 

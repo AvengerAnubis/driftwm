@@ -32,6 +32,7 @@ mod redraw;
 mod reload;
 mod render_cache;
 mod resize;
+mod session_lock;
 mod session_store;
 mod stage_window;
 mod suspended;
@@ -203,10 +204,22 @@ pub enum SessionLock {
     Unlocked,
     /// Lock requested; screen goes black until lock surface commits.
     Pending(SessionLocker),
-    /// Lock confirmed; rendering only the lock surface. Carries the client's
-    /// lock object purely so a later lock request can tell a live locker (which
-    /// it must not displace) from one whose client died (which it may).
-    Locked(ExtSessionLockV1),
+    /// Rendering only the lock surface. Carries the client's lock object partly
+    /// so a later lock request can tell a live locker (which it must not
+    /// displace) from one whose client died (which it may).
+    ///
+    /// Entering this state is *not* the same as telling the client the session
+    /// is locked: the protocol forbids the `locked` event until a lock frame has
+    /// been presented on every output, so the locker is held here until the
+    /// outputs report in.
+    Locked {
+        lock: ExtSessionLockV1,
+        /// Held until every output owing a lock frame has presented one;
+        /// consuming it sends `locked`. `None` once sent.
+        pending_confirmation: Option<SessionLocker>,
+        /// Outputs that still owe a presented lock frame.
+        awaiting_present: HashSet<Output>,
+    },
 }
 
 impl SessionLock {
@@ -217,6 +230,21 @@ impl SessionLock {
         !matches!(self, SessionLock::Unlocked)
     }
 
+    /// Whether the compositor is currently painting a lock frame rather than the
+    /// desktop. Deliberately distinct from [`Self::is_locked`], which gates
+    /// input: the two answer different questions and coincide only today.
+    ///
+    /// The renderer and the lock-frame bookkeeping must both read *this* — a
+    /// disagreement about whether a given frame was a lock frame would make the
+    /// confirmation meaningless. The two remaining render-path readers of
+    /// `is_locked` (`src/render/cursor.rs` and the ghost-cursor alpha in
+    /// `src/backend/udev.rs`) deliberately stay on it: they ask which coordinate
+    /// space the pointer is in, which is settled when `Pending` is entered, not
+    /// what the frame paints.
+    pub fn renders_lock_frame(&self) -> bool {
+        !matches!(self, SessionLock::Unlocked)
+    }
+
     /// The lock object of the client that owns the session, pending or
     /// confirmed. Identifies the incumbent: whether it is still alive, and which
     /// client may put surfaces on the lock.
@@ -224,7 +252,7 @@ impl SessionLock {
         match self {
             SessionLock::Unlocked => None,
             SessionLock::Pending(locker) => Some(locker.ext_session_lock()),
-            SessionLock::Locked(lock) => Some(lock),
+            SessionLock::Locked { lock, .. } => Some(lock),
         }
     }
 }
@@ -862,6 +890,14 @@ pub struct DriftWm {
     /// One-shot timers armed when queue_frame returned EmptyFrame so the loop
     /// still wakes at ~refresh rate to advance animations (e.g. xcursor frames).
     pub estimated_vblank_timers: HashMap<crtc::Handle, RegistrationToken>,
+    /// Backstop for a lock confirmation that never gets its frames presented —
+    /// see `LOCK_CONFIRM_TIMEOUT`.
+    pub lock_confirm_timer: Option<RegistrationToken>,
+    /// CRTCs whose in-flight (queued, not yet flipped) frame was composed as a
+    /// lock frame.
+    pub lock_frame_queued: HashSet<crtc::Handle>,
+    /// CRTCs whose currently scanned-out frame was composed as a lock frame.
+    pub lock_frame_on_screen: HashSet<crtc::Handle>,
 
     pub config_file_mtime: Option<std::time::SystemTime>,
 
