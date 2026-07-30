@@ -371,16 +371,22 @@ pub fn pointer_relative_motion(f: &mut Fixture, device: &FakeDevice, delta: Poin
         });
 }
 
+/// The event a button change arrives as, for scenarios that classify an event
+/// rather than dispatch one.
+pub fn button_event(device: &FakeDevice, button: u32, state: ButtonState) -> InputEvent<FakeInput> {
+    InputEvent::PointerButton {
+        event: FakeButtonEvent {
+            device: device.clone(),
+            button,
+            state,
+            time: next_time(),
+        },
+    }
+}
+
 fn button(f: &mut Fixture, device: &FakeDevice, button: u32, state: ButtonState) {
-    f.state()
-        .process_input_event::<FakeInput>(InputEvent::PointerButton {
-            event: FakeButtonEvent {
-                device: device.clone(),
-                button,
-                state,
-                time: next_time(),
-            },
-        });
+    let event = button_event(device, button, state);
+    f.state().process_input_event::<FakeInput>(event);
 }
 
 /// Press `button` wherever the pointer already is — a real button event carries
@@ -429,17 +435,23 @@ pub fn touch_motion(f: &mut Fixture, at: Point<f64, Logical>, slot: u32) {
         });
 }
 
+/// The event a finger lifting arrives as, for scenarios that classify an event
+/// rather than dispatch one.
+pub fn touch_up_event(slot: u32) -> InputEvent<FakeInput> {
+    InputEvent::TouchUp {
+        event: FakeTouchUpEvent {
+            device: FakeDevice::touchscreen(),
+            slot: TouchSlot::from(Some(slot)),
+            time: next_time(),
+        },
+    }
+}
+
 /// Lift the finger holding `slot`. No frame event follows: `TouchFrameEvent` is
 /// `UnusedEvent` here, so the fake structurally cannot send one.
 pub fn touch_up(f: &mut Fixture, slot: u32) {
-    f.state()
-        .process_input_event::<FakeInput>(InputEvent::TouchUp {
-            event: FakeTouchUpEvent {
-                device: FakeDevice::touchscreen(),
-                slot: TouchSlot::from(Some(slot)),
-                time: next_time(),
-            },
-        });
+    let event = touch_up_event(slot);
+    f.state().process_input_event::<FakeInput>(event);
 }
 
 /// A hardware touch cancel, covering the whole sequence rather than one slot.

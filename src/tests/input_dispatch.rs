@@ -7,13 +7,18 @@
 //! matched, and the screen→canvas mapping applied to what a device reports.
 
 use driftwm::config::{BTN_LEFT, BTN_MIDDLE};
+use smithay::backend::input::ButtonState;
 use smithay::desktop::Window;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
+use crate::input::is_interaction_tail;
 use crate::state::StageWindow;
 
 use super::client::ClientId;
-use super::input_backend::{FakeDevice, click, pointer_to, pointer_to_screen, press, touch_down};
+use super::input_backend::{
+    FakeDevice, button_event, click, pointer_to, pointer_to_screen, press, touch_down,
+    touch_up_event,
+};
 use super::{Fixture, keyboard_focus, map_window, server_surface, window_by_app_id};
 
 /// Canvas-space center of `window`'s current geometry.
@@ -190,5 +195,27 @@ fn absolute_motion_maps_screen_through_camera_and_zoom() {
         f.state().seat.get_pointer().unwrap().current_location(),
         Point::from((620.0, -20.0)),
         "the pointer sits where the camera and zoom put the reported position"
+    );
+}
+
+/// A binding that turns the screen off runs on the press; the release that
+/// follows must not light the panel straight back up. `set_dpms` is inert
+/// without a seat session, so the fixture can only reach the classification the
+/// wake is gated on — the DPMS transition itself is hardware-only.
+#[test]
+fn a_release_is_not_a_reason_to_wake_a_dark_panel() {
+    let mouse = FakeDevice::mouse();
+
+    assert!(
+        !is_interaction_tail(&button_event(&mouse, BTN_LEFT, ButtonState::Pressed)),
+        "a press is the input that should wake a dark panel"
+    );
+    assert!(
+        is_interaction_tail(&button_event(&mouse, BTN_LEFT, ButtonState::Released)),
+        "a button coming back up must not undo what its press did"
+    );
+    assert!(
+        is_interaction_tail(&touch_up_event(0)),
+        "a finger lifting must not undo what its landing did"
     );
 }

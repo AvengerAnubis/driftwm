@@ -6,8 +6,8 @@ pub(crate) mod touch;
 
 use smithay::{
     backend::input::{
-        AbsolutePositionEvent, Axis, Event, InputBackend, InputEvent, PointerAxisEvent,
-        PointerButtonEvent, PointerMotionEvent,
+        AbsolutePositionEvent, Axis, ButtonState, Event, InputBackend, InputEvent, KeyState,
+        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
     },
     desktop::{WindowSurfaceType, layer_map_for_output},
     input::pointer::{MotionEvent, RelativeMotionEvent},
@@ -139,6 +139,30 @@ fn advance_hot_corner_latch(
     active
 }
 
+/// The tail of an interaction the compositor has already acted on: a key or
+/// button coming back up, a finger lifting, and the frame that closes the touch
+/// batch.
+///
+/// Lighting a DPMS-off panel on one of these would undo whatever the press just
+/// did, so a binding that turns the screen off could never outlive its own
+/// key-up. Idle tracking is deliberately unaffected — a release is still user
+/// activity, it just isn't a reason to wake the panel.
+pub(crate) fn is_interaction_tail<I: InputBackend>(event: &InputEvent<I>) -> bool {
+    match event {
+        InputEvent::Keyboard { event } => KeyboardKeyEvent::state(event) == KeyState::Released,
+        InputEvent::PointerButton { event } => {
+            PointerButtonEvent::state(event) == ButtonState::Released
+        }
+        // A frame carries no input of its own — it groups the touch events just
+        // delivered, and libinput always emits one right behind the up it
+        // terminates, which would light the panel straight back up.
+        InputEvent::TouchUp { .. }
+        | InputEvent::TouchCancel { .. }
+        | InputEvent::TouchFrame { .. } => true,
+        _ => false,
+    }
+}
+
 impl DriftWm {
     /// Fire any hot-corner action the cursor is currently inside.
     /// `screen_pos` is output-local screen-space. `output` is the output the
@@ -254,13 +278,16 @@ impl DriftWm {
         // Notify idle tracker of user activity (skip device add/remove metadata events).
         // Also wake any DPMS-off outputs — without this, recovering from
         // `wlopm --off` requires a daemon round-trip (swayidle resume command)
-        // and the user perceives a dead-screen frame.
+        // and the user perceives a dead-screen frame. Releases are excluded so
+        // the panel survives the key-up of the binding that turned it off.
         if !matches!(
             &event,
             InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }
         ) {
             self.idle_notifier_state.notify_activity(&self.seat);
-            self.wake_dpms_off_outputs();
+            if !is_interaction_tail(&event) {
+                self.wake_dpms_off_outputs();
+            }
         }
 
         // When locked, forward keyboard (VT switch + lock surface input) and
