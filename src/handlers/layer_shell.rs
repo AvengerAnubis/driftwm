@@ -7,7 +7,10 @@ use smithay::{
     wayland::{
         compositor::with_states,
         shell::{
-            wlr_layer::{Layer, LayerSurface, WlrLayerShellHandler, WlrLayerShellState},
+            wlr_layer::{
+                Anchor, Layer, LayerSurface, LayerSurfaceCachedState, WlrLayerShellHandler,
+                WlrLayerShellState,
+            },
             xdg::PopupSurface,
         },
     },
@@ -15,9 +18,12 @@ use smithay::{
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Toggled in the surface data_map when a layer role is destroyed/recreated.
-/// Our pre-commit hook (registered early in `new_surface`) checks this to
-/// set full anchors before smithay's validation hook runs on orphaned commits.
+/// Set in the surface data_map when a layer role on a `wl_surface` is
+/// destroyed, cleared when it takes a new one. While set, our pre-commit hook
+/// (registered early in `new_surface`) strips this surface's buffers and forces
+/// full anchors, so smithay's validation hook cannot post an error on the
+/// destroyed proxy. The surface is therefore deliberately unmappable until
+/// the next `get_layer_surface`.
 pub(crate) struct LayerDestroyedMarker(pub AtomicBool);
 
 use crate::state::{CanvasLayer, DriftWm};
@@ -45,8 +51,22 @@ impl WlrLayerShellHandler for DriftWm {
         // Clear any stale destroyed marker — the wl_surface may be reused
         // (e.g. swayosd destroys and recreates layer surfaces on the same wl_surface)
         with_states(surface.wl_surface(), |states| {
-            if let Some(marker) = states.data_map.get::<LayerDestroyedMarker>() {
-                marker.0.store(false, Ordering::Relaxed);
+            let was_set = states
+                .data_map
+                .get::<LayerDestroyedMarker>()
+                .is_some_and(|marker| marker.0.swap(false, Ordering::Relaxed));
+            // Nothing else undoes the full anchors the hook wrote:
+            // LayerSurfaceCachedState's Cacheable::commit returns *self and the
+            // cache never resets pending, so they would survive into this role
+            // and size it to the whole output. Reset the anchor alone —
+            // get_layer_surface has already written .layer into the same state.
+            // Both halves: commit is `*self` and merge_into is `*into = self`,
+            // so the orphaned commit poisoned current() too, and current() is
+            // the half LayerMap::arrange reads via LayerSurface::cached_state().
+            if was_set {
+                let mut guard = states.cached_state.get::<LayerSurfaceCachedState>();
+                guard.pending().anchor = Anchor::empty();
+                guard.current().anchor = Anchor::empty();
             }
         });
 
@@ -167,9 +187,10 @@ impl WlrLayerShellHandler for DriftWm {
         // Next motion event will re-evaluate, but this prevents stale state in between.
         self.pointer_over_layer = false;
 
-        // Mark this surface so our early pre-commit hook can set full anchors
-        // before smithay's layer-shell validation runs. We can't set anchors here
-        // directly because smithay resets cached state to defaults AFTER this callback.
+        // Mark this surface so our early pre-commit hook can neutralise the
+        // orphaned commits before smithay's layer-shell validation runs. We
+        // can't fix the cached state here directly because smithay resets it to
+        // defaults AFTER this callback.
         with_states(surface.wl_surface(), |states| {
             states
                 .data_map
