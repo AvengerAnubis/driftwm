@@ -988,7 +988,22 @@ pub struct ClientState {
 
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+
+    fn disconnected(&self, client_id: ClientId, reason: DisconnectReason) {
+        // A protocol error reaches the client as a bare EOF whenever we posted
+        // it on an already-destroyed object, so this is the only place the
+        // interface and message survive at all. Worth a warn: a toolkit bug
+        // report otherwise arrives as an unattributable "broken pipe".
+        if let DisconnectReason::ProtocolError(err) = reason {
+            tracing::warn!(
+                "client {client_id:?} disconnected: {}@{} code={} — {}",
+                err.object_interface,
+                err.object_id,
+                err.code,
+                err.message
+            );
+        }
+    }
 }
 
 pub(crate) fn client_is_unrestricted(client: &smithay::reexports::wayland_server::Client) -> bool {
