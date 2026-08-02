@@ -1168,14 +1168,9 @@ impl SessionLockHandler for DriftWm {
             // clear below). Either way the newcomer may take the session over.
             // Most of the teardown below already ran for the lock being
             // replaced and must not run again — the canvas→screen conversion in
-            // particular would re-convert an already-screen-space pointer — but
-            // the seat has to be cleared again, since a takeover from `Locked`
-            // finds every focus aimed at the surface being evicted. From a
-            // `Pending` there is usually nothing aimed anywhere yet and the
-            // clears are cheap no-ops, save for a finger that went down on a
-            // lock surface created but never committed. Going through `Pending`
-            // rather than confirming here is what hands the new lock surface the
-            // keyboard on its first commit.
+            // particular would re-convert an already-screen-space pointer.
+            // Going through `Pending` rather than confirming here is what hands
+            // the new lock surface the keyboard on its first commit.
             Some(_) => {
                 tracing::info!("Replacing a session lock whose client died");
                 self.cancel_pending_deadline();
@@ -1192,28 +1187,34 @@ impl SessionLockHandler for DriftWm {
                 // A live grab on either seat swallows the focus clear below — a
                 // `PopupKeyboardGrab` silently at that, since its `set_focus`
                 // ignores changes until the grab ends rather than refusing
-                // them. The pointer half is construction: `popup_grab_allowed`
-                // refuses every popup grab not rooted at a lock surface, and no
-                // protocol lets a lock surface parent a popup. The keyboard
-                // half is not — smithay answers
-                // `zwp_input_method_v2.grab_keyboard` by installing the grab
-                // with no hook to refuse it, and the fresh path's own unset
-                // does not stop an input method asking again mid-lock.
+                // them. Only the keyboard can still acquire one mid-lock:
+                // smithay answers `zwp_input_method_v2.grab_keyboard` by
+                // installing the grab with no hook to refuse it, and the fresh
+                // path's own unset does not stop an input method asking again.
+                // The pointer cannot — the locked dispatch runs no compositor
+                // grab or gesture path, and every client request that installs
+                // one either needs a pointer grab already in place to cite
+                // (`check_grab` for move and resize, smithay's own `has_grab`
+                // for drag) or is refused outright (`popup_grab_allowed`). Its
+                // unset is kept anyway, since that whole bar lives in other
+                // files, and it is not free: smithay restores focus
+                // unconditionally, so with nothing installed it still re-motions
+                // to the stored focus — one last redundant `wl_pointer.motion`
+                // to the evicted surface, at coordinates it already had, before
+                // the clear below leaves it.
                 let pointer = self.seat.get_pointer().unwrap();
                 pointer.unset_grab(self, smithay::utils::SERIAL_COUNTER.next_serial(), 0);
                 self.seat.get_keyboard().unwrap().unset_grab(self);
-                // The clear above only re-aims what re-derives its target from
-                // the map on every event: rendering, and the pointer and touch
-                // paths that look a surface up by output (`lock_surface_focus`,
-                // and touch `down`). Locked `PointerButton` and `PointerAxis` go
-                // straight to smithay's stored focus, locked touch motion and up
-                // forward with `focus: None` onto whatever focus the slot's
-                // `down` gave it, and keyboard focus sits on the seat — all
-                // three stay aimed at the evicted surface, and `is_locked()`
-                // holds true through `Pending`, so input never stops being
-                // forwarded to it. This is what stops a click, a scroll, the
-                // rest of an in-flight finger's sequence, or a keystroke meant
-                // for the replacement's password prompt landing there instead.
+                // The lock being replaced ran these clears when it was
+                // installed; they have to repeat because a takeover from
+                // `Locked` finds pointer, touch and keyboard focus all aimed
+                // back at the surface being evicted. From a `Pending` there is
+                // usually nothing aimed anywhere yet, save for a pointer or a
+                // finger that reached a lock surface created but never committed
+                // — `new_surface` inserts at creation, not at first commit.
+                // Either way `is_locked()` holds true through `Pending`, so
+                // nothing stops input reaching that surface until the newcomer's
+                // own commit re-targets it.
                 self.clear_seat_focus();
                 let token = self.arm_pending_deadline();
                 self.session_lock = SessionLock::Pending {

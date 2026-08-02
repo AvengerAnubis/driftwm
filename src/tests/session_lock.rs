@@ -597,6 +597,40 @@ fn a_takeover_drops_the_lock_surfaces_of_the_lock_it_replaces() {
     );
 }
 
+/// Lock the session for a fresh client, leaving its locker unconsumed so the
+/// client may later `destroy` its lock object cleanly instead of being killed
+/// for `invalid_destroy`. What leaves it unconsumed is an output still owing a
+/// lock frame; `active_outputs` is the udev backend's set, so the fixture has to
+/// seed it. Returns the client and its lock surface.
+fn lock_leaving_the_locker_unconsumed(f: &mut Fixture) -> (ClientId, WlSurface) {
+    let output = f.add_output(1, (1920, 1080));
+    f.state().active_outputs.insert(output.clone());
+    let a = f.add_client();
+
+    f.client(a).lock_session();
+    f.roundtrip(a);
+    let surface = confirm_lock(f, a, &output);
+    (a, surface)
+}
+
+/// `holder` drops its lock but stays connected — so the surface it put on
+/// screen is still alive, and still holds whatever focus it was given — and a
+/// fresh client takes the session over, landing in `Pending` while it waits for
+/// a lock surface of its own.
+fn take_over_from(f: &mut Fixture, holder: ClientId) {
+    f.client(holder).destroy_lock_object();
+    f.roundtrip(holder);
+
+    let b = f.add_client();
+    f.client(b).lock_session();
+    f.roundtrip(b);
+    assert!(
+        matches!(f.state().session_lock, SessionLock::Pending { .. }),
+        "precondition: the replacement took the session over and waits in \
+         `Pending` for its own lock surface"
+    );
+}
+
 /// Clearing `lock_surfaces` re-aims rendering and pointer and touch routing —
 /// all three look the map up by output. Keyboard focus does not live there: it
 /// sits on the seat, still on the surface the takeover just evicted, and
@@ -607,39 +641,14 @@ fn a_takeover_drops_the_lock_surfaces_of_the_lock_it_replaces() {
 #[test]
 fn a_takeover_takes_the_keyboard_off_the_surface_it_evicts() {
     let mut f = Fixture::new();
-    // A's lock surface outlives the lock object it was made on, and this
-    // scenario never unlocks to drain `lock_surfaces`.
-    f.skip_baseline_check();
-    let output = f.add_output(1, (1920, 1080));
-    // An output still owing a lock frame is what leaves the locker unconsumed,
-    // and only an unconsumed locker makes A's `destroy` legal rather than a
-    // fatal `invalid_destroy`. `active_outputs` is the udev backend's set, so
-    // the fixture has to seed it.
-    f.state().active_outputs.insert(output.clone());
-    let a = f.add_client();
-
-    f.client(a).lock_session();
-    f.roundtrip(a);
-    let a_surface = confirm_lock(&mut f, a, &output);
+    let (a, a_surface) = lock_leaving_the_locker_unconsumed(&mut f);
     assert_eq!(
         keyboard_focus(&mut f),
         Some(a_surface),
         "precondition: A's lock surface holds the keyboard"
     );
 
-    // A drops its lock but stays connected, so the surface holding the keyboard
-    // is still alive — and still focused — when B takes the session over.
-    f.client(a).destroy_lock_object();
-    f.roundtrip(a);
-
-    let b = f.add_client();
-    f.client(b).lock_session();
-    f.roundtrip(b);
-    assert!(
-        matches!(f.state().session_lock, SessionLock::Pending { .. }),
-        "precondition: B took the session over and waits in `Pending` for its \
-         own lock surface"
-    );
+    take_over_from(&mut f, a);
 
     assert_eq!(
         keyboard_focus(&mut f),
@@ -660,20 +669,7 @@ fn a_takeover_takes_the_keyboard_off_the_surface_it_evicts() {
 #[test]
 fn a_takeover_stops_an_in_flight_finger_reaching_the_surface_it_evicts() {
     let mut f = Fixture::new();
-    // A's lock surface outlives the lock object it was made on, and this
-    // scenario never unlocks to drain `lock_surfaces`.
-    f.skip_baseline_check();
-    let output = f.add_output(1, (1920, 1080));
-    // An output still owing a lock frame is what leaves the locker unconsumed,
-    // and only an unconsumed locker makes A's `destroy` legal rather than a
-    // fatal `invalid_destroy`. `active_outputs` is the udev backend's set, so
-    // the fixture has to seed it.
-    f.state().active_outputs.insert(output.clone());
-    let a = f.add_client();
-
-    f.client(a).lock_session();
-    f.roundtrip(a);
-    confirm_lock(&mut f, a, &output);
+    let (a, _) = lock_leaving_the_locker_unconsumed(&mut f);
 
     touch_down(&mut f, Point::from((10.0, 10.0)), 0);
     f.roundtrip(a);
@@ -683,19 +679,7 @@ fn a_takeover_stops_an_in_flight_finger_reaching_the_surface_it_evicts() {
          its focus for the rest of the sequence"
     );
 
-    // A drops its lock but stays connected, so the surface the finger is on is
-    // still alive — and still the slot's stored focus — when B takes over.
-    f.client(a).destroy_lock_object();
-    f.roundtrip(a);
-
-    let b = f.add_client();
-    f.client(b).lock_session();
-    f.roundtrip(b);
-    assert!(
-        matches!(f.state().session_lock, SessionLock::Pending { .. }),
-        "precondition: B took the session over and waits in `Pending` for its \
-         own lock surface"
-    );
+    take_over_from(&mut f, a);
 
     let events_after_takeover = f.client(a).state.touch_events.clone();
     touch_motion(&mut f, Point::from((20.0, 20.0)), 0);
