@@ -650,6 +650,66 @@ fn a_takeover_takes_the_keyboard_off_the_surface_it_evicts() {
     );
 }
 
+/// The touch half of the same rule. A slot that went down on the evicted lock
+/// screen is stored on the seat pointing at that surface, and locked
+/// `on_touch_motion`/`on_touch_up` forward with `focus: None` — so membership in
+/// `lock_slots` is the only thing deciding whether the finger keeps being
+/// delivered. Clearing `lock_surfaces` cannot reach it: nothing re-derives a
+/// settled slot's focus from the map. Left alone, the finger goes on stroking
+/// the replaced client's password prompt for as long as it stays down.
+#[test]
+fn a_takeover_stops_an_in_flight_finger_reaching_the_surface_it_evicts() {
+    let mut f = Fixture::new();
+    // A's lock surface outlives the lock object it was made on, and this
+    // scenario never unlocks to drain `lock_surfaces`.
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    // An output still owing a lock frame is what leaves the locker unconsumed,
+    // and only an unconsumed locker makes A's `destroy` legal rather than a
+    // fatal `invalid_destroy`. `active_outputs` is the udev backend's set, so
+    // the fixture has to seed it.
+    f.state().active_outputs.insert(output.clone());
+    let a = f.add_client();
+
+    f.client(a).lock_session();
+    f.roundtrip(a);
+    confirm_lock(&mut f, a, &output);
+
+    touch_down(&mut f, Point::from((10.0, 10.0)), 0);
+    f.roundtrip(a);
+    assert!(
+        f.client(a).state.touch_events.contains(&TouchEvent::Down),
+        "precondition: the finger landed on A's lock surface, so the seat holds \
+         its focus for the rest of the sequence"
+    );
+
+    // A drops its lock but stays connected, so the surface the finger is on is
+    // still alive — and still the slot's stored focus — when B takes over.
+    f.client(a).destroy_lock_object();
+    f.roundtrip(a);
+
+    let b = f.add_client();
+    f.client(b).lock_session();
+    f.roundtrip(b);
+    assert!(
+        matches!(f.state().session_lock, SessionLock::Pending { .. }),
+        "precondition: B took the session over and waits in `Pending` for its \
+         own lock surface"
+    );
+
+    let events_after_takeover = f.client(a).state.touch_events.clone();
+    touch_motion(&mut f, Point::from((20.0, 20.0)), 0);
+    touch_up(&mut f, 0);
+    f.roundtrip(a);
+
+    assert_eq!(
+        f.client(a).state.touch_events,
+        events_after_takeover,
+        "a takeover must disown the fingers that went down on the lock screen it \
+         replaces — neither their motion nor their lift may reach it"
+    );
+}
+
 /// Taking a `Pending` over must schedule a repaint. `keep_lock_frames` only
 /// decides what the *next* frame paints, and the `Pending` being replaced may
 /// have been showing the desktop — a client that dies inside its own first
@@ -763,6 +823,11 @@ fn a_lock_arriving_with_a_dpms_off_still_queued_keeps_lock_frames_too() {
 /// `wake_dpms_off_outputs` runs ahead of the locked-input gate — which is the
 /// leak the DPMS case exists to close, reopened by a few hundred milliseconds of
 /// timing.
+///
+/// Covers the helper only. `set_dpms` returns early without a seat session and
+/// no fixture has one, so the call in its off branch is what actually arms this
+/// in production and is what this cannot reach: delete that call and this test
+/// still passes.
 #[test]
 fn an_output_going_dark_during_pending_stops_the_desktop_being_painted() {
     let mut f = Fixture::new();

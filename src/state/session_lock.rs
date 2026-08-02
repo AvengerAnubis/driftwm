@@ -148,6 +148,36 @@ impl DriftWm {
         self.set_keyboard_focus(Some(FocusTarget(surface)), serial);
     }
 
+    /// Take pointer, touch and keyboard focus off whatever holds them, handing
+    /// none of them anywhere else. Callers owe the grab teardown first: a live
+    /// pointer or keyboard grab swallows the changes.
+    ///
+    /// The pointer is cleared by a synthetic motion rather than by assignment,
+    /// so smithay sends the `leave` a real one would. Touch is cleared by
+    /// dropping the slot allowlist — locked `on_touch_motion`/`on_touch_up`
+    /// forward with `focus: None`, so a slot keeps whatever focus its `down`
+    /// gave it and membership alone decides whether it is forwarded at all.
+    /// Deliberately not folded into `cancel_touch_sequence`: a hardware
+    /// `TouchCancel` runs that mid-lock too, and clearing the allowlist there
+    /// would strip the lock surface's own live slots — leaving them unable to
+    /// receive their `up` (nothing can revoke an already-framed slot) and stuck
+    /// on the lock screen.
+    pub fn clear_seat_focus(&mut self) {
+        self.touch_state.lock_slots.clear();
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.motion(
+            self,
+            None,
+            &smithay::input::pointer::MotionEvent {
+                location: pointer.current_location(),
+                serial: smithay::utils::SERIAL_COUNTER.next_serial(),
+                time: self.start_time.elapsed().as_millis() as u32,
+            },
+        );
+        pointer.frame(self);
+        self.set_keyboard_focus(None, smithay::utils::SERIAL_COUNTER.next_serial());
+    }
+
     /// An output whose panel is genuinely dark. `dpms_off_outputs` alone is not
     /// enough: it is written when the client asks, while the `compositor.clear()`
     /// that darkens the panel happens later in the render loop's drain — in
@@ -240,6 +270,12 @@ impl DriftWm {
     /// a panel the next input re-lights — `wake_dpms_off_outputs` runs ahead of
     /// the locked-input gate. No counterpart when an output comes back on: a
     /// stale `true` only costs the blank flash this window exists to avoid.
+    ///
+    /// Unlike the takeover in `lock`, this schedules no repaint of its own, and
+    /// the flag only decides what the *next* frame paints. Deliberate rather
+    /// than an oversight: both ways back to a lit panel already carry one —
+    /// draining the DPMS-on re-inserts the output's redraw, and the input that
+    /// cancels a queued off runs `mark_all_dirty` ahead of the wake.
     pub fn keep_lock_frames_while_pending(&mut self) {
         if let SessionLock::Pending {
             keep_lock_frames, ..

@@ -299,7 +299,10 @@ impl CompositorHandler for DriftWm {
         // The deadline can reach `Locked` before the client has made any lock
         // surface, and the arm above no longer matches once it has — so this is
         // what hands a late one the keyboard. `is_locked`, not
-        // `renders_lock_frame`: the question is who owns the keyboard, not what
+        // `renders_lock_frame`: the two differ only over a `Pending`, and the
+        // arm above answers every `Pending` lock-surface commit and returns, so
+        // nothing reaches here to tell them apart. Stated for whoever widens
+        // this next — the question it asks is who owns the keyboard, not what
         // the outputs paint.
         if self.session_lock.is_locked()
             && self

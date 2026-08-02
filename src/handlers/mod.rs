@@ -1160,15 +1160,22 @@ impl SessionLockHandler for DriftWm {
                 tracing::info!("Refusing session lock: the session is already locked");
                 return;
             }
-            // The locking client died. Its surfaces went with it, so the outputs
-            // are blanked with nothing drawing on them and no way back in short
-            // of a VT switch — let the newcomer take the session over. Most of
-            // the teardown below already ran for the dead lock and must not run
-            // again — the canvas→screen conversion in particular would re-convert
-            // an already-screen-space pointer — but the focus clears do have to
-            // repeat, since the lock being replaced re-targeted both onto its own
-            // surface. Going through `Pending` rather than confirming here is
-            // what hands the new lock surface the keyboard on its first commit.
+            // A dead lock object says nothing about its client. The client may
+            // have died, taking its surfaces with it and leaving the outputs
+            // blanked with nothing drawing on them and no way back short of a
+            // VT switch; or it may still be connected, having merely destroyed
+            // its lock, in which case its surfaces are still painting (see the
+            // clear below). Either way the newcomer may take the session over.
+            // Most of the teardown below already ran for the lock being
+            // replaced and must not run again — the canvas→screen conversion in
+            // particular would re-convert an already-screen-space pointer — but
+            // the seat has to be cleared again, since a takeover from `Locked`
+            // finds every focus aimed at the surface being evicted. From a
+            // `Pending` there is usually nothing aimed anywhere yet and the
+            // clears are cheap no-ops, save for a finger that went down on a
+            // lock surface created but never committed. Going through `Pending`
+            // rather than confirming here is what hands the new lock surface the
+            // keyboard on its first commit.
             Some(_) => {
                 tracing::info!("Replacing a session lock whose client died");
                 self.cancel_pending_deadline();
@@ -1182,27 +1189,32 @@ impl SessionLockHandler for DriftWm {
                 // the newcomer hasn't reached, taking locked input and holding
                 // the keyboard — stalling `all_ready` for good.
                 self.lock_surfaces.clear();
-                // The clear above already re-aims pointer and touch, which
-                // re-look up their target by output — but not the keyboard,
-                // whose focus sits on the seat and stays on the evicted surface
-                // until `enter_locked` retargets it (`is_locked()` holds true
-                // through `Pending`, so every keystroke would keep reaching it
-                // otherwise). The synthetic motion forces the pointer to
-                // recompute focus as a real one would; its `leave` also drops
-                // any constraint the evicted surface held.
-                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                // A live grab on either seat swallows the focus clear below — a
+                // `PopupKeyboardGrab` silently at that, since its `set_focus`
+                // ignores changes until the grab ends rather than refusing
+                // them. The pointer half is construction: `popup_grab_allowed`
+                // refuses every popup grab not rooted at a lock surface, and no
+                // protocol lets a lock surface parent a popup. The keyboard
+                // half is not — smithay answers
+                // `zwp_input_method_v2.grab_keyboard` by installing the grab
+                // with no hook to refuse it, and the fresh path's own unset
+                // does not stop an input method asking again mid-lock.
                 let pointer = self.seat.get_pointer().unwrap();
-                pointer.motion(
-                    self,
-                    None,
-                    &smithay::input::pointer::MotionEvent {
-                        location: pointer.current_location(),
-                        serial,
-                        time: self.start_time.elapsed().as_millis() as u32,
-                    },
-                );
-                pointer.frame(self);
-                self.set_keyboard_focus(None, smithay::utils::SERIAL_COUNTER.next_serial());
+                pointer.unset_grab(self, smithay::utils::SERIAL_COUNTER.next_serial(), 0);
+                self.seat.get_keyboard().unwrap().unset_grab(self);
+                // The clear above only re-aims what re-derives its target from
+                // the map on every event: rendering, and the pointer and touch
+                // paths that look a surface up by output (`lock_surface_focus`,
+                // and touch `down`). Locked `PointerButton` and `PointerAxis` go
+                // straight to smithay's stored focus, locked touch motion and up
+                // forward with `focus: None` onto whatever focus the slot's
+                // `down` gave it, and keyboard focus sits on the seat — all
+                // three stay aimed at the evicted surface, and `is_locked()`
+                // holds true through `Pending`, so input never stops being
+                // forwarded to it. This is what stops a click, a scroll, the
+                // rest of an in-flight finger's sequence, or a keystroke meant
+                // for the replacement's password prompt landing there instead.
+                self.clear_seat_focus();
                 let token = self.arm_pending_deadline();
                 self.session_lock = SessionLock::Pending {
                     locker: confirmation,
@@ -1255,12 +1267,6 @@ impl SessionLockHandler for DriftWm {
         // Tears down the withheld events, the touch grab, and any armed close a
         // live sequence owns — see its own doc for why `cancel()` alone can't.
         self.cancel_touch_sequence();
-        // Deliberately not folded into that helper: a hardware `TouchCancel`
-        // runs it mid-lock too, and clearing the allowlist there would strip the
-        // lock surface's own live slots — leaving them unable to receive their
-        // `up` (nothing can revoke an already-framed slot) and stuck on the lock
-        // screen.
-        self.touch_state.lock_slots.clear();
         // Not part of the sequence — the timer outlives the fingers — and it
         // fires `navigate_to_window`, which would arm `camera_target` mid-lock,
         // after the clear below has had its last word.
@@ -1338,28 +1344,15 @@ impl SessionLockHandler for DriftWm {
         // `unset_grab` above restores pointer focus to the window under the
         // cursor, and nothing re-targets it until the first locked motion — so a
         // click or scroll before then would reach the app behind the lock
-        // screen. `None`, not the lock surface: the guard above means we only
-        // get here from `Unlocked`, and `unlock` empties `lock_surfaces`, so
-        // none exist yet. The `leave` this sends is also what releases a pointer
+        // screen, and no window should be keyboard-interactable either. `None`,
+        // not the lock surface: the guard above means we only get here from
+        // `Unlocked`, and `unlock` empties `lock_surfaces`, so none exist yet.
+        // The `leave` the synthetic motion sends is also what releases a pointer
         // constraint (a Wine game's cursor lock would otherwise pin the cursor
         // straight through unlock) — smithay deactivates unconditionally there.
         // Must run after the cursor fields above: this re-enters `cursor_image`,
         // which writes `cursor_status`.
-        pointer.motion(
-            self,
-            None,
-            &smithay::input::pointer::MotionEvent {
-                location: pointer.current_location(),
-                serial: smithay::utils::SERIAL_COUNTER.next_serial(),
-                time: self.start_time.elapsed().as_millis() as u32,
-            },
-        );
-        pointer.frame(self);
-        // Clear keyboard focus — no window should be interactable. Must stay
-        // after the grab teardown above: a live keyboard grab swallows focus
-        // changes.
-        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-        self.set_keyboard_focus(None, serial);
+        self.clear_seat_focus();
         self.mark_all_dirty();
     }
 
