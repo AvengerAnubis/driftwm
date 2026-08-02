@@ -421,9 +421,13 @@ impl Default for XwaylandConfig {
 }
 
 pub fn config_path() -> std::path::PathBuf {
-    // --config <path> sets DRIFTWM_CONFIG at startup
-    if let Ok(p) = std::env::var("DRIFTWM_CONFIG") {
-        return std::path::PathBuf::from(expand_tilde(&p));
+    // --config <path> sets DRIFTWM_CONFIG at startup; read via var_os so a
+    // non-UTF-8 path still resolves instead of falling through to the default.
+    if let Some(p) = std::env::var_os("DRIFTWM_CONFIG") {
+        return match p.into_string() {
+            Ok(p) => std::path::PathBuf::from(expand_tilde(&p)),
+            Err(p) => std::path::PathBuf::from(p),
+        };
     }
     let config_dir = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());

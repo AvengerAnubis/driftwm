@@ -449,6 +449,20 @@ impl Config {
         (cfg, warnings)
     }
 
+    /// Validate the config file at `path` without applying it. `Err` is a hard
+    /// read or parse failure; `Ok` carries the non-fatal value warnings. A missing
+    /// file is not a failure: the compositor runs on built-in defaults.
+    pub fn check_from(path: &std::path::Path) -> Result<Vec<String>, String> {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(format!("config: failed to read {}: {e}", path.display())),
+        };
+        Self::from_toml_collect(&contents)
+            .map(|(_, warnings)| warnings)
+            .map_err(|e| format!("config error: {e}"))
+    }
+
     /// Build a Config from a parsed (but unvalidated) ConfigFile.
     /// Never touches process env — child env is built into `child_env` and
     /// applied via `Command::envs()` per spawn.
@@ -2522,5 +2536,81 @@ mod tests {
             !warnings.iter().any(|w| w.contains("will never fire")),
             "got: {warnings:?}"
         );
+    }
+
+    /// Self-cleaning unique temp directory (mirrors the helpers in
+    /// `desktop_entry` and `session`, which this module can't reach).
+    struct TempDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static COUNTER: AtomicUsize = AtomicUsize::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "driftwm-config-check-test-{}-{n}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn check_from_missing_file_is_ok_with_no_warnings() {
+        let tmp = TempDir::new();
+        let path = tmp.path.join("does-not-exist.toml");
+        let warnings = Config::check_from(&path).unwrap();
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn check_from_malformed_toml_is_err() {
+        let tmp = TempDir::new();
+        let path = tmp.path.join("config.toml");
+        std::fs::write(&path, "this is not [ valid toml").unwrap();
+        assert!(Config::check_from(&path).is_err());
+    }
+
+    #[test]
+    fn check_from_unknown_top_level_key_is_err() {
+        let tmp = TempDir::new();
+        let path = tmp.path.join("config.toml");
+        // There is no `[general]` table; `deny_unknown_fields` rejects it.
+        std::fs::write(&path, "[general]\n").unwrap();
+        assert!(Config::check_from(&path).is_err());
+    }
+
+    #[test]
+    fn check_from_valid_config_is_ok_with_no_warnings() {
+        let tmp = TempDir::new();
+        let path = tmp.path.join("config.toml");
+        std::fs::write(&path, "mod_key = \"alt\"\nfocus_follows_mouse = true\n").unwrap();
+        let warnings = Config::check_from(&path).unwrap();
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn check_from_unreadable_path_is_err() {
+        let tmp = TempDir::new();
+        // A directory reads as EISDIR, not NotFound — that is a hard failure.
+        assert!(Config::check_from(&tmp.path).is_err());
+    }
+
+    #[test]
+    fn check_from_bad_value_is_ok_with_warnings() {
+        let tmp = TempDir::new();
+        let path = tmp.path.join("config.toml");
+        std::fs::write(&path, "mod_key = \"bogus\"\n").unwrap();
+        let warnings = Config::check_from(&path).unwrap();
+        assert!(!warnings.is_empty());
     }
 }

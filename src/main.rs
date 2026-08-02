@@ -108,15 +108,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    if cli.check_config {
-        let _config = driftwm::config::Config::load();
-        tracing::info!("Config OK");
-        return Ok(());
-    }
-
     // --config <path>: override config file (useful for nested/test sessions).
+    // Set before --check-config so validation targets the requested file.
     if let Some(path) = &cli.config {
         unsafe { std::env::set_var("DRIFTWM_CONFIG", path) };
+        let resolved = driftwm::config::config_path();
+        // Only directories are rejected outright — `--config <(gen-config)` is
+        // a pipe, and read_to_string is happy with it.
+        let problem = match std::fs::metadata(&resolved) {
+            Ok(m) if m.is_dir() => Some("is a directory".to_string()),
+            Ok(_) => None,
+            Err(e) => Some(e.to_string()),
+        };
+        // A file the user named explicitly has to be there. Falling back to
+        // built-in defaults would look like the config was silently ignored.
+        if let Some(problem) = problem {
+            eprintln!("driftwm: --config {}: {problem}", resolved.display());
+            std::process::exit(1);
+        }
+    }
+
+    if cli.check_config {
+        // Printed rather than returned so the TOML parse error keeps its
+        // multi-line caret diagram: main's Box<dyn Error> is Debug-formatted.
+        let warnings = match driftwm::config::Config::check_from(&driftwm::config::config_path()) {
+            Ok(warnings) => warnings,
+            Err(e) => {
+                eprintln!("driftwm: {e}");
+                std::process::exit(1);
+            }
+        };
+        // stdout so the summary survives RUST_LOG=error, which also swallows
+        // push_warn's own logging — hence a count instead of a bare "OK".
+        match warnings.len() {
+            0 => println!("Config OK"),
+            n => println!("Config OK, {n} warning(s)"),
+        }
+        return Ok(());
     }
 
     // --backend: default udev on bare metal, winit if nested.
