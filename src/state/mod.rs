@@ -201,17 +201,24 @@ pub struct PendingPick {
 
 /// Session lock state machine: Unlocked → Pending → Locked → Unlocked.
 ///
-/// `Pending` renders the normal desktop (no flash) while waiting for all lock
-/// surfaces to commit their first buffer, with a 1-second deadline after which
-/// we force-enter `Locked` regardless. `Locked` renders lock frames and defers
-/// the `locked` protocol event until every output has presented one.
+/// `Pending` waits for all lock surfaces to commit their first buffer, with a
+/// 1-second deadline after which we force-enter `Locked` regardless. Locking an
+/// unlocked session leaves the desktop up for that wait so there is no blank
+/// flash; `keep_lock_frames` covers the cases where showing it would be a leak.
+/// `Locked` renders lock frames and defers the `locked` protocol event until
+/// every output has presented one.
 pub enum SessionLock {
     Unlocked,
-    /// Lock requested; desktop still visible until lock surfaces commit.
+    /// Lock granted; the lock surfaces have yet to commit.
     Pending {
         locker: SessionLocker,
         /// Outputs whose lock surface has committed its first buffer.
         ready_outputs: HashSet<Output>,
+        /// Keep painting lock frames for the wait instead of the desktop.
+        /// Set wherever revealing the desktop would put unlocked content on a
+        /// screen that must not show it: a takeover of an already-locked
+        /// session, and a `Pending` no deadline bounds.
+        keep_lock_frames: bool,
         /// 1-second deadline: force `Locked` even if not all surfaces mapped.
         deadline_token: Option<RegistrationToken>,
     },
@@ -253,7 +260,14 @@ impl SessionLock {
     /// space the pointer is in, which is settled when `Pending` is entered, not
     /// what the frame paints.
     pub fn renders_lock_frame(&self) -> bool {
-        matches!(self, SessionLock::Locked { .. })
+        matches!(
+            self,
+            SessionLock::Locked { .. }
+                | SessionLock::Pending {
+                    keep_lock_frames: true,
+                    ..
+                }
+        )
     }
 
     /// The lock object of the client that owns the session, pending or

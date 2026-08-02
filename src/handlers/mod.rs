@@ -1174,6 +1174,12 @@ impl SessionLockHandler for DriftWm {
                 self.session_lock = SessionLock::Pending {
                     locker: confirmation,
                     ready_outputs: HashSet::new(),
+                    // The outputs are showing lock frames already. Dropping the
+                    // desktop back onto them for the newcomer's wait would put
+                    // unlocked content on a locked session's screen — a leak any
+                    // client holding the manager global could ask for once the
+                    // incumbent is dead.
+                    keep_lock_frames: true,
                     deadline_token: token,
                 };
                 return;
@@ -1185,6 +1191,10 @@ impl SessionLockHandler for DriftWm {
         self.session_lock = SessionLock::Pending {
             locker: confirmation,
             ready_outputs: HashSet::new(),
+            // Nothing bounds `Pending` without the deadline, so a desktop left
+            // up here stays up for as long as the client takes, with all input
+            // dead. Degrade to blanking rather than to that.
+            keep_lock_frames: token.is_none(),
             deadline_token: token,
         };
 

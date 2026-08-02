@@ -224,8 +224,8 @@ impl DriftWm {
 
     /// Arm a one-second deadline that forces `Pending → Locked` even if not all
     /// lock surfaces have committed. Returns `None` when the timer cannot be
-    /// inserted (the compositor will keep showing the desktop until the surfaces
-    /// commit, which may never come without the backstop).
+    /// inserted, leaving a `Pending` nothing bounds — the caller owes that state
+    /// `keep_lock_frames`, since the surfaces it waits on may never commit.
     pub fn arm_pending_deadline(&mut self) -> Option<RegistrationToken> {
         match self.loop_handle.insert_source(
             Timer::from_duration(Duration::from_millis(1000)),

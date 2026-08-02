@@ -465,6 +465,45 @@ fn replacement_lock_surface_receives_keyboard_focus() {
     );
 }
 
+/// The takeover routes through `Pending`, and `Pending` is what lets the
+/// desktop through the render gate so a fresh lock has no blank flash. Here
+/// there is nothing to flash: the session was already locked and stays locked
+/// throughout. Without the guard the desktop is composited back onto a blanked
+/// screen for up to the deadline, with input still dead — at the request of any
+/// client that can reach the manager global once the incumbent has died.
+#[test]
+fn a_replacement_lock_keeps_painting_lock_frames_while_pending() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let a = f.add_client();
+
+    f.client(a).lock_session();
+    f.roundtrip(a);
+    confirm_lock(&mut f, a, &output);
+    assert!(
+        f.state().session_lock.renders_lock_frame(),
+        "precondition: the incumbent's lock frames are what the outputs paint"
+    );
+
+    f.kill_client(a);
+    f.pump(10);
+
+    let b = f.add_client();
+    f.client(b).lock_session();
+    f.roundtrip(b);
+
+    assert!(
+        matches!(f.state().session_lock, SessionLock::Pending { .. }),
+        "precondition: the replacement waits in `Pending` for its own lock \
+         surface to commit"
+    );
+    assert!(
+        f.state().session_lock.renders_lock_frame(),
+        "a replacement lock must keep the outputs on lock frames while it comes \
+         up — the session never stopped being locked"
+    );
+}
+
 /// `new_surface` must refuse a lock surface from any client other than the
 /// one holding the lock — see the comment on that guard for why smithay's own
 /// `locked_outputs` check doesn't already cover this.
