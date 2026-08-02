@@ -35,6 +35,16 @@ use super::{DriftWm, FocusTarget, SessionLock};
 /// blank-then-confirm, never never-confirm.
 pub const LOCK_CONFIRM_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// How long a lock may sit in [`SessionLock::Pending`] waiting for its surfaces
+/// before we enter [`SessionLock::Locked`] with whatever has committed so far.
+///
+/// Sequential with [`LOCK_CONFIRM_TIMEOUT`] rather than overlapping it: this
+/// budget bounds the wait for the client's lock surfaces, and that one is armed
+/// only once this wait is over — whether the last commit ended it or this
+/// deadline did — to bound the wait for the outputs to put a lock frame on
+/// screen. A lock that spends both in full reaches `locked` after their sum.
+pub const PENDING_LOCK_DEADLINE: Duration = Duration::from_secs(1);
+
 impl DriftWm {
     /// Enter [`SessionLock::Locked`] on the lock surface's first commit and
     /// start waiting for the outputs to put a lock frame on screen.
@@ -49,8 +59,7 @@ impl DriftWm {
     /// client is killed by a fatal protocol error *and* the session comes
     /// unlocked where it previously just worked. That `unlock()` can also drop a
     /// `pending_confirmation` still holding the locker, whose `Drop` sends
-    /// `finished` — an event this path never produced before the confirmation
-    /// was deferred.
+    /// `finished`.
     pub fn enter_locked(&mut self, locker: SessionLocker) {
         let lock = locker.ext_session_lock().clone();
         #[allow(clippy::mutable_key_type)]
@@ -65,9 +74,6 @@ impl DriftWm {
         // would produce the frame we are about to wait for.
         self.mark_all_dirty();
         self.cancel_lock_confirm_timer();
-        // Every route in owes the lock screen the keyboard, the pending deadline
-        // included — it can reach here without a single surface having committed.
-        self.focus_lock_surface();
 
         if awaiting_present.is_empty() {
             // Also the winit and fixture case: `active_outputs` is populated by
@@ -80,6 +86,9 @@ impl DriftWm {
                 pending_confirmation: None,
                 awaiting_present,
             };
+            // Reachable before any lock surface has committed; `focus_lock_surface`
+            // is a no-op until one exists.
+            self.focus_lock_surface();
             tracing::info!("Session lock confirmed: no outputs to wait on");
             return;
         }
@@ -89,6 +98,7 @@ impl DriftWm {
             pending_confirmation: Some(locker),
             awaiting_present,
         };
+        self.focus_lock_surface();
         self.arm_lock_confirm_timer(lock);
     }
 
@@ -102,7 +112,18 @@ impl DriftWm {
         // and reset the active keyboard layout mid-password. It would also let
         // a surface that was merely created take the keyboard from the prompt
         // on screen: `new_surface` inserts at creation, not at first commit.
-        // Membership is the liveness check — `destroyed` sweeps `lock_surfaces`.
+        //
+        // Membership is not liveness: `destroyed` sweeps `lock_surfaces` only
+        // when the `wl_surface` itself dies, and a client may destroy the role —
+        // or its whole lock object — and keep the surface. A client that drops
+        // its lock strands nothing (`unlock`, output disconnect and the dead-lock
+        // takeover in `lock` all clear the map themselves), but the incumbent
+        // destroying only its `ext_session_lock_surface_v1` is not covered:
+        // smithay's `destroyed` for that role resets the surface's attributes
+        // without telling us, so the entry stays and keeps the keyboard on a
+        // surface that can no longer be configured. `LockSurface::alive()` does
+        // not close it — it reads the `wl_surface`, which is exactly what the
+        // sweep already covers.
         let keyboard = self.seat.get_keyboard().unwrap();
         if let Some(focus) = keyboard.current_focus()
             && self
@@ -213,6 +234,21 @@ impl DriftWm {
         }
     }
 
+    /// An output has gone dark, so a `Pending` that is still letting the desktop
+    /// through must stop. `lock` reads the DPMS state once, and a `set_dpms`
+    /// landing inside the wait would otherwise leave the desktop composited under
+    /// a panel the next input re-lights — `wake_dpms_off_outputs` runs ahead of
+    /// the locked-input gate. No counterpart when an output comes back on: a
+    /// stale `true` only costs the blank flash this window exists to avoid.
+    pub fn keep_lock_frames_while_pending(&mut self) {
+        if let SessionLock::Pending {
+            keep_lock_frames, ..
+        } = &mut self.session_lock
+        {
+            *keep_lock_frames = true;
+        }
+    }
+
     /// Cancel the pending deadline timer, if any.
     pub fn cancel_pending_deadline(&mut self) {
         if let SessionLock::Pending { deadline_token, .. } = &mut self.session_lock
@@ -222,13 +258,13 @@ impl DriftWm {
         }
     }
 
-    /// Arm a one-second deadline that forces `Pending → Locked` even if not all
-    /// lock surfaces have committed. Returns `None` when the timer cannot be
-    /// inserted, leaving a `Pending` nothing bounds — the caller owes that state
-    /// `keep_lock_frames`, since the surfaces it waits on may never commit.
+    /// Arm the [`PENDING_LOCK_DEADLINE`] that forces `Pending → Locked` even if
+    /// not all lock surfaces have committed. Returns `None` when the timer cannot
+    /// be inserted, leaving a `Pending` nothing bounds — the caller owes that
+    /// state `keep_lock_frames`, since the surfaces it waits on may never commit.
     pub fn arm_pending_deadline(&mut self) -> Option<RegistrationToken> {
         match self.loop_handle.insert_source(
-            Timer::from_duration(Duration::from_millis(1000)),
+            Timer::from_duration(PENDING_LOCK_DEADLINE),
             |_, _, data: &mut DriftWm| {
                 if !matches!(data.session_lock, SessionLock::Pending { .. }) {
                     return TimeoutAction::Drop;
@@ -241,7 +277,7 @@ impl DriftWm {
             },
         ) {
             Ok(token) => {
-                tracing::trace!("Pending lock deadline armed (1s)");
+                tracing::trace!("Pending lock deadline armed ({PENDING_LOCK_DEADLINE:?})");
                 Some(token)
             }
             Err(e) => {

@@ -212,15 +212,15 @@ pub struct Popup {
     pub configures_looked_at: usize,
 }
 
-/// A client-side `ext_session_lock_v1`, plus the (at most one) lock surface
-/// created on it. `events` records every `locked`/`finished` this object has
-/// received, oldest first.
+/// A client-side `ext_session_lock_v1`, plus the lock surfaces created on it —
+/// a real lock screen makes one per output. `events` records every
+/// `locked`/`finished` this object has received, oldest first.
 pub struct Lock {
     pub qh: QueueHandle<State>,
     pub spbm: WpSinglePixelBufferManagerV1,
     pub lock: ExtSessionLockV1,
     pub events: Vec<LockEvent>,
-    pub surface: Option<LockSurface>,
+    pub surfaces: Vec<LockSurface>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -531,6 +531,18 @@ impl Client {
         self.state.create_lock_surface(output)
     }
 
+    /// Destroy this client's most recent [`Lock`] object without unlocking, and
+    /// without disconnecting the client. Legal only while the lock is
+    /// unconfirmed — smithay posts `invalid_destroy` once the locker has been
+    /// consumed. Any lock surfaces made on it stay alive.
+    ///
+    /// The destroyed proxy stays in `session_locks`, and stays its `last()`:
+    /// every other lock accessor here reaches for the most recent lock, so one
+    /// called on this client afterwards silently uses the dead object.
+    pub fn destroy_lock_object(&mut self) {
+        self.state.destroy_lock_object();
+    }
+
     pub fn lock_surface(&mut self, surface: &WlSurface) -> &mut LockSurface {
         self.state.lock_surface(surface)
     }
@@ -767,7 +779,7 @@ impl State {
             spbm: self.spbm.clone().unwrap(),
             lock,
             events: Vec::new(),
-            surface: None,
+            surfaces: Vec::new(),
         });
     }
 
@@ -791,15 +803,20 @@ impl State {
         };
 
         let lock = self.session_locks.last_mut().unwrap();
-        lock.surface = Some(lock_surface);
-        lock.surface.as_mut().unwrap()
+        lock.surfaces.push(lock_surface);
+        lock.surfaces.last_mut().unwrap()
     }
 
     pub fn lock_surface(&mut self, surface: &WlSurface) -> &mut LockSurface {
         self.session_locks
             .iter_mut()
-            .find_map(|l| l.surface.as_mut().filter(|s| s.surface == *surface))
+            .flat_map(|l| l.surfaces.iter_mut())
+            .find(|s| s.surface == *surface)
             .unwrap()
+    }
+
+    pub fn destroy_lock_object(&mut self) {
+        self.session_locks.last().unwrap().lock.destroy();
     }
 }
 
@@ -1620,11 +1637,8 @@ impl Dispatch<ExtSessionLockSurfaceV1, ()> for State {
         let lock_surface = state
             .session_locks
             .iter_mut()
-            .find_map(|l| {
-                l.surface
-                    .as_mut()
-                    .filter(|s| s.lock_surface == *lock_surface)
-            })
+            .flat_map(|l| l.surfaces.iter_mut())
+            .find(|s| s.lock_surface == *lock_surface)
             .unwrap();
 
         match event {

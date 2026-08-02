@@ -896,6 +896,7 @@ impl OutputPowerHandler for DriftWm {
             self.dpms_off_outputs.remove(output);
         } else {
             self.dpms_off_outputs.insert(output.clone());
+            self.keep_lock_frames_while_pending();
         }
         self.pending_dpms.insert(output.clone(), on);
     }
@@ -1161,40 +1162,82 @@ impl SessionLockHandler for DriftWm {
             }
             // The locking client died. Its surfaces went with it, so the outputs
             // are blanked with nothing drawing on them and no way back in short
-            // of a VT switch — let the newcomer take the session over. The
-            // teardown below already ran for the dead lock and must not run
-            // again (it would re-convert an already-screen-space pointer), and
-            // going through `Pending` rather than confirming here is what hands
-            // the new lock surface the keyboard on its first commit.
+            // of a VT switch — let the newcomer take the session over. Most of
+            // the teardown below already ran for the dead lock and must not run
+            // again — the canvas→screen conversion in particular would re-convert
+            // an already-screen-space pointer — but the focus clears do have to
+            // repeat, since the lock being replaced re-targeted both onto its own
+            // surface. Going through `Pending` rather than confirming here is
+            // what hands the new lock surface the keyboard on its first commit.
             Some(_) => {
                 tracing::info!("Replacing a session lock whose client died");
                 self.cancel_pending_deadline();
                 self.cancel_lock_confirm_timer();
+                // A dead lock object doesn't imply a dead client: smithay posts
+                // `invalid_destroy` only once the locker is consumed, and a
+                // `Pending` lock never consumes it, so a client can destroy its
+                // lock cleanly while every lock surface it made stays alive
+                // (`destroyed` fires on surface death, not role death). Left
+                // uncleared, those surfaces would keep painting on any output
+                // the newcomer hasn't reached, taking locked input and holding
+                // the keyboard — stalling `all_ready` for good.
+                self.lock_surfaces.clear();
+                // The clear above already re-aims pointer and touch, which
+                // re-look up their target by output — but not the keyboard,
+                // whose focus sits on the seat and stays on the evicted surface
+                // until `enter_locked` retargets it (`is_locked()` holds true
+                // through `Pending`, so every keystroke would keep reaching it
+                // otherwise). The synthetic motion forces the pointer to
+                // recompute focus as a real one would; its `leave` also drops
+                // any constraint the evicted surface held.
+                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                let pointer = self.seat.get_pointer().unwrap();
+                pointer.motion(
+                    self,
+                    None,
+                    &smithay::input::pointer::MotionEvent {
+                        location: pointer.current_location(),
+                        serial,
+                        time: self.start_time.elapsed().as_millis() as u32,
+                    },
+                );
+                pointer.frame(self);
+                self.set_keyboard_focus(None, smithay::utils::SERIAL_COUNTER.next_serial());
                 let token = self.arm_pending_deadline();
                 self.session_lock = SessionLock::Pending {
                     locker: confirmation,
                     ready_outputs: HashSet::new(),
-                    // The outputs are showing lock frames already. Dropping the
-                    // desktop back onto them for the newcomer's wait would put
-                    // unlocked content on a locked session's screen — a leak any
-                    // client holding the manager global could ask for once the
-                    // incumbent is dead.
+                    // Reached from either `Locked` or a `Pending` still showing
+                    // the desktop; either way letting it through here would leak
+                    // unlocked content onto a locked session's screen.
                     keep_lock_frames: true,
                     deadline_token: token,
                 };
+                // The flag only decides what the *next* frame paints, and a
+                // `Pending` that was showing a static desktop has no redraw
+                // coming to apply it to.
+                self.mark_all_dirty();
                 return;
             }
             None => {}
         }
         tracing::info!("Session lock requested");
         let token = self.arm_pending_deadline();
+        // A dark panel has no desktop to flash, and is the case most needing
+        // this: the standard idle setup blanks it minutes before locking, and
+        // the next stray input re-lights it onto whatever `Pending` paints
+        // (`wake_dpms_off_outputs` runs ahead of the locked-input gate).
+        //
+        // `dpms_off_outputs`, not `confirmed_dark`: an output whose off is
+        // still queued needs the guard just as much — that same input would
+        // cancel the queued off and leave the panel lit.
+        let any_output_dark = !self.dpms_off_outputs.is_empty();
         self.session_lock = SessionLock::Pending {
             locker: confirmation,
             ready_outputs: HashSet::new(),
-            // Nothing bounds `Pending` without the deadline, so a desktop left
-            // up here stays up for as long as the client takes, with all input
-            // dead. Degrade to blanking rather than to that.
-            keep_lock_frames: token.is_none(),
+            // With no deadline, nothing bounds how long `Pending` could leave
+            // the desktop up with input dead — degrade to blanking instead.
+            keep_lock_frames: token.is_none() || any_output_dark,
             deadline_token: token,
         };
 
@@ -1331,7 +1374,11 @@ impl SessionLockHandler for DriftWm {
             return;
         }
         tracing::info!("Session unlocked");
-        // Cancel both timers: the Pending deadline and the Locked confirm backstop.
+        // `unlock_and_destroy` can land on a still-`Pending` lock — smithay
+        // answers it with a protocol error and honours it anyway — so this
+        // timer needs cancelling too, not just the `Locked` backstop. The
+        // timer's own state check stops it acting on a dead lock; it doesn't
+        // stop the wakeup.
         self.cancel_pending_deadline();
         self.cancel_lock_confirm_timer();
         // Undo the canvas→screen conversion `lock` established, before anything

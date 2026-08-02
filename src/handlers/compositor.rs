@@ -265,12 +265,11 @@ impl CompositorHandler for DriftWm {
             });
         }
 
-        // Accumulate lock-surface commits during `Pending` and only enter
-        // `Locked` once every output's lock surface has committed its first
-        // buffer. This avoids a blank flash when the desktop is still showing.
-        // Only a lock surface returns early: any other surface committing inside
-        // this window still owes an initial configure, and a client that never
-        // gets one hangs forever.
+        // Enter `Locked` only once every output's lock surface has committed,
+        // not the first — avoids a blank flash while others still show the
+        // desktop. Only a lock surface returns early here: any other surface
+        // still owes its initial configure, and a client that never gets one
+        // hangs forever.
         if let crate::state::SessionLock::Pending {
             ref mut ready_outputs,
             ..
@@ -285,7 +284,8 @@ impl CompositorHandler for DriftWm {
 
             let all_ready = self.lock_surfaces.keys().all(|o| ready_outputs.contains(o));
             if all_ready {
-                // Cancel the deadline timer BEFORE we move out of Pending.
+                // Must precede the replace below — this only clears the timer
+                // while `self.session_lock` still reads `Pending`.
                 self.cancel_pending_deadline();
                 let old =
                     std::mem::replace(&mut self.session_lock, crate::state::SessionLock::Unlocked);
@@ -298,8 +298,10 @@ impl CompositorHandler for DriftWm {
 
         // The deadline can reach `Locked` before the client has made any lock
         // surface, and the arm above no longer matches once it has — so this is
-        // the only thing that hands a late lock surface the keyboard.
-        if self.session_lock.renders_lock_frame()
+        // what hands a late one the keyboard. `is_locked`, not
+        // `renders_lock_frame`: the question is who owns the keyboard, not what
+        // the outputs paint.
+        if self.session_lock.is_locked()
             && self
                 .lock_surfaces
                 .values()

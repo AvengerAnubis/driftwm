@@ -22,6 +22,7 @@ use smithay::utils::Point;
 use smithay::wayland::input_method::InputMethodKeyboardGrab;
 use smithay::wayland::session_lock::SessionLockHandler;
 
+use crate::state::session_lock::PENDING_LOCK_DEADLINE;
 use crate::state::{SessionLock, StageWindow};
 
 use super::client::{ClientId, LockEvent, TouchEvent};
@@ -336,12 +337,11 @@ fn confirm_lock(f: &mut Fixture, id: ClientId, output: &Output) -> WlSurface {
         .clone()
 }
 
-/// Wait out the real one-second `Pending` deadline, pumping the loop so its
-/// calloop timer gets a chance to fire. Bounded well past the deadline so a
-/// timer that never lands fails the caller's own precondition instead of
-/// hanging the suite.
+/// Wait out the real [`PENDING_LOCK_DEADLINE`], pumping the loop so its calloop
+/// timer gets a chance to fire. Bounded well past the deadline so a timer that
+/// never lands fails the caller's own precondition instead of hanging the suite.
 fn run_pending_deadline(f: &mut Fixture) {
-    let bound = Instant::now() + Duration::from_secs(5);
+    let bound = Instant::now() + PENDING_LOCK_DEADLINE * 5;
     while Instant::now() < bound {
         if !matches!(f.state().session_lock, SessionLock::Pending { .. }) {
             return;
@@ -501,6 +501,296 @@ fn a_replacement_lock_keeps_painting_lock_frames_while_pending() {
         f.state().session_lock.renders_lock_frame(),
         "a replacement lock must keep the outputs on lock frames while it comes \
          up — the session never stopped being locked"
+    );
+}
+
+/// A lock object can die while its client lives on: smithay posts
+/// `invalid_destroy` only once the locker has been consumed, and a `Pending`
+/// lock never consumes it — so a client may claim a lock surface on every
+/// output, `destroy` its lock cleanly, and stay connected. Nothing sweeps those
+/// surfaces (`destroyed` fires on `wl_surface` death, not role death), so
+/// without the clear in the takeover arm they outlive the lock they belonged
+/// to: on every output the replacement has not reached yet they go on painting,
+/// taking locked pointer input, and holding the keyboard, and their keys stall
+/// the replacement's own `all_ready` for good.
+#[test]
+fn a_takeover_drops_the_lock_surfaces_of_the_lock_it_replaces() {
+    let mut f = Fixture::new();
+    // B's own lock surface stays in `lock_surfaces`, and this scenario never
+    // unlocks to drain it.
+    f.skip_baseline_check();
+    let reached = f.add_output(1, (1920, 1080));
+    let unreached = f.add_output(2, (1920, 1080));
+    let a = f.add_client();
+
+    f.client(a).lock_session();
+    f.roundtrip(a);
+    let wl_reached = f.client(a).output(&reached.name());
+    f.client(a).create_lock_surface(&wl_reached);
+    let wl_unreached = f.client(a).output(&unreached.name());
+    f.client(a).create_lock_surface(&wl_unreached);
+    f.roundtrip(a);
+
+    let surface_on = |f: &mut Fixture, output: &Output| {
+        f.state()
+            .lock_surfaces
+            .get(output)
+            .map(|ls| ls.wl_surface().clone())
+    };
+    let a_reached = surface_on(&mut f, &reached);
+    let a_unreached = surface_on(&mut f, &unreached);
+    assert!(
+        a_reached.is_some() && a_unreached.is_some(),
+        "precondition: A holds a lock surface on both outputs"
+    );
+
+    f.client(a).destroy_lock_object();
+    f.roundtrip(a);
+
+    assert!(
+        matches!(f.state().session_lock, SessionLock::Pending { .. }),
+        "precondition: A's lock is still unconfirmed, so the `destroy` was \
+         accepted without a protocol error — if the deadline beat it here, the \
+         locker was consumed and A has been killed for `invalid_destroy`"
+    );
+    assert_eq!(
+        f.state().lock_surfaces.len(),
+        2,
+        "precondition: A is still connected and its surfaces still alive, so \
+         nothing has swept them"
+    );
+
+    let b = f.add_client();
+    f.client(b).lock_session();
+    f.roundtrip(b);
+    assert_eq!(
+        f.client(b).lock_events(),
+        &[],
+        "precondition: B was not refused — A's destroyed lock object let it \
+         take the session over"
+    );
+
+    // B comes up on one of the two outputs only: it replaces A's surface there
+    // and never touches the other.
+    let wl_reached = f.client(b).output(&reached.name());
+    f.client(b).create_lock_surface(&wl_reached);
+    f.roundtrip(b);
+
+    assert!(
+        surface_on(&mut f, &reached).is_some_and(|s| Some(s) != a_reached),
+        "precondition: B's own surface took the output it reached over from A's"
+    );
+    assert_eq!(
+        surface_on(&mut f, &unreached),
+        None,
+        "a takeover must drop the replaced lock's surfaces: on an output the \
+         replacement has not reached, a surface belonging to a client that \
+         merely destroyed its lock would go on painting, taking locked pointer \
+         input, and holding the keyboard — and its key would stall `all_ready` \
+         for good"
+    );
+    assert_ne!(
+        surface_on(&mut f, &reached),
+        a_unreached,
+        "sanity: A's other surface was not merely rehomed onto the output B \
+         reached"
+    );
+}
+
+/// Clearing `lock_surfaces` re-aims rendering and pointer and touch routing —
+/// all three look the map up by output. Keyboard focus does not live there: it
+/// sits on the seat, still on the surface the takeover just evicted, and
+/// `Pending` answers `is_locked()`, so nothing re-targets it until the
+/// newcomer's own commit reaches `enter_locked`. Every keystroke typed at the
+/// new lock screen in between — up to the whole deadline — would reach the
+/// client that was replaced.
+#[test]
+fn a_takeover_takes_the_keyboard_off_the_surface_it_evicts() {
+    let mut f = Fixture::new();
+    // A's lock surface outlives the lock object it was made on, and this
+    // scenario never unlocks to drain `lock_surfaces`.
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    // An output still owing a lock frame is what leaves the locker unconsumed,
+    // and only an unconsumed locker makes A's `destroy` legal rather than a
+    // fatal `invalid_destroy`. `active_outputs` is the udev backend's set, so
+    // the fixture has to seed it.
+    f.state().active_outputs.insert(output.clone());
+    let a = f.add_client();
+
+    f.client(a).lock_session();
+    f.roundtrip(a);
+    let a_surface = confirm_lock(&mut f, a, &output);
+    assert_eq!(
+        keyboard_focus(&mut f),
+        Some(a_surface),
+        "precondition: A's lock surface holds the keyboard"
+    );
+
+    // A drops its lock but stays connected, so the surface holding the keyboard
+    // is still alive — and still focused — when B takes the session over.
+    f.client(a).destroy_lock_object();
+    f.roundtrip(a);
+
+    let b = f.add_client();
+    f.client(b).lock_session();
+    f.roundtrip(b);
+    assert!(
+        matches!(f.state().session_lock, SessionLock::Pending { .. }),
+        "precondition: B took the session over and waits in `Pending` for its \
+         own lock surface"
+    );
+
+    assert_eq!(
+        keyboard_focus(&mut f),
+        None,
+        "a takeover must take the keyboard off the surface it evicts — input \
+         stays locked throughout, so that surface would otherwise go on \
+         receiving every key meant for the replacement's password prompt"
+    );
+}
+
+/// Taking a `Pending` over must schedule a repaint. `keep_lock_frames` only
+/// decides what the *next* frame paints, and the `Pending` being replaced may
+/// have been showing the desktop — a client that dies inside its own first
+/// second, before any lock surface commits. Nothing else redraws a static
+/// desktop, so without this the desktop stays on the panel for the whole of the
+/// replacement's deadline: exactly the leak the flag exists to close.
+#[test]
+fn a_takeover_of_a_pending_still_showing_the_desktop_schedules_a_repaint() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    // `mark_all_dirty` copies `active_outputs`, which only the udev backend
+    // populates — without this the repaint under test has nothing to schedule.
+    f.state().active_outputs.insert(output.clone());
+    let a = f.add_client();
+
+    f.client(a).lock_session();
+    f.roundtrip(a);
+    assert!(
+        !f.state().session_lock.renders_lock_frame(),
+        "precondition: the fresh lock left the desktop up for its wait"
+    );
+
+    f.kill_client(a);
+    f.pump(10);
+
+    let b = f.add_client();
+    // The takeover has to be from `Pending`: `mark_all_dirty` runs in that arm
+    // either way, so a deadline that fired in between would leave this passing
+    // without ever testing the case it is named for.
+    assert!(
+        matches!(f.state().session_lock, SessionLock::Pending { .. }),
+        "precondition: A's lock is still `Pending` when B takes over"
+    );
+    f.state().redraws_needed.clear();
+    f.client(b).lock_session();
+    f.roundtrip(b);
+
+    assert!(
+        f.state().session_lock.renders_lock_frame(),
+        "precondition: the takeover switched the outputs to lock frames"
+    );
+    assert!(
+        f.state().redraws_needed.contains(&output),
+        "a takeover must schedule the frame that puts the lock frame on screen \
+         — otherwise the desktop the replaced `Pending` was showing sits there \
+         for the whole deadline"
+    );
+}
+
+/// A lock arriving while DPMS has a panel dark must keep the outputs on lock
+/// frames for its `Pending` wait. There is no desktop on a dark panel to flash
+/// away, and the first stray input would otherwise light it — input runs
+/// `wake_dpms_off_outputs` ahead of the locked-input gate — onto the live
+/// desktop this window is still showing. The stock idle setup lands in exactly
+/// this state: blank at 300s, lock at 600s.
+#[test]
+fn a_lock_arriving_on_a_dark_panel_keeps_lock_frames_while_pending() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    // Requested and already drained by the render loop: the panel is dark.
+    f.state().dpms_off_outputs.insert(output.clone());
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    assert!(
+        matches!(f.state().session_lock, SessionLock::Pending { .. }),
+        "precondition: no lock surface has committed, so the lock is still `Pending`"
+    );
+    assert!(
+        f.state().session_lock.renders_lock_frame(),
+        "a lock requested while a panel is already dark must not put the \
+         desktop back on it for the pending wait"
+    );
+}
+
+/// A change detector, deliberately: `lock` never reads `pending_dpms`, so this
+/// runs the identical production path as
+/// [`a_lock_arriving_on_a_dark_panel_keeps_lock_frames_while_pending`] and pins
+/// the predicate to `dpms_off_outputs` against a later switch to
+/// `confirmed_dark`, which would exclude exactly this state. That exclusion
+/// would be wrong: a queued DPMS-off means the panel is still lit, and the input
+/// that would wake a dark one cancels the queued off outright — either way the
+/// desktop `Pending` is painting ends up on a lit panel.
+#[test]
+fn a_lock_arriving_with_a_dpms_off_still_queued_keeps_lock_frames_too() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    f.state().dpms_off_outputs.insert(output.clone());
+    f.state().pending_dpms.insert(output.clone(), false);
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    assert!(
+        matches!(f.state().session_lock, SessionLock::Pending { .. }),
+        "precondition: no lock surface has committed, so the lock is still `Pending`"
+    );
+    assert!(
+        f.state().session_lock.renders_lock_frame(),
+        "an output whose DPMS-off has not drained yet must be covered too — \
+         input cancels its queued off and leaves the panel lit"
+    );
+}
+
+/// `lock` reads the DPMS state once, at lock time, so an output going dark
+/// *inside* the pending wait has to flip the flag itself. Without it the desktop
+/// goes on being painted under a panel the user's next input re-lights —
+/// `wake_dpms_off_outputs` runs ahead of the locked-input gate — which is the
+/// leak the DPMS case exists to close, reopened by a few hundred milliseconds of
+/// timing.
+#[test]
+fn an_output_going_dark_during_pending_stops_the_desktop_being_painted() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    assert!(
+        matches!(f.state().session_lock, SessionLock::Pending { .. }),
+        "precondition: no lock surface has committed, so the lock is still `Pending`"
+    );
+    assert!(
+        !f.state().session_lock.renders_lock_frame(),
+        "precondition: nothing was dark at lock time, so the desktop is up for \
+         the wait"
+    );
+
+    // The whole off branch of `set_dpms`, which cannot be driven from here: it
+    // returns early without a seat session, and no fixture has one.
+    f.state().dpms_off_outputs.insert(output.clone());
+    f.state().keep_lock_frames_while_pending();
+
+    assert!(
+        f.state().session_lock.renders_lock_frame(),
+        "an output going dark mid-wait must stop the desktop being painted — \
+         the input that wakes the panel would otherwise light it straight onto \
+         whatever this `Pending` is showing"
     );
 }
 

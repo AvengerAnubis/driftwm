@@ -32,7 +32,7 @@ mod redraw;
 mod reload;
 mod render_cache;
 mod resize;
-mod session_lock;
+pub(crate) mod session_lock;
 mod session_store;
 mod stage_window;
 mod suspended;
@@ -204,7 +204,8 @@ pub struct PendingPick {
 /// `Pending` waits for all lock surfaces to commit their first buffer, with a
 /// 1-second deadline after which we force-enter `Locked` regardless. Locking an
 /// unlocked session leaves the desktop up for that wait so there is no blank
-/// flash; `keep_lock_frames` covers the cases where showing it would be a leak.
+/// flash; `keep_lock_frames` covers the cases where that would leak unlocked
+/// content instead (see its own doc).
 /// `Locked` renders lock frames and defers the `locked` protocol event until
 /// every output has presented one.
 pub enum SessionLock {
@@ -215,11 +216,13 @@ pub enum SessionLock {
         /// Outputs whose lock surface has committed its first buffer.
         ready_outputs: HashSet<Output>,
         /// Keep painting lock frames for the wait instead of the desktop.
-        /// Set wherever revealing the desktop would put unlocked content on a
-        /// screen that must not show it: a takeover of an already-locked
-        /// session, and a `Pending` no deadline bounds.
+        /// Set wherever letting the desktop through would put unlocked content
+        /// on a screen that must not show it: a takeover of a lock already in
+        /// place, a `Pending` no deadline bounds, and a lock whose wait a
+        /// DPMS-off panel overlaps.
         keep_lock_frames: bool,
-        /// 1-second deadline: force `Locked` even if not all surfaces mapped.
+        /// Deadline after which `Locked` is forced even if not all surfaces
+        /// mapped; see `PENDING_LOCK_DEADLINE`.
         deadline_token: Option<RegistrationToken>,
     },
     /// Rendering only the lock surface. Carries the client's lock object partly
