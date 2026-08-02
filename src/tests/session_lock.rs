@@ -336,6 +336,21 @@ fn confirm_lock(f: &mut Fixture, id: ClientId, output: &Output) -> WlSurface {
         .clone()
 }
 
+/// Wait out the real one-second `Pending` deadline, pumping the loop so its
+/// calloop timer gets a chance to fire. Bounded well past the deadline so a
+/// timer that never lands fails the caller's own precondition instead of
+/// hanging the suite.
+fn run_pending_deadline(f: &mut Fixture) {
+    let bound = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < bound {
+        if !matches!(f.state().session_lock, SessionLock::Pending { .. }) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        f.pump(1);
+    }
+}
+
 /// Kill `dead`'s connection and let a fresh client take over its lock: the
 /// replacement locks, creates a lock surface for `output`, and commits it
 /// through to `Locked`. Returns the replacement's id and its server-side lock
@@ -1133,6 +1148,89 @@ fn locked_is_entered_and_keyboard_focus_handed_over_before_confirmation() {
         Some(surface),
         "the keyboard-focus handoff hangs off entering Locked, not off \
          confirmation, and must not wait for the output to present"
+    );
+}
+
+/// The `Pending` window accumulates lock-surface commits, and must let every
+/// other surface's commit through untouched: an ordinary toplevel making its
+/// first commit in there still owes an initial configure, and a client that
+/// never gets one waits for it forever — it may not attach a buffer until the
+/// configure it acks arrives.
+#[test]
+fn a_toplevel_committing_during_pending_still_gets_its_initial_configure() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    assert!(
+        matches!(f.state().session_lock, SessionLock::Pending { .. }),
+        "precondition: no lock surface has committed, so the lock is still Pending"
+    );
+
+    let window = f.client(id).create_window();
+    let surface = window.surface.clone();
+    window.set_app_id("late");
+    window.commit();
+    f.double_roundtrip(id);
+
+    assert!(
+        !f.client(id).window(&surface).configures_received.is_empty(),
+        "a toplevel's first commit during a pending lock must still be answered \
+         with its initial configure — without one the client hangs forever"
+    );
+
+    let window = f.client(id).window(&surface);
+    window.set_size(400, 300);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(id);
+
+    assert!(
+        window_by_app_id(&mut f, "late").is_some(),
+        "and its buffer commit must go on to map the window"
+    );
+}
+
+/// The `Pending` deadline can reach `Locked` before the client has made a
+/// single lock surface, and the accumulate-commits arm no longer matches once
+/// it has — so a lock surface created afterwards must still be handed the
+/// keyboard on its first commit. Without that handoff focus stays `None` for
+/// the rest of the lock: `update_keyboard_focus` bails while locked, so every
+/// keystroke is dropped and the session can never be unlocked from the
+/// keyboard.
+#[test]
+fn a_lock_surface_created_after_the_pending_deadline_receives_keyboard_focus() {
+    let mut f = Fixture::new();
+    // `confirm_lock` populates `lock_surfaces`, and this scenario never
+    // unlocks to drain it.
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+
+    run_pending_deadline(&mut f);
+    assert!(
+        matches!(f.state().session_lock, SessionLock::Locked { .. }),
+        "precondition: the deadline forced `Locked` with no lock surface committed"
+    );
+    assert_eq!(
+        keyboard_focus(&mut f),
+        None,
+        "precondition: there was no lock surface to hand the keyboard to when the \
+         deadline fired"
+    );
+
+    let surface = confirm_lock(&mut f, id, &output);
+
+    assert_eq!(
+        keyboard_focus(&mut f),
+        Some(surface),
+        "a lock surface created after the deadline forced `Locked` must still \
+         receive keyboard focus on its first commit"
     );
 }
 

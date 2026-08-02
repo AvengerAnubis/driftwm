@@ -268,19 +268,19 @@ impl CompositorHandler for DriftWm {
         // Accumulate lock-surface commits during `Pending` and only enter
         // `Locked` once every output's lock surface has committed its first
         // buffer. This avoids a blank flash when the desktop is still showing.
+        // Only a lock surface returns early: any other surface committing inside
+        // this window still owes an initial configure, and a client that never
+        // gets one hangs forever.
         if let crate::state::SessionLock::Pending {
             ref mut ready_outputs,
             ..
         } = self.session_lock
-        {
-            let Some(output) = self
+            && let Some(output) = self
                 .lock_surfaces
                 .iter()
                 .find(|(_, ls)| ls.wl_surface() == surface)
                 .map(|(o, _)| o.clone())
-            else {
-                return;
-            };
+        {
             ready_outputs.insert(output);
 
             let all_ready = self.lock_surfaces.keys().all(|o| ready_outputs.contains(o));
@@ -291,11 +291,21 @@ impl CompositorHandler for DriftWm {
                     std::mem::replace(&mut self.session_lock, crate::state::SessionLock::Unlocked);
                 if let crate::state::SessionLock::Pending { locker, .. } = old {
                     self.enter_locked(locker);
-                    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-                    self.set_keyboard_focus(Some(FocusTarget(surface.clone())), serial);
                 }
             }
             return;
+        }
+
+        // The deadline can reach `Locked` before the client has made any lock
+        // surface, and the arm above no longer matches once it has — so this is
+        // the only thing that hands a late lock surface the keyboard.
+        if self.session_lock.renders_lock_frame()
+            && self
+                .lock_surfaces
+                .values()
+                .any(|ls| ls.wl_surface() == surface)
+        {
+            self.focus_lock_surface();
         }
 
         if !is_sync_subsurface(surface) {

@@ -24,7 +24,7 @@ use smithay::{
     wayland::session_lock::SessionLocker,
 };
 
-use super::{DriftWm, SessionLock};
+use super::{DriftWm, FocusTarget, SessionLock};
 
 /// How long to wait for the outstanding outputs before blanking them instead.
 ///
@@ -65,6 +65,9 @@ impl DriftWm {
         // would produce the frame we are about to wait for.
         self.mark_all_dirty();
         self.cancel_lock_confirm_timer();
+        // Every route in owes the lock screen the keyboard, the pending deadline
+        // included — it can reach here without a single surface having committed.
+        self.focus_lock_surface();
 
         if awaiting_present.is_empty() {
             // Also the winit and fixture case: `active_outputs` is populated by
@@ -87,6 +90,41 @@ impl DriftWm {
             awaiting_present,
         };
         self.arm_lock_confirm_timer(lock);
+    }
+
+    /// Hand the keyboard to a lock surface, if the client has made one yet.
+    /// `lock` cleared focus and `update_keyboard_focus` bails while locked, so
+    /// nothing else ever gives the lock screen its keystrokes.
+    pub fn focus_lock_surface(&mut self) {
+        // Whichever lock surface has the keyboard keeps it. Every lock-surface
+        // commit runs this, and `focused_output` can still move while locked —
+        // a re-pick onto a different surface would run `remember_window_layout`
+        // and reset the active keyboard layout mid-password. It would also let
+        // a surface that was merely created take the keyboard from the prompt
+        // on screen: `new_surface` inserts at creation, not at first commit.
+        // Membership is the liveness check — `destroyed` sweeps `lock_surfaces`.
+        let keyboard = self.seat.get_keyboard().unwrap();
+        if let Some(focus) = keyboard.current_focus()
+            && self
+                .lock_surfaces
+                .values()
+                .any(|ls| ls.wl_surface() == &focus.0)
+        {
+            return;
+        }
+
+        // Prefer the active output's, so the prompt the user is looking at on a
+        // multi-monitor setup is the one taking the password.
+        let surface = self
+            .active_output()
+            .and_then(|output| self.lock_surfaces.get(&output))
+            .or_else(|| self.lock_surfaces.values().next())
+            .map(|ls| ls.wl_surface().clone());
+        let Some(surface) = surface else {
+            return;
+        };
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        self.set_keyboard_focus(Some(FocusTarget(surface)), serial);
     }
 
     /// An output whose panel is genuinely dark. `dpms_off_outputs` alone is not
