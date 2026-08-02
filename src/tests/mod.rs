@@ -42,6 +42,7 @@ mod pinned_phantom;
 mod popups;
 mod real_clients;
 mod relaunch;
+mod resize_ipc;
 mod resize_parity;
 mod send_to_output;
 mod session_lock;
