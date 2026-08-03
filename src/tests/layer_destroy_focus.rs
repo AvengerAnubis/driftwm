@@ -106,12 +106,11 @@ fn layer_destroyed_under_the_cursor_keeps_pointer_focus() {
         pointer_focus(&mut f),
         Some(bar_server.clone()),
         "focus must be re-seated on the bar beneath, not left on the dead \
-         panel (still listed in the layer map until cleanup) and not dropped \
-         to the canvas"
+         panel and not dropped to the canvas"
     );
 
     // The next press, still without pointer motion, must reach the bar again —
-    // not pan the canvas (unbound BTN_LEFT on the empty canvas is PanViewport
+    // not pan the canvas (unmodified BTN_LEFT on empty canvas is pan-viewport
     // in the default config). A press over a layer always installs a
     // ScreenSpaceClickGrab; a PanGrab is the stale-flag regression.
     press(&mut f, &device, BTN_LEFT);

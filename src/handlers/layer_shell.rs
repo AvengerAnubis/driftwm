@@ -183,9 +183,10 @@ impl WlrLayerShellHandler for DriftWm {
         self.canvas_layers
             .retain(|cl| cl.surface.wl_surface() != surface.wl_surface());
 
-        // Mark this surface so our early pre-commit hook can set full anchors
-        // before smithay's layer-shell validation runs. We can't set anchors here
-        // directly because smithay resets cached state to defaults AFTER this callback.
+        // Mark this surface so our early pre-commit hook can neutralise the
+        // orphaned commits before smithay's layer-shell validation runs. We
+        // can't fix the cached state here directly because smithay resets it to
+        // defaults AFTER this callback.
         with_states(surface.wl_surface(), |states| {
             states
                 .data_map

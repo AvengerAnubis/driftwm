@@ -504,9 +504,7 @@ impl DriftWm {
         // Exiting fullscreen can restore a hidden bar beneath a stationary
         // cursor; `pointer_over_layer` and smithay's focus are otherwise only
         // refreshed by pointer motion, and a stale flag would route the next
-        // press/scroll over the bar to the canvas. Same plain-dispatch
-        // constraint as the warp above: this makes pointer calls, so no caller
-        // may sit inside a pointer-grab callback.
+        // press/scroll over the bar to the canvas.
         self.refresh_pointer_focus();
     }
 
