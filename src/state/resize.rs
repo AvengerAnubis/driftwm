@@ -69,7 +69,7 @@ impl PendingResize {
     /// rounded answer as the client sizing itself instead would re-derive every
     /// repeated request from the rounded size and walk every cell-snapping
     /// terminal by half its rounding per call.
-    fn is_live(&self, window: &Window) -> bool {
+    pub(crate) fn is_live(&self, window: &Window) -> bool {
         let committed = window.geometry().size;
         let between = |c: i32, a: i32, b: i32| c >= a.min(b) && c <= a.max(b);
         super::configured_window_size(window) == self.requested

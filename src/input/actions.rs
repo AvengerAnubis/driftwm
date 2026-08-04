@@ -102,12 +102,9 @@ impl DriftWm {
                     self.drop_owed_recenter(&element);
                     self.map_window(element.clone(), new_loc, false);
                     self.animate_element_move_from(&element, loc, None);
-                    // A stand-in's canvas position is durable — persist the
-                    // nudge on the session-store debounce (the client arm stays
-                    // unmarked).
-                    if matches!(element, StageWindow::Suspended(_)) {
-                        self.session_store_mark_dirty();
-                    }
+                    // The element's canvas position is durable — persist the
+                    // nudge on the session-store debounce.
+                    self.session_store_mark_dirty();
                 }
             }
             Action::GrowWindow(dir) => self.step_resize_focused(dir, self.config.resize_step),
@@ -410,6 +407,9 @@ impl DriftWm {
                         // window, and a fit or fill exit can be settling too; the
                         // shared placement re-aims what that exit still owes.
                         self.map_window_to_rule_point(&window, rx, ry, true);
+                        // The new canvas position is durable — persist the move
+                        // on the session-store debounce, like the stand-in arm.
+                        self.session_store_mark_dirty();
                     }
                     Some(StageWindow::Suspended(s)) => {
                         // No live client — move the focused suspended stand-in in
@@ -607,11 +607,9 @@ impl DriftWm {
                 self.map_window(element.clone(), new_loc, true);
                 let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                 self.raise_and_focus_element(&element, serial);
-                // A stand-in's canvas position is durable — persist the move on
-                // the session-store debounce (the client arm stays unmarked).
-                if matches!(element, StageWindow::Suspended(_)) {
-                    self.session_store_mark_dirty();
-                }
+                // The element's canvas position is durable — persist the move on
+                // the session-store debounce.
+                self.session_store_mark_dirty();
             }
             Action::SendCursorToOutput(dir) => {
                 // The cursor's output (active_output), not keyboard focus or

@@ -587,11 +587,12 @@ fn nudge_moves_client_and_stand_in_alike() {
     }
 }
 
-/// A stand-in's canvas position is durable session state, so nudging one arms
-/// the debounced write — while nudging a client window, whose position the
-/// durable store doesn't own, leaves it unarmed.
+/// A nudge moves an element on the canvas, and both a live window's and a
+/// stand-in's canvas position are durable session state — the steady-state
+/// flush records live windows — so nudging either one arms the debounced
+/// write.
 #[test]
-fn nudge_marks_the_session_store_dirty_only_for_a_stand_in() {
+fn nudge_marks_the_session_store_dirty_for_live_and_stand_in() {
     let tmp = TempDir::new();
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
@@ -618,8 +619,9 @@ fn nudge_marks_the_session_store_dirty_only_for_a_stand_in() {
         "precondition: the client nudge ran"
     );
     assert!(
-        !f.state().session_store_dirty(),
-        "a client window's nudge is not durable session state"
+        f.state().session_store_dirty(),
+        "a live window's nudge is durable session state — the flush records \
+         live windows, so a crash restores the nudged position"
     );
 
     let sid = f.state().insert_suspended_for_test(

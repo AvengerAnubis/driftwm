@@ -2,11 +2,16 @@
 //! an envelope from live state, write it through the [`driftwm::session`] IO,
 //! and materialize it back into suspended windows at startup.
 //!
-//! Cadence: a create or dismiss writes immediately; a move or resize arms a
-//! short debounce timer; graceful shutdown fsync's a final write. Suspended
-//! windows are saved regardless of `restore_windows`; a live window is saved as
-//! a `Quit` record when that flag resolves on for it (global default or a
-//! per-app rule). `path == None` disables everything (a
+//! Cadence: a create, dismiss, or settled move/resize arms a short debounce
+//! timer that writes live and suspended windows together; graceful shutdown
+//! fsync's a final write. Writing live windows at steady state (not just at
+//! shutdown) keeps the file current across a crash or SIGKILL, and makes the
+//! shutdown write a last safety net instead of the sole source of truth —
+//! otherwise a logout that dispatches client teardown before the final
+//! serialize records an empty session (the windows were already unmapped).
+//! Suspended windows are saved regardless of `restore_windows`; a live window
+//! is saved as a `Quit` record when that flag resolves on for it (global
+//! default or a per-app rule). `path == None` disables everything (a
 //! winit dev session without `--session-file`, or a fixture without an
 //! injected path).
 
@@ -300,11 +305,12 @@ impl DriftWm {
         self.write_session(true, true);
     }
 
-    /// Steady-state write: suspended windows + carried-forward + cameras, no
-    /// live windows, no fsync. Clears the dirty flag.
+    /// Steady-state write: live windows (when `restore_windows` allows),
+    /// suspended windows, carried-forward entries and cameras; no fsync.
+    /// Clears the dirty flag.
     fn session_store_flush(&mut self) {
         self.session_store.dirty = false;
-        self.write_session(false, false);
+        self.write_session(true, false);
     }
 
     fn write_session(&mut self, include_live: bool, fsync: bool) {
