@@ -5,7 +5,7 @@ use crate::decorations::DecorationKey;
 use crate::grabs::{ResizeState, has_left, has_top};
 use crate::handlers::LockRoleMarker;
 use crate::handlers::layer_shell::LayerDestroyedMarker;
-use crate::state::{ClientState, DriftWm, FocusTarget, PendingRecenter, StageWindow};
+use crate::state::{ClientState, DriftWm, FocusTarget, NavZoom, PendingRecenter, StageWindow};
 use driftwm::window_ext::WindowExt;
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::desktop::layer_map_for_output;
@@ -797,7 +797,7 @@ impl CompositorHandler for DriftWm {
                                 let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                                 self.raise_and_focus(&window, serial);
                             } else {
-                                self.navigate_to_window(&window, reset);
+                                self.navigate_to_window(&window, NavZoom::from_reset(reset));
                             }
                         }
 
@@ -1414,7 +1414,7 @@ impl DriftWm {
         if self.focused_window().as_ref() == Some(window)
             && !self.window_visible_at_least(window, FULLY_VISIBLE)
         {
-            self.navigate_to_window(window, false);
+            self.navigate_to_window(window, NavZoom::Keep);
         }
     }
 }

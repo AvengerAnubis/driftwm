@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use crate::surface_tree::focus_belongs_to_window;
-use driftwm::canvas::{CanvasPos, canvas_to_screen, closest_point_on_rect};
+use driftwm::canvas::{
+    CanvasPos, ScreenPos, canvas_to_screen, closest_point_on_rect, screen_to_canvas,
+};
 use driftwm::window_ext::WindowExt;
 use smithay::{
     desktop::Window,
@@ -34,22 +36,66 @@ const ACTIVATION_VISIBLE_THRESHOLD: f64 = 1.0;
 /// size-dependent cutoff. See `window_already_active`.
 const ACTIVATION_ONSCREEN_THRESHOLD: f64 = f64::EPSILON;
 
+/// What a navigation does to the zoom it arrives at. The restore variant names
+/// its fallback rather than leaving it implied, so a call site picking a restore
+/// never inherits a centering policy it didn't choose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavZoom {
+    /// Center the window, animating zoom to 1.0 — an intentional navigation to
+    /// a specific window.
+    Reset,
+    /// Center the window, leaving the current zoom alone. Directional and
+    /// gesture-driven navigation rides this, where a zoom jump would break the
+    /// direction correspondence.
+    Keep,
+    /// A window still in `fill` state returns to the camera *and* zoom its fill
+    /// was computed in, rather than being centered — see `fill_restore_view`.
+    /// When no stored view applies, behaves as [`NavZoom::Reset`].
+    RestoreFillElseReset,
+}
+
+impl NavZoom {
+    /// A configured `zoom_reset_on_*` flag as a policy. Restoring a fill view is
+    /// per-action intent ("frame this window"), never a configured default.
+    pub fn from_reset(reset_zoom: bool) -> Self {
+        if reset_zoom { Self::Reset } else { Self::Keep }
+    }
+
+    /// Whether plain centering under this policy lands at zoom 1.0. Matched
+    /// exhaustively rather than as "not `Keep`" so a variant added later has to
+    /// answer here: silently defaulting to resetting would also route suspended
+    /// stand-ins to `center_on_suspended(id, true)` with nothing from the
+    /// compiler.
+    fn resets_zoom(self) -> bool {
+        match self {
+            Self::Reset | Self::RestoreFillElseReset => true,
+            Self::Keep => false,
+        }
+    }
+
+    /// Whether a stored fill view is tried before centering at all.
+    fn restores_fill(self) -> bool {
+        matches!(self, Self::RestoreFillElseReset)
+    }
+}
+
 impl DriftWm {
     /// Navigate the active output's viewport to center on a window: raise,
-    /// focus, animate camera. When `reset_zoom` is true, zoom animates to 1.0
-    /// (intentional navigation); otherwise the current zoom is preserved.
-    pub fn navigate_to_window(&mut self, window: &Window, reset_zoom: bool) {
+    /// focus, animate camera.
+    pub fn navigate_to_window(&mut self, window: &Window, zoom: NavZoom) {
         if let Some(output) = self.active_output() {
-            self.navigate_to_window_on(window, &output, reset_zoom);
+            self.navigate_to_window_on(window, &output, zoom);
         }
     }
 
     /// Navigate the active output's viewport to center on a stage element — the
     /// element-generic form of `navigate_to_window` / `center_on_suspended`.
-    pub fn navigate_to_element(&mut self, element: &StageWindow, reset_zoom: bool) {
+    pub fn navigate_to_element(&mut self, element: &StageWindow, zoom: NavZoom) {
         match element {
-            StageWindow::Client(w) => self.navigate_to_window(w, reset_zoom),
-            StageWindow::Suspended(s) => self.center_on_suspended(s.id, reset_zoom),
+            StageWindow::Client(w) => self.navigate_to_window(w, zoom),
+            // Fill is client-only, so a stand-in has no view to restore and a
+            // restore policy is only ever its fallback here.
+            StageWindow::Suspended(s) => self.center_on_suspended(s.id, zoom.resets_zoom()),
         }
     }
 
@@ -57,7 +103,7 @@ impl DriftWm {
     /// active one. Lets xdg-activation reveal a window on the monitor it
     /// already lives on rather than dragging the active monitor's camera
     /// across to it.
-    pub fn navigate_to_window_on(&mut self, window: &Window, output: &Output, reset_zoom: bool) {
+    pub fn navigate_to_window_on(&mut self, window: &Window, output: &Output, zoom: NavZoom) {
         // Nothing is drawn for a window held back by a deferred adopt, and the
         // placement it is holding is one the flush teleports it out of: a pan
         // there lands the viewport on empty canvas, and the raise and focus
@@ -95,33 +141,75 @@ impl DriftWm {
 
         self.raise_and_focus(window, serial);
 
-        let target_zoom = self.navigation_target_zoom(output, reset_zoom);
+        // Below the early returns on purpose, so a deferred-adopt, fullscreen or
+        // pinned window never reaches the restore — a filled window can be
+        // fullscreened (`fullscreen.rs` reads `is_fill`), and a fullscreen
+        // window's camera is locked.
+        let restored = zoom
+            .restores_fill()
+            .then(|| self.fill_restore_view(window, output))
+            .flatten();
 
-        // An element off the stage has no canvas point to aim at, and the origin
-        // is not a stand-in for one — the adopt's compound remove + replace
-        // leaves a window there for the length of two statements.
-        let Some(window_loc) = self.stage.position_of(window) else {
-            return;
-        };
-        let window_size = window.geometry().size;
-        let bar = self.window_ssd_bar(window);
         let vc = self.usable_center_screen_on(output);
-        let target =
-            driftwm::canvas::camera_to_center_window(window_loc, window_size, vc, target_zoom, bar);
+        let (target, target_zoom, anchor_canvas) = if let Some((camera, fill_zoom)) = restored {
+            // The fill rect is only meaningful at the zoom it was computed for,
+            // so `target_zoom` must be `fill_zoom`, not the outgoing zoom.
+            //
+            // The anchor, not `camera_target`, is what actually lands the
+            // camera: the zoom tick nulls `camera_target` every frame and on
+            // completion writes `anchor.canvas - anchor.screen / zoom`
+            // (`viewport_animation.rs`). Sending the viewport center back
+            // through the restored view — the same `screen_to_canvas`
+            // `fill_restore_view` inverted — makes the two agree by
+            // construction, so setting both is one target stated twice rather
+            // than two rivals; don't "simplify" either away, neither would fail
+            // loudly.
+            //
+            // No pending-view sweep here, unlike `fit_window`, which drops
+            // staged and deferred views precisely because it parks its own pan:
+            // `fill_window` never stages a `PendingView`, and `apply_pending_view`
+            // refuses to land once a target is armed or the camera has drifted
+            // from what it staged.
+            (
+                camera,
+                fill_zoom,
+                screen_to_canvas(ScreenPos(vc), camera, fill_zoom).0,
+            )
+        } else {
+            let target_zoom = self.navigation_target_zoom(output, zoom.resets_zoom());
 
-        let window_center = self.window_visual_center(window).unwrap_or_else(|| {
-            Point::from((
-                window_loc.x as f64 + window_size.w as f64 / 2.0,
-                window_loc.y as f64 + window_size.h as f64 / 2.0,
-            ))
-        });
+            // An element off the stage has no canvas point to aim at, and the origin
+            // is not a stand-in for one — the adopt's compound remove + replace
+            // leaves a window there for the length of two statements.
+            let Some(window_loc) = self.stage.position_of(window) else {
+                return;
+            };
+            let window_size = window.geometry().size;
+            let bar = self.window_ssd_bar(window);
+            let target = driftwm::canvas::camera_to_center_window(
+                window_loc,
+                window_size,
+                vc,
+                target_zoom,
+                bar,
+            );
+
+            let window_center = self.window_visual_center(window).unwrap_or_else(|| {
+                Point::from((
+                    window_loc.x as f64 + window_size.w as f64 / 2.0,
+                    window_loc.y as f64 + window_size.h as f64 / 2.0,
+                ))
+            });
+            (target, target_zoom, window_center)
+        };
+
         let mut os = output_state(output);
         // Disarms a pending zoom-to-fit return, same as a pan: the fit view is
         // a camera position, not a mode that navigation exits.
         os.overview_return = None;
         os.momentum.stop();
         os.zoom_animation_anchor = Some(ZoomAnimationAnchor {
-            canvas: window_center,
+            canvas: anchor_canvas,
             screen: vc,
         });
         os.camera_target = Some(target);
@@ -243,7 +331,7 @@ impl DriftWm {
             return;
         }
         if !self.window_fully_in_viewport(window) {
-            self.navigate_to_window(window, false);
+            self.navigate_to_window(window, NavZoom::Keep);
         }
     }
 
@@ -288,10 +376,15 @@ impl DriftWm {
     }
 
     /// Resolve a pick armed by `arm_pick` at button release: center the target
-    /// (with `reset_zoom`, carrying the viewport back above the threshold, so a
+    /// (resetting zoom, carrying the viewport back above the threshold, so a
     /// pick is a one-shot navigation, not a mode). A drag already cancelled the
     /// pick via `maybe_promote_pick`, so a surviving pending means the click
     /// stayed within slop.
+    ///
+    /// A pick is by definition below `zoom_interact_min`, so it always re-frames
+    /// from zoomed out — which is exactly when a filled window needs its own
+    /// view back rather than a reset to 1.0 that leaves it off screen, provided
+    /// that view itself clears the threshold.
     ///
     /// Must run *before* the release forwards at `on_pointer_button`'s tail: the
     /// `is_grabbed()` guard catches a gesture/edge-pan grab installed between
@@ -323,7 +416,23 @@ impl DriftWm {
         match pending.target {
             PickTarget::Client(window) => {
                 if window.alive() {
-                    self.navigate_to_window(&window, true);
+                    // Nothing stops `fill-window` from running below
+                    // `zoom_interact_min`, and restoring such a view would leave
+                    // `pick_mode()` still true: the click never reaches the
+                    // client and picking the same window again just replays the
+                    // view — a mode, not the one-shot navigation above. Peeking
+                    // costs a second `fill_restore_view` inside the navigate;
+                    // it's a pure read of stage state.
+                    let restore_clears_threshold = self
+                        .active_output()
+                        .and_then(|output| self.fill_restore_view(&window, &output))
+                        .is_some_and(|(_, zoom)| zoom >= self.config.zoom_interact_min);
+                    let policy = if restore_clears_threshold {
+                        NavZoom::RestoreFillElseReset
+                    } else {
+                        NavZoom::Reset
+                    };
+                    self.navigate_to_window(&window, policy);
                 }
             }
             PickTarget::Suspended(id) => {
@@ -370,7 +479,11 @@ impl DriftWm {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             self.raise_and_focus(window, serial);
         } else {
-            self.navigate_to_window_on(window, &home, self.config.zoom_reset_on_activation);
+            self.navigate_to_window_on(
+                window,
+                &home,
+                NavZoom::from_reset(self.config.zoom_reset_on_activation),
+            );
         }
     }
 

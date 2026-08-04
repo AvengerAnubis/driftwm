@@ -407,12 +407,33 @@ fn fit_and_frame(
 /// move and reposition a real fit action makes, which would shift the very
 /// anchors [`assert_resize_entered`] checks.
 fn seed_fit_and_fill(f: &mut Fixture, window: &Window) {
+    use driftwm::layout::snap::SnapRect;
+    use driftwm::stage::FillSaved;
     use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 
     let loc = f.state().stage.position_of(window).expect("staged");
     let size = window.geometry().size;
     f.state().stage.set_fit(window, size);
-    f.state().stage.set_fill(window, loc, size);
+    // The viewport rect and its output only matter to the fill-view restore,
+    // which no resize entry point reads — a non-degenerate stand-in, with the
+    // window seeded where it already is.
+    let bounds = SnapRect {
+        x_low: 0.0,
+        x_high: 1920.0,
+        y_low: 0.0,
+        y_high: 1080.0,
+    };
+    let output = f.state().active_output().expect("output").name();
+    f.state().stage.set_fill(
+        window,
+        FillSaved {
+            pre_fill_position: loc,
+            pre_fill_size: size,
+            viewport_bounds: bounds,
+            viewport_output: output,
+            filled_at: loc,
+        },
+    );
     window
         .toplevel()
         .expect("toplevel")

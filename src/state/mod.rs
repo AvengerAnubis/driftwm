@@ -50,6 +50,7 @@ pub use errors::ErrorSource;
 pub use focus::{FocusIntent, FocusTarget};
 pub use layers::CanvasLayer;
 pub(crate) use navigation::CLICK_NAVIGATE_SLOP;
+pub use navigation::NavZoom;
 pub use persistence::{read_all_per_output_state, remove_state_file};
 pub use render_cache::{BorderCacheEntry, RenderCache, ShadowCacheEntry};
 pub(crate) use resize::{owes_a_configured_size, resize_constraints};

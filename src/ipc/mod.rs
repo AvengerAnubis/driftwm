@@ -12,7 +12,7 @@ use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Size};
 use smithay::wayland::seat::WaylandFocus;
 
 use crate::decorations::DecorationKey;
-use crate::state::{DriftWm, StageWindow, SuspendedId};
+use crate::state::{DriftWm, NavZoom, StageWindow, SuspendedId};
 use driftwm::window_ext::WindowExt;
 
 pub mod client;
@@ -478,7 +478,10 @@ fn cmd_focus(arg: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
     if state.is_pinned(&window) || state.window_fully_in_viewport(&window) {
         state.raise_and_focus(&window, SERIAL_COUNTER.next_serial());
     } else {
-        state.navigate_to_window(&window, state.config.zoom_reset_on_activation);
+        state.navigate_to_window(
+            &window,
+            NavZoom::from_reset(state.config.zoom_reset_on_activation),
+        );
     }
     Ok(Response::Focused(Some(info)))
 }

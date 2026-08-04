@@ -10,7 +10,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1;
 
 use crate::ipc::dispatch;
 use crate::ipc::protocol::{Reply, Request, Response, WindowSelector};
-use crate::state::StageWindow;
+use crate::state::{NavZoom, StageWindow};
 use driftwm::config::Action;
 
 use super::{Fixture, config, map_window, settle, window_by_app_id};
@@ -152,7 +152,7 @@ decoration = "server"
     // `msg move`'s point is Y-up; canvas/camera space is Y-down.
     let reported_center: Point<f64, Logical> = Point::from((x as f64, -y as f64));
 
-    f.state().navigate_to_window(&window, true);
+    f.state().navigate_to_window(&window, NavZoom::Reset);
     settle(&mut f);
     let landed = f.state().viewport_center_canvas();
 

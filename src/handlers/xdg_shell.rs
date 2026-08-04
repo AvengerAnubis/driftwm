@@ -1,6 +1,6 @@
 use crate::grabs::{MoveGrab, ResizeGrab};
 use crate::state::{
-    ClusterMember, DriftWm, FocusTarget, PopupGrabState, StageWindow, output_logical_size,
+    ClusterMember, DriftWm, FocusTarget, NavZoom, PopupGrabState, StageWindow, output_logical_size,
     output_state,
 };
 use crate::surface_tree::focus_belongs_to_toplevel;
@@ -332,7 +332,7 @@ impl XdgShellHandler for DriftWm {
                         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                         self.raise_and_focus(&target, serial);
                     } else {
-                        self.navigate_to_window(&target, false);
+                        self.navigate_to_window(&target, NavZoom::Keep);
                     }
                 } else {
                     // No follow target. Pick first MRU entry; if it's

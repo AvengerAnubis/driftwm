@@ -555,7 +555,7 @@ mod harness {
     use crate::layout::cluster::{self, ResizeClassification, Side};
     use crate::layout::snap::SnapRect;
     use crate::stage::mock::{SentConfigure, TestWindow};
-    use crate::stage::{PinnedSite, Stage, StageElement};
+    use crate::stage::{FillSaved, PinnedSite, Stage, StageElement};
     use crate::window_ext::WindowExt;
 
     const OUTPUTS: [&str; 3] = ["OUT-0", "OUT-1", "OUT-2"];
@@ -1549,7 +1549,25 @@ mod harness {
                             .stage
                             .fit_saved_size(&w)
                             .unwrap_or_else(|| StageElement::size(&w));
-                        self.stage.set_fill(&w, pos, size);
+                        // There is no camera or output in the harness, so the
+                        // viewport rect and its output name are stand-ins: any
+                        // non-degenerate rect satisfies the invariant, and this
+                        // fill leaves the window where it already sits.
+                        self.stage.set_fill(
+                            &w,
+                            FillSaved {
+                                pre_fill_position: pos,
+                                pre_fill_size: size,
+                                viewport_bounds: SnapRect {
+                                    x_low: 0.0,
+                                    x_high: 1920.0,
+                                    y_low: 0.0,
+                                    y_high: 1080.0,
+                                },
+                                viewport_output: "harness".to_string(),
+                                filled_at: pos,
+                            },
+                        );
                         self.stage.clear_fit(&w);
                         self.fit_expect.remove(&w.label());
                     }

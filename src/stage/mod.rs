@@ -16,6 +16,7 @@ mod tests;
 
 pub use element::StageElement;
 
+use crate::layout::snap::SnapRect;
 use smithay::utils::{Logical, Point, Size};
 use std::collections::BTreeMap;
 
@@ -26,7 +27,9 @@ pub struct ElementId(pub u64);
 
 /// Fullscreen membership plus the pre-fullscreen geometry restored on exit.
 /// The viewport half of fullscreen state (saved camera/zoom) stays on
-/// `DriftWm`'s per-output state — cameras are not stage domain.
+/// `DriftWm`'s per-output state — *live* camera state is not stage domain.
+/// [`FillSaved`] keeps to that rule with a snapshot derived from the camera
+/// rather than the camera itself, and says there why the snapshot belongs here.
 pub struct FullscreenEntry<W> {
     pub window: W,
     pub saved_location: Point<i32, Logical>,
@@ -43,6 +46,32 @@ pub struct PinnedSite {
     pub screen_pos: Point<i32, Logical>,
 }
 
+/// What a filled window has to be handed back: the pre-fill rect an unfill
+/// restores, plus the viewport the fill grew inside so `center-window` can
+/// return to it.
+///
+/// That viewport rect is a canvas-space snapshot, not live camera state, and its
+/// lifetime is exactly fill membership's — which is why it lives here rather
+/// than on `DriftWm`: `clear_fill` is a stage method and cannot reach a second
+/// half elsewhere, so each of its ~15 call sites would be a chance to desync.
+pub struct FillSaved {
+    pub pre_fill_position: Point<i32, Logical>,
+    pub pre_fill_size: Size<i32, Logical>,
+    /// The output's usable area in canvas coords at fill time — the `bounds`
+    /// `compute_fill_geometry` grew inside. Inverts to the camera+zoom the fill
+    /// was computed in.
+    pub viewport_bounds: SnapRect,
+    /// Name of the output `viewport_bounds` was measured against. A rect
+    /// inverted through a different output's usable area yields a camera for a
+    /// viewport nobody looked through, and shape alone can't tell two
+    /// identically-sized monitors apart.
+    pub viewport_output: String,
+    /// Where the fill placed the window (`new_loc`) — the post-fill epoch, not
+    /// `pre_fill_position`. The stored framing only describes the window at this
+    /// position, so the restore rejects if it has moved.
+    pub filled_at: Point<i32, Logical>,
+}
+
 struct Entry<W> {
     window: W,
     id: ElementId,
@@ -53,10 +82,10 @@ struct Entry<W> {
     /// geometry because some clients (Chromium) shrink their reported
     /// geometry after each sized configure.
     restore_size: Option<Size<i32, Logical>>,
-    /// `Some((pre-fill position, pre-fill size))` while the window is filled.
-    /// Unlike fit, fill restores position too — a filled window grows in place
-    /// rather than centering, so the exact origin must round-trip.
-    fill_saved: Option<(Point<i32, Logical>, Size<i32, Logical>)>,
+    /// `Some` while the window is filled. Unlike fit, fill restores position
+    /// too — a filled window grows in place rather than centering, so the exact
+    /// origin must round-trip.
+    fill_saved: Option<FillSaved>,
     /// `Some` while the window is pinned to an output's screen space.
     pinned: Option<PinnedSite>,
 }
@@ -482,17 +511,15 @@ impl<W: StageElement> Stage<W> {
         }
     }
 
-    /// Mark `window` filled, saving its pre-fill position and size for restore.
-    pub fn set_fill<Q>(
-        &mut self,
-        window: &Q,
-        saved_position: Point<i32, Logical>,
-        saved_size: Size<i32, Logical>,
-    ) where
+    /// Mark `window` filled, saving what an unfill and the view restore need
+    /// (see [`FillSaved`]). Takes the struct so both `Point`s arrive named —
+    /// positionally they are the same type and swapping them is silent.
+    pub fn set_fill<Q>(&mut self, window: &Q, saved: FillSaved)
+    where
         W: PartialEq<Q>,
     {
         if let Some(e) = self.entry_mut(window) {
-            e.fill_saved = Some((saved_position, saved_size));
+            e.fill_saved = Some(saved);
         }
     }
 
@@ -503,12 +530,17 @@ impl<W: StageElement> Stage<W> {
         self.entry(window).is_some_and(|e| e.fill_saved.is_some())
     }
 
-    /// Clear fill state, returning the saved pre-fill position and size (the
-    /// unfill path).
-    pub fn take_fill_saved<Q>(
-        &mut self,
-        window: &Q,
-    ) -> Option<(Point<i32, Logical>, Size<i32, Logical>)>
+    /// The saved fill state while `window` is filled — the read half of
+    /// [`Self::take_fill_saved`], for callers that only inspect it.
+    pub fn fill_saved<Q>(&self, window: &Q) -> Option<&FillSaved>
+    where
+        W: PartialEq<Q>,
+    {
+        self.entry(window).and_then(|e| e.fill_saved.as_ref())
+    }
+
+    /// Clear fill state, returning the saved pre-fill geometry (the unfill path).
+    pub fn take_fill_saved<Q>(&mut self, window: &Q) -> Option<FillSaved>
     where
         W: PartialEq<Q>,
     {
@@ -672,10 +704,18 @@ impl<W: StageElement> Stage<W> {
                     "fit window has empty saved size"
                 );
             }
-            if let Some((_, saved)) = e.fill_saved {
+            if let Some(saved) = &e.fill_saved {
                 assert!(
-                    saved.w > 0 && saved.h > 0,
+                    saved.pre_fill_size.w > 0 && saved.pre_fill_size.h > 0,
                     "fill window has empty saved size"
+                );
+                // A degenerate viewport rect divides to an infinite zoom in
+                // `fill_restore_view`, which rejects it — but a stored one is a
+                // bug at the recording end, not something to discover later.
+                assert!(
+                    saved.viewport_bounds.x_high > saved.viewport_bounds.x_low
+                        && saved.viewport_bounds.y_high > saved.viewport_bounds.y_low,
+                    "fill window has an empty saved viewport rect"
                 );
             }
             if e.pinned.is_some() {

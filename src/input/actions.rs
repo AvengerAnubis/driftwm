@@ -5,7 +5,7 @@ use smithay::{
 };
 
 use crate::state::window_animation::{AnimSpace, ContentPolicy, GeometryRole};
-use crate::state::{DriftWm, HomeReturn, StageWindow};
+use crate::state::{DriftWm, HomeReturn, NavZoom, StageWindow};
 use driftwm::canvas::{self};
 use driftwm::config::{Action, LayoutSwitch, Modifiers, SendEvents, TrackpadState};
 use driftwm::window_ext::WindowExt;
@@ -132,12 +132,18 @@ impl DriftWm {
             }
             Action::CenterWindow => match self.focused_element() {
                 Some(StageWindow::Client(w)) if self.is_canvas_window(&w) => {
-                    self.navigate_to_element(&StageWindow::Client(w), true);
+                    self.navigate_to_element(
+                        &StageWindow::Client(w),
+                        NavZoom::RestoreFillElseReset,
+                    );
                 }
                 // A focused stand-in holds no seat focus, so `focused_window`
                 // never sees it — center it like any other focused element.
                 Some(StageWindow::Suspended(s)) => {
-                    self.navigate_to_element(&StageWindow::Suspended(s), true);
+                    self.navigate_to_element(
+                        &StageWindow::Suspended(s),
+                        NavZoom::RestoreFillElseReset,
+                    );
                 }
                 // Nothing focused, or a focused non-canvas (pinned/fullscreen)
                 // client: center the nearest canvas element to the viewport
@@ -160,7 +166,10 @@ impl DriftWm {
                         })
                         .cloned();
                     if let Some(elem) = closest {
-                        self.navigate_to_element(&elem, true);
+                        // Restores here too: the camera is traveling to this
+                        // window regardless, and centering a filled one is
+                        // wrong for the same reason it's wrong when focused.
+                        self.navigate_to_element(&elem, NavZoom::RestoreFillElseReset);
                     }
                 }
             },
@@ -172,7 +181,7 @@ impl DriftWm {
                 // beneath it. Pinned windows live in screen space (no canvas
                 // position to center the camera on) — the walk skips them.
                 if let Some((element, _)) = self.topmost_under(pos, |_, _| true) {
-                    self.navigate_to_element(&element, true);
+                    self.navigate_to_element(&element, NavZoom::RestoreFillElseReset);
                 }
             }
             Action::CenterNearest(dir) => {
@@ -230,7 +239,14 @@ impl DriftWm {
                     canvas::find_nearest(origin, dir, windows.chain(anchors), skip.as_ref());
                 match nearest {
                     Some(NavTarget::Window(elem)) => {
-                        self.navigate_to_element(&elem, false);
+                        // No fill-view restore here, unlike every other centering
+                        // path: those land at a definite zoom anyway (1.0 when
+                        // there is no view), so a restore only corrects *which*
+                        // zoom. This one deliberately preserves the user's, and a
+                        // restore would make that sticky — one filled window in a
+                        // traversal ends it zoomed out, since every later step
+                        // inherits the zoom it left behind.
+                        self.navigate_to_element(&elem, NavZoom::Keep);
                     }
                     Some(NavTarget::Anchor(p)) => {
                         // Unfocus so next CenterNearest searches from viewport center (= this anchor)
@@ -268,7 +284,7 @@ impl DriftWm {
                 // Mark the focus change this navigate causes as cycle-initiated so
                 // `focus_changed` freezes the history instead of committing.
                 self.cycle_navigating = true;
-                self.navigate_to_window(&window, false);
+                self.navigate_to_window(&window, NavZoom::Keep);
                 self.cycle_navigating = false;
                 // A truly modifier-less fire (gesture, bare wheel, IPC) has no key
                 // release to end the session, so each fire is a single step with a

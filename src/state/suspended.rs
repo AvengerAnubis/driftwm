@@ -25,7 +25,7 @@ use driftwm::window_ext::WindowExt;
 
 use crate::decorations::DecorationKey;
 use crate::grabs::ResizeState;
-use crate::state::{DriftWm, StageWindow, SuspendedId, SuspendedWindow};
+use crate::state::{DriftWm, NavZoom, StageWindow, SuspendedId, SuspendedWindow};
 use crate::surface_tree::focus_belongs_to_toplevel;
 
 /// A close whose `toplevel_destroyed` should convert into a suspended window,
@@ -175,7 +175,7 @@ impl DriftWm {
 
     /// Focus + raise a suspended window and center the active output's camera on
     /// it unconditionally — the stand-in counterpart of `navigate_to_window`;
-    /// `reset_zoom` matches its meaning there.
+    /// `reset_zoom` is that call's [`NavZoom::Reset`] vs [`NavZoom::Keep`].
     pub fn center_on_suspended(&mut self, id: SuspendedId, reset_zoom: bool) {
         self.focus_and_raise_suspended(id);
         let Some(s) = self.find_suspended(id) else {
@@ -1072,7 +1072,7 @@ impl DriftWm {
                 Some(target) if self.window_fully_in_viewport(&target) => {
                     self.raise_and_focus(&target, serial);
                 }
-                Some(target) => self.navigate_to_window(&target, false),
+                Some(target) => self.navigate_to_window(&target, NavZoom::Keep),
                 None => {
                     let mru = self
                         .stage

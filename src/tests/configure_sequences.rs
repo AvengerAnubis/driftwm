@@ -2,12 +2,12 @@
 //! a toolkit acks one configure while the compositor already believes another.
 
 use driftwm::canvas::Chrome;
-use driftwm::config::{Action, Config, DecorationMode, Direction};
+use driftwm::config::{Action, BTN_LEFT, Config, DecorationMode, Direction};
 use smithay::input::pointer::MotionEvent;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
 use smithay::wayland::shell::wlr_layer::Layer;
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1;
+use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
 use crate::ipc::protocol::{Request, Response, WindowSelector};
 use crate::state::StageWindow;
@@ -43,6 +43,47 @@ fn origin_view(f: &mut Fixture) {
         os.zoom = 1.0;
         os.camera = Point::from((0.0, 0.0));
     });
+}
+
+/// Park the viewport at `camera`/`zoom` with nothing in flight. Mapping a
+/// window arms a navigation, so any test that later runs an animation to a
+/// standstill has to disarm that first or it settles somewhere else.
+fn park_view(f: &mut Fixture, camera: Point<f64, Logical>, zoom: f64) {
+    f.state().with_output_state(|os| {
+        os.camera = camera;
+        os.camera_target = None;
+        os.zoom = zoom;
+        os.zoom_target = None;
+        os.zoom_animation_anchor = None;
+    });
+}
+
+/// A canvas point in screen coords at the given view: `(canvas - camera) * zoom`.
+fn screen_pos_of(
+    loc: Point<f64, Logical>,
+    camera: Point<f64, Logical>,
+    zoom: f64,
+) -> Point<f64, Logical> {
+    Point::from(((loc.x - camera.x) * zoom, (loc.y - camera.y) * zoom))
+}
+
+/// Where the window's center sits on screen at the given view.
+fn center_screen_of(
+    f: &mut Fixture,
+    window: &smithay::desktop::Window,
+    camera: Point<f64, Logical>,
+    zoom: f64,
+) -> Point<f64, Logical> {
+    let loc = f.state().stage.position_of(window).unwrap();
+    let size = window.geometry().size;
+    screen_pos_of(
+        Point::from((
+            loc.x as f64 + size.w as f64 / 2.0,
+            loc.y as f64 + size.h as f64 / 2.0,
+        )),
+        camera,
+        zoom,
+    )
 }
 
 fn pt(x: f64, y: f64) -> Point<f64, Logical> {
@@ -1874,6 +1915,651 @@ fn fill_records_settled_footprint() {
         f.state().stage.position_of(&a),
         Some(filled_loc),
         "a redraw commit after clear_fill must not translate the filled window"
+    );
+}
+
+/// Fill "a" into the free space left of the usable area's right edge, with "b"
+/// flush against the left edge spanning its height. The filled rect stops a
+/// neighbor's width short of the left edge, so centering it would slide "b" half
+/// off screen — the case `center-window` must not center. Returns the filled
+/// window, its surface, and the camera/zoom the fill was computed in.
+fn fill_beside_left_neighbor(
+    f: &mut Fixture,
+    id: super::client::ClientId,
+) -> (
+    smithay::desktop::Window,
+    wayland_client::protocol::wl_surface::WlSurface,
+    Point<f64, Logical>,
+    f64,
+) {
+    let a_surface = map_settled(f, id, "a", (800, 600));
+    let _b_surface = map_settled(f, id, "b", (400, 1056));
+    let a = window_by_app_id(f, "a").unwrap();
+    let b = window_by_app_id(f, "b").unwrap();
+
+    park_view(f, Point::from((0.0, 0.0)), 1.0);
+    let gap = f.state().config.snap_gap as i32;
+    f.state().map_window(b, Point::from((gap, gap)), false);
+    f.state()
+        .map_window(a.clone(), Point::from((800, 300)), false);
+
+    f.state().toggle_fill_window(&a);
+    assert!(f.state().stage.is_fill(&a), "precondition: the fill ran");
+    f.double_roundtrip(id);
+    adopt_last_configure(f, id, &a_surface);
+    let camera = f.state().camera();
+    let zoom = f.state().zoom();
+    (a, a_surface, camera, zoom)
+}
+
+/// Map a top-anchored panel claiming an exclusive zone, shrinking the output's
+/// usable area for real — the layer commit arranges the map, so
+/// `non_exclusive_zone` actually changes (an output mode change alone leaves it
+/// stale).
+fn map_top_panel(f: &mut Fixture, id: super::client::ClientId, height: u32) {
+    let created = f
+        .client(id)
+        .create_layer(None, zwlr_layer_shell_v1::Layer::Top, "panel");
+    let surface = created.surface.clone();
+    created.set_configure_props(super::client::LayerConfigureProps {
+        size: Some((1920, height)),
+        anchor: Some(
+            zwlr_layer_surface_v1::Anchor::Top
+                | zwlr_layer_surface_v1::Anchor::Left
+                | zwlr_layer_surface_v1::Anchor::Right,
+        ),
+        exclusive_zone: Some(height as i32),
+        ..Default::default()
+    });
+    created.commit();
+    f.roundtrip(id);
+
+    let layer = f.client(id).layer(&surface);
+    layer.set_size(1920, height as u16);
+    layer.attach_new_buffer();
+    layer.ack_last_and_commit();
+    f.double_roundtrip(id);
+}
+
+/// Focus `window` and run `center-window` to a standstill. Callers need
+/// `skip_baseline_check`: settling a camera animation seeds a per-output blur
+/// generation that only clears on output disconnect, so it can never return to
+/// the pre-output baseline.
+fn center_window_and_settle(f: &mut Fixture, window: &smithay::desktop::Window) {
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(window, serial);
+    f.state().execute_action(&Action::CenterWindow);
+    settle(f);
+}
+
+/// Assert `window` settled at the usable viewport center — plain centering, the
+/// fallback whenever no fill view can be restored.
+///
+/// Centers on `geometry().size`, so it only agrees with production centering for
+/// CSD windows: the real thing centers the *visual* frame, SSD bar included.
+fn assert_centered(f: &mut Fixture, window: &smithay::desktop::Window) {
+    let camera = f.state().camera();
+    let zoom = f.state().zoom();
+    let center = center_screen_of(f, window, camera, zoom);
+    let vc = f.state().usable_center_screen();
+    assert!(
+        (center.x - vc.x).abs() < 1e-6 && (center.y - vc.y).abs() < 1e-6,
+        "the window settles at the viewport center: {center:?} vs {vc:?}"
+    );
+}
+
+/// `center-window` on a filled window returns the camera and zoom to the view
+/// the fill was computed in instead of centering it. Fill deliberately stops
+/// short of the viewport bounds, so centering the result slides the neighbor it
+/// grew up against half off screen.
+#[test]
+fn center_window_restores_a_filled_windows_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+    let (a, _a_surface, fill_camera, fill_zoom) = fill_beside_left_neighbor(&mut f, id);
+
+    let filled_loc = f.state().stage.position_of(&a).unwrap();
+    let filled_loc = Point::from((filled_loc.x as f64, filled_loc.y as f64));
+    let fill_screen = screen_pos_of(filled_loc, fill_camera, fill_zoom);
+
+    park_view(&mut f, Point::from((4000.0, -3000.0)), 1.0);
+    center_window_and_settle(&mut f, &a);
+
+    let camera = f.state().camera();
+    let zoom = f.state().zoom();
+    assert!(
+        (camera.x - fill_camera.x).abs() < 1e-6 && (camera.y - fill_camera.y).abs() < 1e-6,
+        "the camera returned to the view the fill ran in: {camera:?} vs {fill_camera:?}"
+    );
+    assert!((zoom - fill_zoom).abs() < 1e-9, "and so did the zoom");
+    let settled_screen = screen_pos_of(filled_loc, camera, zoom);
+    assert!(
+        (settled_screen.x - fill_screen.x).abs() < 1e-6
+            && (settled_screen.y - fill_screen.y).abs() < 1e-6,
+        "so the filled window is back where the fill left it on screen: \
+         {settled_screen:?} vs {fill_screen:?}"
+    );
+
+    // And is deliberately *not* centered — its center sits right of the
+    // viewport's by half the neighbor it stopped against.
+    let center = center_screen_of(&mut f, &a, camera, zoom);
+    let vc = f.state().usable_center_screen();
+    assert!(
+        center.x - vc.x > 100.0,
+        "restoring the view is not centering the window: {center:?} vs {vc:?}"
+    );
+}
+
+/// The same restore through `center-window`'s other arm: with nothing focused
+/// it centers the element nearest the viewport center instead, and that arm has
+/// to carry the same policy — every other `center-window` test focuses its
+/// target first, so nothing else covers it.
+#[test]
+fn center_window_with_nothing_focused_restores_the_nearest_filled_windows_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+    let (a, _a_surface, fill_camera, fill_zoom) = fill_beside_left_neighbor(&mut f, id);
+
+    // Right of both windows, and "a" is the nearer of the two from there —
+    // the fill grew it toward this side, away from its left-edge neighbor.
+    park_view(&mut f, Point::from((4000.0, -3000.0)), 1.0);
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().set_window_focus(None, serial);
+    assert!(
+        f.state().focused_element().is_none(),
+        "precondition: nothing focused, so the nearest-element arm runs"
+    );
+
+    f.state().execute_action(&Action::CenterWindow);
+    settle(&mut f);
+
+    let camera = f.state().camera();
+    let zoom = f.state().zoom();
+    assert!(
+        (camera.x - fill_camera.x).abs() < 1e-6 && (camera.y - fill_camera.y).abs() < 1e-6,
+        "the fallback arm returned to the view the fill ran in: {camera:?} vs {fill_camera:?}"
+    );
+    assert!((zoom - fill_zoom).abs() < 1e-9, "and so did the zoom");
+    let center = center_screen_of(&mut f, &a, camera, zoom);
+    let vc = f.state().usable_center_screen();
+    assert!(
+        center.x - vc.x > 100.0,
+        "which is a different view from centering it: {center:?} vs {vc:?}"
+    );
+}
+
+/// The restored zoom overrides `center-window`'s zoom reset. `MAX_ZOOM` is 1.0,
+/// so a window filled at zoom 0.5 is genuinely twice the usable width — snapping
+/// back to 1.0 would leave it overflowing the screen.
+#[test]
+fn center_window_restores_the_fill_zoom_instead_of_resetting_it() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+
+    let surface = map_settled(&mut f, id, "fill", (800, 600));
+    let window = window_by_app_id(&mut f, "fill").unwrap();
+
+    // Even numbers and zoom 0.5 keep the screen→canvas conversion exact.
+    park_view(&mut f, Point::from((5000.0, 5000.0)), 0.5);
+    f.state()
+        .map_window(window.clone(), Point::from((6000, 6000)), false);
+    f.state().toggle_fill_window(&window);
+    assert!(
+        f.state().stage.is_fill(&window),
+        "precondition: the fill ran"
+    );
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    let fill_camera = f.state().camera();
+
+    park_view(&mut f, Point::from((0.0, 0.0)), 1.0);
+    center_window_and_settle(&mut f, &window);
+
+    assert!(
+        (f.state().zoom() - 0.5).abs() < 1e-9,
+        "the fill zoom is restored, not reset to 1.0: {}",
+        f.state().zoom()
+    );
+    let camera = f.state().camera();
+    assert!(
+        (camera.x - fill_camera.x).abs() < 1e-6 && (camera.y - fill_camera.y).abs() < 1e-6,
+        "and the camera with it: {camera:?} vs {fill_camera:?}"
+    );
+}
+
+/// The `MAX_ZOOM + 1e-9` slack in the zoom reject. `viewport_bounds` is the
+/// difference of two `screen_to_canvas` results, so from a camera that isn't a
+/// whole number the stored width comes out a fraction of an ulp shy of the
+/// usable width and the derived zoom lands just *past* `MAX_ZOOM`. Rejecting on
+/// that would make the restore fire or not depending on where the camera
+/// happened to be sitting when the fill ran.
+#[test]
+fn a_fill_camera_off_the_integer_grid_still_restores() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+
+    let a_surface = map_settled(&mut f, id, "a", (800, 600));
+    let _b_surface = map_settled(&mut f, id, "b", (400, 1056));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    let b = window_by_app_id(&mut f, "b").unwrap();
+
+    // Only the width feeds the `MAX_ZOOM` check, so the camera's y stays whole
+    // and the vertical framing exact.
+    let fill_camera = Point::from((1000.008, -988.0));
+    park_view(&mut f, fill_camera, 1.0);
+    // `fill_beside_left_neighbor`'s framing, shifted into this camera's canvas:
+    // "b" pinned to the left edge so the fill stops short of it and the
+    // centering fallback would land the camera ~200px away.
+    let origin = Point::from((1000, -988));
+    let gap = f.state().config.snap_gap as i32;
+    f.state()
+        .map_window(b, origin + Point::from((gap, gap)), false);
+    f.state()
+        .map_window(a.clone(), origin + Point::from((800, 300)), false);
+
+    f.state().toggle_fill_window(&a);
+    assert!(f.state().stage.is_fill(&a), "precondition: the fill ran");
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &a_surface);
+
+    let saved = f.state().stage.fill_saved(&a).unwrap();
+    let stored_w = saved.viewport_bounds.x_high - saved.viewport_bounds.x_low;
+    assert!(
+        1920.0 / stored_w > driftwm::canvas::MAX_ZOOM,
+        "precondition: the fractional camera pushed the derived zoom past \
+         MAX_ZOOM — stored width {stored_w}"
+    );
+
+    park_view(&mut f, Point::from((4000.0, -3000.0)), 1.0);
+    center_window_and_settle(&mut f, &a);
+
+    let camera = f.state().camera();
+    assert!(
+        (camera.x - fill_camera.x).abs() < 1e-6 && (camera.y - fill_camera.y).abs() < 1e-6,
+        "a sub-ulp overshoot past MAX_ZOOM still restores: {camera:?} vs {fill_camera:?}"
+    );
+    let zoom = f.state().zoom();
+    assert!((zoom - 1.0).abs() < 1e-9);
+
+    // Which is a different view from centering — otherwise the assertions above
+    // could not tell the restore from the fallback.
+    let center = center_screen_of(&mut f, &a, camera, zoom);
+    let vc = f.state().usable_center_screen();
+    assert!(
+        center.x - vc.x > 100.0,
+        "the restore is distinguishable from centering: {center:?} vs {vc:?}"
+    );
+}
+
+/// Regression guard: a window that isn't filled is still centered, zoom reset
+/// included.
+#[test]
+fn center_window_on_an_unfilled_window_still_centers_and_resets_zoom() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+
+    let _surface = map_settled(&mut f, id, "a", (800, 600));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    park_view(&mut f, Point::from((0.0, 0.0)), 1.0);
+    f.state()
+        .map_window(a.clone(), Point::from((3000, 2000)), false);
+
+    park_view(&mut f, Point::from((0.0, 0.0)), 0.6);
+    center_window_and_settle(&mut f, &a);
+
+    assert!(
+        (f.state().zoom() - 1.0).abs() < 1e-9,
+        "an ordinary center resets zoom to 1.0"
+    );
+    assert_centered(&mut f, &a);
+}
+
+/// Every interactive move funnels through `clear_fill`, which takes the stored
+/// view with it — the window no longer sits in the framing it describes.
+#[test]
+fn a_move_drops_the_stored_fill_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+    let (a, _a_surface, _fill_camera, _fill_zoom) = fill_beside_left_neighbor(&mut f, id);
+
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&a, serial);
+    f.state()
+        .execute_action(&Action::NudgeWindow(Direction::Right));
+    assert!(
+        !f.state().stage.is_fill(&a),
+        "precondition: the move cleared fill membership"
+    );
+
+    park_view(&mut f, Point::from((4000.0, -3000.0)), 1.0);
+    center_window_and_settle(&mut f, &a);
+
+    assert!((f.state().zoom() - 1.0).abs() < 1e-9);
+    assert_centered(&mut f, &a);
+}
+
+/// A panel taking an exclusive zone changes the usable area's aspect ratio, so
+/// the stored rect no longer inverts to a view that shows it — fall back to
+/// plain centering rather than jumping to a framing that no longer holds.
+#[test]
+fn a_usable_area_change_falls_back_to_centering() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+    let (a, _a_surface, fill_camera, _fill_zoom) = fill_beside_left_neighbor(&mut f, id);
+    let filled_loc = f.state().stage.position_of(&a).unwrap();
+
+    map_top_panel(&mut f, id, 100);
+    assert_eq!(
+        f.state().get_usable_area().size,
+        Size::from((1920, 980)),
+        "precondition: the panel shrank the usable area"
+    );
+    assert!(
+        f.state().stage.is_fill(&a),
+        "precondition: the window is still filled"
+    );
+    // Pins which guard does the rejecting: if the layer arrange ever nudged the
+    // window, `filled_at` would reject first and this would silently stop
+    // exercising the aspect check while still passing.
+    assert_eq!(
+        f.state().stage.position_of(&a),
+        Some(filled_loc),
+        "precondition: the arrange left the window where the fill did"
+    );
+
+    park_view(&mut f, Point::from((4000.0, -3000.0)), 1.0);
+    center_window_and_settle(&mut f, &a);
+
+    let camera = f.state().camera();
+    assert!(
+        (camera.x - fill_camera.x).abs() > 1.0 || (camera.y - fill_camera.y).abs() > 1.0,
+        "the stale framing must not be restored: {camera:?} vs {fill_camera:?}"
+    );
+    assert_centered(&mut f, &a);
+}
+
+/// A directional step centers a filled window like any other, deliberately:
+/// `center-nearest` is the one navigation that preserves the user's zoom, and a
+/// restore would make one filled window's zoom stick to every later step of the
+/// traversal.
+#[test]
+fn center_nearest_still_centers_a_filled_window() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+    let (a, _a_surface, fill_camera, _fill_zoom) = fill_beside_left_neighbor(&mut f, id);
+    let b = window_by_app_id(&mut f, "b").unwrap();
+
+    // Off the fill view at a zoom it never ran at, but with the left-edge
+    // neighbor still fully on screen — below that it stops qualifying as the
+    // directional search's anchor and the step starts from the viewport center.
+    park_view(&mut f, Point::from((-100.0, -50.0)), 0.8);
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&b, serial);
+    f.state()
+        .execute_action(&Action::CenterNearest(Direction::Right));
+    settle(&mut f);
+
+    let camera = f.state().camera();
+    assert!(
+        (camera.x - fill_camera.x).abs() > 1.0 || (camera.y - fill_camera.y).abs() > 1.0,
+        "the fill's framing is not what a directional step lands on: \
+         {camera:?} vs {fill_camera:?}"
+    );
+    assert!(
+        (f.state().zoom() - 0.8).abs() < 1e-9,
+        "and the zoom it started from is untouched: {}",
+        f.state().zoom()
+    );
+    assert_centered(&mut f, &a);
+}
+
+/// Fill membership legitimately survives a couple of paths that move the window
+/// (the fullscreen restore floor, the `pending_recenter` settle). The stored
+/// framing describes where the window used to be, so the restore rejects on
+/// position and centers instead — otherwise the camera lands somewhere the
+/// window no longer is.
+#[test]
+fn a_moved_but_still_filled_window_falls_back_to_centering() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+    let (a, _a_surface, fill_camera, _fill_zoom) = fill_beside_left_neighbor(&mut f, id);
+
+    // Relocate on the stage directly, as the fullscreen restore floor does —
+    // no `clear_fill` on that path.
+    let filled_loc = f.state().stage.position_of(&a).unwrap();
+    f.state()
+        .map_window(a.clone(), filled_loc + Point::from((300, 200)), false);
+    assert!(
+        f.state().stage.is_fill(&a),
+        "precondition: fill membership survived the move"
+    );
+
+    park_view(&mut f, Point::from((4000.0, -3000.0)), 1.0);
+    center_window_and_settle(&mut f, &a);
+
+    let camera = f.state().camera();
+    assert!(
+        (camera.x - fill_camera.x).abs() > 1.0 || (camera.y - fill_camera.y).abs() > 1.0,
+        "the framing the window has left must not be restored: {camera:?} vs {fill_camera:?}"
+    );
+    assert_centered(&mut f, &a);
+}
+
+/// The viewport rect is the usable area of the output it was measured against,
+/// and nothing else. Inverted through a second, identically-sized monitor it
+/// yields a camera for a viewport nobody looked through — and the aspect check
+/// passes by construction, so only the recorded output name can reject it.
+#[test]
+fn a_fill_recorded_on_another_output_does_not_restore() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+    let (a, _a_surface, fill_camera, _fill_zoom) = fill_beside_left_neighbor(&mut f, id);
+
+    // Same size on purpose: identical shape is exactly the case shape alone
+    // cannot tell apart.
+    let out2 = f.add_output(2, (1920, 1080));
+    assert!(
+        f.state().stage.is_fill(&a),
+        "precondition: the second monitor left fill membership alone"
+    );
+    f.state().focused_output = Some(out2);
+
+    park_view(&mut f, Point::from((4000.0, -3000.0)), 1.0);
+    center_window_and_settle(&mut f, &a);
+
+    let camera = f.state().camera();
+    assert!(
+        (camera.x - fill_camera.x).abs() > 1.0 || (camera.y - fill_camera.y).abs() > 1.0,
+        "another output's framing must not be replayed here: {camera:?} vs {fill_camera:?}"
+    );
+    assert_centered(&mut f, &a);
+}
+
+/// `focus-center` frames whatever is under the pointer, so it hits filled
+/// windows for the same reason `center-window` does — resetting to zoom 1.0
+/// would leave one filled at a lower zoom overflowing the screen.
+#[test]
+fn focus_center_restores_a_filled_windows_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+    let (a, _a_surface, fill_camera, fill_zoom) = fill_beside_left_neighbor(&mut f, id);
+
+    // Pan off the fill view but not off the window, so the pointer can still
+    // rest on it the way `focus-center` requires.
+    park_view(&mut f, fill_camera + Point::from((300.0, 200.0)), fill_zoom);
+    let loc = f.state().stage.position_of(&a).unwrap();
+    let size = a.geometry().size;
+    f.state().warp_pointer(Point::from((
+        loc.x as f64 + size.w as f64 / 2.0,
+        loc.y as f64 + size.h as f64 / 2.0,
+    )));
+    f.state().execute_action(&Action::FocusCenter);
+    settle(&mut f);
+
+    let camera = f.state().camera();
+    let zoom = f.state().zoom();
+    assert!(
+        (camera.x - fill_camera.x).abs() < 1e-6 && (camera.y - fill_camera.y).abs() < 1e-6,
+        "focus-center returned to the view the fill ran in: {camera:?} vs {fill_camera:?}"
+    );
+    assert!((zoom - fill_zoom).abs() < 1e-9, "and so did the zoom");
+    let center = center_screen_of(&mut f, &a, camera, zoom);
+    let vc = f.state().usable_center_screen();
+    assert!(
+        center.x - vc.x > 100.0,
+        "which is a different view from centering it: {center:?} vs {vc:?}"
+    );
+}
+
+/// A pick is by definition below `zoom_interact_min`, so it always re-frames
+/// from zoomed out — the case where snapping back to 1.0 leaves a window filled
+/// at a lower zoom hanging off the screen.
+#[test]
+fn a_pick_restores_a_filled_windows_view() {
+    let mut config = Config::default();
+    config.zoom_interact_min = 0.5;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+    let (a, _a_surface, fill_camera, fill_zoom) = fill_beside_left_neighbor(&mut f, id);
+    let filled_loc = f.state().stage.position_of(&a).unwrap();
+
+    park_view(&mut f, Point::from((4000.0, -3000.0)), 0.3);
+    let press = Point::from((filled_loc.x as f64 + 10.0, filled_loc.y as f64 + 10.0));
+    f.state()
+        .arm_pick(crate::state::PickTarget::Client(a.clone()), press, BTN_LEFT);
+    f.state().resolve_pick(BTN_LEFT);
+    settle(&mut f);
+
+    let camera = f.state().camera();
+    let zoom = f.state().zoom();
+    assert!(
+        (camera.x - fill_camera.x).abs() < 1e-6 && (camera.y - fill_camera.y).abs() < 1e-6,
+        "the pick returned to the view the fill ran in: {camera:?} vs {fill_camera:?}"
+    );
+    assert!(
+        (zoom - fill_zoom).abs() < 1e-9,
+        "carrying the viewport back above the threshold at the fill's own zoom"
+    );
+    let center = center_screen_of(&mut f, &a, camera, zoom);
+    let vc = f.state().usable_center_screen();
+    assert!(
+        center.x - vc.x > 100.0,
+        "which is a different view from centering it: {center:?} vs {vc:?}"
+    );
+}
+
+/// Nothing stops `fill-window` from running below `zoom_interact_min`, and that
+/// view is one no click can reach through. Restoring it would land the pick back
+/// in pick mode — the click still not reaching the client, and the next click on
+/// the same window replaying the same view — so the pick resets instead.
+#[test]
+fn a_pick_onto_a_sub_threshold_fill_still_leaves_pick_mode() {
+    let mut config = Config::default();
+    config.zoom_interact_min = 0.8;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+
+    let surface = map_settled(&mut f, id, "fill", (800, 600));
+    let window = window_by_app_id(&mut f, "fill").unwrap();
+
+    // Fill at zoom 0.5, under the threshold. Even numbers keep the
+    // screen→canvas conversion exact, so the stored view is exactly 0.5.
+    park_view(&mut f, Point::from((5000.0, 5000.0)), 0.5);
+    f.state()
+        .map_window(window.clone(), Point::from((6000, 6000)), false);
+    f.state().toggle_fill_window(&window);
+    assert!(
+        f.state().stage.is_fill(&window),
+        "precondition: the fill ran"
+    );
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+
+    park_view(&mut f, Point::from((4000.0, -3000.0)), 0.3);
+    let filled_loc = f.state().stage.position_of(&window).unwrap();
+    // Pins which guard does the rejecting: a lost fill or a `filled_at` mismatch
+    // would reject the restore before the threshold is ever consulted, and the
+    // assertion below would pass without exercising it.
+    assert_eq!(
+        f.state().stage.fill_saved(&window).map(|s| s.filled_at),
+        Some(filled_loc),
+        "precondition: the window is still filled, and where the fill put it"
+    );
+    let press = Point::from((filled_loc.x as f64 + 10.0, filled_loc.y as f64 + 10.0));
+    f.state().arm_pick(
+        crate::state::PickTarget::Client(window.clone()),
+        press,
+        BTN_LEFT,
+    );
+    f.state().resolve_pick(BTN_LEFT);
+    settle(&mut f);
+
+    assert!(
+        !f.state().pick_mode(),
+        "the pick carried the viewport back above zoom_interact_min: zoom {} vs {}",
+        f.state().zoom(),
+        f.state().config.zoom_interact_min
+    );
+    assert_centered(&mut f, &window);
+}
+
+/// The deferred touch center *is* `Action::CenterWindow` — the recognizer emits
+/// it only when the configured tap action is that, delayed past the double-tap
+/// window — so leaving it out would make one action behave two ways depending on
+/// the input device.
+#[test]
+fn the_deferred_touch_center_restores_a_filled_windows_view() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    f.skip_baseline_check();
+    let id = f.add_client();
+    let (a, _a_surface, fill_camera, fill_zoom) = fill_beside_left_neighbor(&mut f, id);
+
+    park_view(&mut f, Point::from((4000.0, -3000.0)), 1.0);
+    f.state()
+        .schedule_pending_center(a.clone(), std::time::Duration::from_millis(10));
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    f.pump(5);
+    settle(&mut f);
+
+    let camera = f.state().camera();
+    let zoom = f.state().zoom();
+    assert!(
+        (camera.x - fill_camera.x).abs() < 1e-6 && (camera.y - fill_camera.y).abs() < 1e-6,
+        "the tap returned to the view the fill ran in: {camera:?} vs {fill_camera:?}"
+    );
+    assert!((zoom - fill_zoom).abs() < 1e-9, "and so did the zoom");
+    let center = center_screen_of(&mut f, &a, camera, zoom);
+    let vc = f.state().usable_center_screen();
+    assert!(
+        center.x - vc.x > 100.0,
+        "which is a different view from centering it: {center:?} vs {vc:?}"
     );
 }
 

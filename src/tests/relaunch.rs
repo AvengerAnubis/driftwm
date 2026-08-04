@@ -18,7 +18,7 @@ use wayland_client::protocol::wl_surface::WlSurface as ClientSurface;
 
 use driftwm::window_ext::WindowExt;
 
-use crate::state::{ClusterResizeSnapshot, StageWindow, SuspendedId};
+use crate::state::{ClusterResizeSnapshot, NavZoom, StageWindow, SuspendedId};
 
 use super::client::ClientId;
 use super::real::TempDir;
@@ -3693,7 +3693,7 @@ fn the_focus_and_camera_primitives_refuse_a_hidden_adopt() {
     let topmost = |f: &mut Fixture| f.state().stage.windows().next_back().cloned();
     let on_top = StageWindow::Client(other_win.clone());
 
-    f.state().navigate_to_window(&hidden, true);
+    f.state().navigate_to_window(&hidden, NavZoom::Reset);
     assert!(
         f.state().camera_target().is_none(),
         "no camera flight to a window nothing is drawn for"
@@ -3726,7 +3726,7 @@ fn the_focus_and_camera_primitives_refuse_a_hidden_adopt() {
     f.state()
         .raise_and_focus(&other_win, SERIAL_COUNTER.next_serial());
     f.state().set_camera_target(None);
-    f.state().navigate_to_window(&hidden, true);
+    f.state().navigate_to_window(&hidden, NavZoom::Reset);
     assert!(f.state().camera_target().is_some());
     assert_eq!(topmost(&mut f), Some(StageWindow::Client(hidden.clone())));
     assert_eq!(f.state().focused_window(), Some(hidden.clone()));

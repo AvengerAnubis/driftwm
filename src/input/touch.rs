@@ -7,7 +7,7 @@ use crate::decorations::DecorationHit;
 use crate::grabs::{MoveGrab, ResizeGrab, TouchGestureGrab, edge_from_origin};
 use crate::input::DecoTarget;
 use crate::state::{
-    ClusterMember, DriftWm, FocusTarget, StageWindow, SuspendedWindow, output_state,
+    ClusterMember, DriftWm, FocusTarget, NavZoom, StageWindow, SuspendedWindow, output_state,
 };
 use driftwm::canvas::{CanvasPos, ScreenPos, canvas_to_screen, screen_to_canvas};
 use driftwm::window_ext::WindowExt;
@@ -199,6 +199,13 @@ impl DriftWm {
 
     /// Schedule a deferred single-tap center for `window` after `delay`. Any
     /// prior pending center is cancelled first.
+    ///
+    /// The tap binding resolves to `Action::CenterWindow` and is only deferred to
+    /// avoid flashing a center before a possible double-tap, so it restores a
+    /// filled window's view like the keybinding does. It is not that action's
+    /// whole body: `apply_tap` picks the target itself (window under the finger,
+    /// else the focused client), never reaching the action's `focused_element`
+    /// walk, its stand-in arm or its nearest-element fallback.
     pub(crate) fn schedule_pending_center(&mut self, window: Window, delay: Duration) {
         self.cancel_pending_center();
         let timer = Timer::from_duration(delay);
@@ -207,7 +214,7 @@ impl DriftWm {
             .insert_source(timer, move |_, _, data: &mut DriftWm| {
                 data.touch_state.pending_center_timer = None;
                 if window.alive() && data.is_canvas_window(&window) {
-                    data.navigate_to_window(&window, true);
+                    data.navigate_to_window(&window, NavZoom::RestoreFillElseReset);
                 }
                 TimeoutAction::Drop
             })

@@ -447,7 +447,7 @@ animate zoom to 1.0 when an off-screen window requests focus (false = keep curre
 
 Default: `0.0`
 
-zoom (1.0 = 100%) below which a window is too small to touch: left click centers it, drag anywhere moves it, pointer input is suppressed. 0 disables. Note the reachable minimum zoom is dynamic (fit * 0.5), so with few windows a low threshold can be unreachable and thus inert.
+zoom (1.0 = 100%) below which a window is too small to touch: left click centers it (a filled window returns to its fill view, if that view is itself above the threshold), drag anywhere moves it, pointer input is suppressed. 0 disables. Note the reachable minimum zoom is dynamic (fit * 0.5), so with few windows a low threshold can be unreachable and thus inert.
 
 ## `[snap]`
 
@@ -704,8 +704,8 @@ Actions:
 - `grow-window <dir>` — grow focused window by resize_step px, moving its `<dir>` edge outward; the opposite edge stays put
 - `shrink-window <dir>` — shrink focused window by resize_step px, pulling its `<dir>` edge inward; the opposite edge stays put
 - `pan-viewport <dir>` — pan camera by pan_step px
-- `center-window` — center viewport on focused window + reset zoom
-- `focus-center` — focus + center on the window under the pointer + reset zoom
+- `center-window` — center viewport on focused window + reset zoom; a window still filled returns to the camera + zoom it was filled in instead
+- `focus-center` — focus + center on the window under the pointer + reset zoom; same fill exception
 - `center-nearest <dir>` — navigate to nearest window in direction
 - `cycle-windows forward` — Alt-Tab style window cycling
 - `cycle-windows backward` — reverse cycle
