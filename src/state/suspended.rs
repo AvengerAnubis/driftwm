@@ -155,9 +155,10 @@ impl DriftWm {
     }
 
     /// Focus + raise a suspended window and, if it isn't already fully on
-    /// screen, pan the active output's camera to center it (no zoom change).
-    /// Backs `msg focus <id>` on a suspended window — the centering actions want
-    /// `center_on_suspended` instead, which always centers.
+    /// screen, pan the active output's camera to bring it to the
+    /// `focus_placement` point (no zoom change). Backs `msg focus <id>` on a
+    /// suspended window — the centering actions want `center_on_suspended`
+    /// instead, which pans unconditionally.
     pub fn reveal_suspended(&mut self, id: SuspendedId) {
         self.focus_and_raise_suspended(id);
         let Some(s) = self.find_suspended(id) else {
@@ -173,9 +174,10 @@ impl DriftWm {
         self.center_camera_on_suspended(&s, &output, zoom);
     }
 
-    /// Focus + raise a suspended window and center the active output's camera on
-    /// it unconditionally — the stand-in counterpart of `navigate_to_window`;
-    /// `reset_zoom` is that call's [`NavZoom::Reset`] vs [`NavZoom::Keep`].
+    /// Focus + raise a suspended window and pan the active output's camera to
+    /// bring it to the `focus_placement` point unconditionally — the stand-in
+    /// counterpart of `navigate_to_window`; `reset_zoom` is that call's
+    /// [`NavZoom::Reset`] vs [`NavZoom::Keep`].
     pub fn center_on_suspended(&mut self, id: SuspendedId, reset_zoom: bool) {
         self.focus_and_raise_suspended(id);
         let Some(s) = self.find_suspended(id) else {
@@ -195,9 +197,10 @@ impl DriftWm {
         target_zoom: f64,
     ) {
         let element = StageWindow::Suspended(s.clone());
-        let vc = self.usable_center_screen_on(output);
         let center = self.nav_center(&element);
-        self.set_camera_anchor(output, center, vc, target_zoom);
+        let frame = self.suspended_chrome().frame_size(s.size.get());
+        let align = self.align_point_on(output, frame, target_zoom);
+        self.set_camera_anchor(output, center, align, target_zoom);
     }
 
     /// Relaunch the app behind a suspended window: resolve its `Exec=`, mint a

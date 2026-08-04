@@ -588,15 +588,24 @@ impl DriftWm {
                 let Some(target_output) = self.output_in_direction(&from_output, dir) else {
                     return;
                 };
-                // Compute target output's usable area center in canvas coords
+                // Nothing navigates after this, so the window has to land where a
+                // navigation would have parked it: on the target output's
+                // `focus_placement` point, at the zoom that output is already at.
+                // Centering here instead would disagree with where a fresh spawn
+                // lands on that same monitor.
                 let (target_cam, target_zoom) = {
                     let os = crate::state::output_state(&target_output);
                     (os.camera, os.zoom)
                 };
-                let target_vc = crate::state::usable_center_for_output(&target_output);
-                let center_x = target_cam.x + target_vc.x / target_zoom;
-                let center_y = target_cam.y + target_vc.y / target_zoom;
                 let geo = element.geometry();
+                let chrome = self.element_chrome(&element);
+                let align =
+                    self.align_point_on(&target_output, chrome.frame_size(geo.size), target_zoom);
+                // A border is symmetric and cancels out of a center; only the bar
+                // shifts it.
+                let bar_f = chrome.bar as f64;
+                let center_x = target_cam.x + align.x / target_zoom;
+                let center_y = target_cam.y + bar_f / 2.0 + align.y / target_zoom;
                 let new_loc = Point::from((
                     (center_x - geo.size.w as f64 / 2.0) as i32,
                     (center_y - geo.size.h as f64 / 2.0) as i32,
@@ -623,10 +632,12 @@ impl DriftWm {
                     return;
                 };
 
-                // Center of the target output's usable area in canvas coords.
-                // Excludes layer-shell exclusive zones (panels) — same anchor
-                // send-to-output and window_placement = "center" use, so a
-                // panned cursor lands where new windows would.
+                // Center of the target output's usable area in canvas coords,
+                // excluding layer-shell exclusive zones (panels). Deliberately
+                // the true center, not the focus_placement point send-to-output
+                // and the new-window seed aim at: the cursor lands in the middle
+                // of what the monitor shows, not on whichever edge windows park
+                // against.
                 let (target_cam, target_zoom) = {
                     let os = crate::state::output_state(&target_output);
                     (os.camera, os.zoom)

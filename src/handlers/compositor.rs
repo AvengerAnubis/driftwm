@@ -639,18 +639,36 @@ impl CompositorHandler for DriftWm {
                                 None
                             };
                             let placed = bg_pos.or(cursor_pos).or(auto_pos).unwrap_or_else(|| {
-                                let output_geo = self
+                                let output = self
                                     .active_output()
-                                    .and_then(|o| self.space.output_geometry(&o));
-                                if output_geo.is_some() {
+                                    .filter(|o| self.space.output_geometry(o).is_some());
+                                if let Some(output) = output {
+                                    // Seed under the align point, not the usable
+                                    // center, so the spawn doesn't visibly slide
+                                    // to the edge. The align point takes the zoom
+                                    // the navigate lands at while the canvas
+                                    // conversion keeps the current one: that makes
+                                    // the two agree exactly when they already
+                                    // match (the common case, and the only one
+                                    // where no-pan is reachable — a zoom change
+                                    // animates the camera regardless), and leaves
+                                    // the `Center` default untouched at every zoom.
+                                    let target_zoom = self.navigation_target_zoom(
+                                        &output,
+                                        self.config.zoom_reset_on_new_window,
+                                    );
+                                    let align = self.align_point_on(
+                                        &output,
+                                        chrome.frame_size(geo.size),
+                                        target_zoom,
+                                    );
                                     // A border is symmetric and cancels out of a
                                     // center; only the bar shifts it.
                                     let bar_f = chrome.bar as f64;
-                                    let vc = self.usable_center_screen();
                                     let cam = self.camera();
                                     let z = self.zoom();
-                                    let cx = (cam.x + vc.x / z).round() as i32 - geo.size.w / 2;
-                                    let cy = (cam.y + bar_f / 2.0 + vc.y / z).round() as i32
+                                    let cx = (cam.x + align.x / z).round() as i32 - geo.size.w / 2;
+                                    let cy = (cam.y + bar_f / 2.0 + align.y / z).round() as i32
                                         - geo.size.h / 2;
                                     (cx, cy)
                                 } else {

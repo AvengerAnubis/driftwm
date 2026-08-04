@@ -1,8 +1,9 @@
 //! `send-to-output` relocates the focused window to the adjacent output with
 //! output-native semantics: a fullscreen window re-fullscreens on the target, a
 //! pinned window keeps its screen position (clamped) and rebinds its pin, and a
-//! normal window keeps the canvas-center placement. Outputs tile left-to-right
-//! by add order, so the second-added output sits to the right of the first.
+//! normal window lands on the target's `focus_placement` point. Outputs tile
+//! left-to-right by add order, so the second-added output sits to the right of
+//! the first.
 
 use smithay::utils::{Point, Size};
 
@@ -324,11 +325,15 @@ fn stand_in_moves_to_target_output() {
 
     let s = f.state().find_suspended(sid).unwrap();
     // out2's usable center in canvas coords: camera (5000,5000) + (640,360).
+    // It's the *visual frame* that centers, so the content sits half a title bar
+    // lower than the content-only center — the same convention every navigation
+    // and the new-window seed use.
+    let bar = f.state().config.decorations.title_bar_height;
     assert_eq!(
         f.state()
             .stage
             .position_of(&StageWindow::Suspended(s.clone())),
-        Some(Point::from((5440, 5210))),
+        Some(Point::from((5440, 5210 + bar / 2))),
         "the stand-in centers on the target output's usable area"
     );
     assert_eq!(

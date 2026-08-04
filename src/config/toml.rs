@@ -28,6 +28,9 @@ pub(super) struct ConfigFile {
     pub xwayland: XwaylandConfig,
     /// Placement mode for newly mapped windows: `"center"` (default) or `"cursor"`.
     pub window_placement: Option<String>,
+    /// Where a centering navigation parks the focused window in the viewport:
+    /// `"center"` (default), an edge, or a corner.
+    pub focus_placement: Option<String>,
     pub window_rules: Option<Vec<WindowRuleFile>>,
     pub outputs: Option<Vec<OutputRuleFile>>,
 }
@@ -393,6 +396,7 @@ pub(super) struct OutputRuleFile {
     pub position: Option<::toml::Value>,
     pub mode: Option<String>,
     pub hot_corners: Option<HotCornersFile>,
+    pub focus_placement: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]

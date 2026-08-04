@@ -3,6 +3,7 @@ use std::time::Instant;
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
+use driftwm::config::FocusPlacement;
 use driftwm::stage::StageElement;
 
 use super::{DriftWm, OutputState, StageWindow, output_logical_size, output_state};
@@ -166,6 +167,62 @@ impl DriftWm {
             usable.loc.x as f64 + usable.size.w as f64 / 2.0,
             usable.loc.y as f64 + usable.size.h as f64 / 2.0,
         ))
+    }
+
+    /// The `focus_placement` in effect on `output`: its `[[outputs]]` override
+    /// when it carries one, else the top-level key. An output with no entry at
+    /// all inherits the global rather than forcing center.
+    pub fn focus_placement_on(&self, output: &Output) -> FocusPlacement {
+        self.config
+            .output_config(&output.name())
+            .and_then(|c| c.focus_placement)
+            .unwrap_or(self.config.focus_placement)
+    }
+
+    /// Screen-space point on `output` where a centering navigation parks a
+    /// window's visual frame center, per [`Self::focus_placement_on`]. `frame` is
+    /// the frame's canvas-space size and `zoom` the zoom the navigation lands at,
+    /// so this is not a fixed screen point — it moves with both.
+    pub fn align_point_on(
+        &self,
+        output: &Output,
+        frame: Size<i32, Logical>,
+        zoom: f64,
+    ) -> Point<f64, Logical> {
+        let usable = self.usable_area_on(output);
+        let center = Point::from((
+            usable.loc.x as f64 + usable.size.w as f64 / 2.0,
+            usable.loc.y as f64 + usable.size.h as f64 / 2.0,
+        ));
+        let (pull_x, pull_y) = self.focus_placement_on(output).pull();
+        if (pull_x, pull_y) == (0, 0) {
+            return center;
+        }
+        // `snap_gap` is canvas px, matching the inset `fill_rect` applies, so a
+        // placed window and a filled one share an edge at every zoom.
+        let gap = self.config.snap_gap * zoom;
+        // `frame` carries both borders while `Chrome::frame_loc` subtracts one,
+        // so the border cancels: half the frame from its center lands exactly
+        // on the outer edge, not half a border off.
+        let placed = [
+            (pull_x, usable.loc.x, usable.size.w, frame.w, center.x),
+            (pull_y, usable.loc.y, usable.size.h, frame.h, center.y),
+        ]
+        .map(|(pull, low, span, frame_extent, axis_center)| {
+            let (low, span) = (low as f64, span as f64);
+            let extent = frame_extent as f64 * zoom;
+            // Edge-placing a frame that can't fit its two gutters only shoves one
+            // side off screen; centering at least shows the middle.
+            if extent + 2.0 * gap > span {
+                return axis_center;
+            }
+            match pull {
+                -1 => low + gap + extent / 2.0,
+                1 => low + span - gap - extent / 2.0,
+                _ => axis_center,
+            }
+        });
+        Point::from((placed[0], placed[1]))
     }
 
     /// Arm a camera + zoom animation that holds `anchor_canvas` at

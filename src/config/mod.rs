@@ -27,8 +27,8 @@ use defaults::{
 };
 use parse_helpers::{
     Warnings, clamp_warn, collect_warn, non_negative, parse_backend_config,
-    parse_decoration_config, parse_effects_config, parse_output_outline, parse_output_rule,
-    parse_window_rule, positive_or_default,
+    parse_decoration_config, parse_effects_config, parse_focus_placement, parse_output_outline,
+    parse_output_rule, parse_window_rule, positive_or_default,
 };
 use toml::{ConfigFile, expand_tilde};
 
@@ -256,6 +256,7 @@ pub struct Config {
     pub xwayland_enabled: bool,
     pub xwayland_path: String,
     pub window_placement: WindowPlacement,
+    pub focus_placement: FocusPlacement,
     pub env: HashMap<String, String>,
     /// Pre-merged env passed to spawned child processes via `Command::envs()`.
     /// Layers (later wins): toolkit defaults → XCURSOR_* → user `[env]`. Built
@@ -503,6 +504,17 @@ impl Config {
                 warn_and_collect!("config: unknown window_placement '{other}', using center");
                 WindowPlacement::Center
             }
+        };
+
+        let focus_placement = match raw.focus_placement.as_deref() {
+            None => FocusPlacement::Center,
+            Some(s) => match parse_focus_placement(s) {
+                Some(p) => p,
+                None => {
+                    warn_and_collect!("config: unknown focus_placement '{s}', using center");
+                    FocusPlacement::Center
+                }
+            },
         };
 
         let mut disable_keys = false;
@@ -1213,6 +1225,7 @@ impl Config {
             xwayland_enabled: raw.xwayland.enabled,
             xwayland_path: expand_tilde(&raw.xwayland.path),
             window_placement,
+            focus_placement,
             output_configs,
             bindings,
             tap_bindings,
@@ -1884,6 +1897,95 @@ mod tests {
     fn no_outputs_section_produces_empty_vec() {
         let config = Config::from_toml("").unwrap();
         assert!(config.output_configs.is_empty());
+    }
+
+    #[test]
+    fn focus_placement_absent_defaults_to_center() {
+        let config = Config::from_toml("").unwrap();
+        assert_eq!(config.focus_placement, FocusPlacement::Center);
+    }
+
+    #[test]
+    fn focus_placement_top_level_all_variants_parse() {
+        let cases = [
+            ("center", FocusPlacement::Center),
+            ("top", FocusPlacement::Top),
+            ("bottom", FocusPlacement::Bottom),
+            ("left", FocusPlacement::Left),
+            ("right", FocusPlacement::Right),
+            ("top-left", FocusPlacement::TopLeft),
+            ("top-right", FocusPlacement::TopRight),
+            ("bottom-left", FocusPlacement::BottomLeft),
+            ("bottom-right", FocusPlacement::BottomRight),
+        ];
+        for (input, expected) in cases {
+            let toml_str = format!(r#"focus_placement = "{input}""#);
+            let config = Config::from_toml(&toml_str).unwrap();
+            assert_eq!(config.focus_placement, expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn unknown_top_level_focus_placement_warns_and_falls_back_to_center() {
+        let toml_str = r#"focus_placement = "diagonal""#;
+        let (config, warnings) = Config::from_toml_collect(toml_str).unwrap();
+        assert_eq!(config.focus_placement, FocusPlacement::Center);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("focus_placement") && w.contains("diagonal")),
+            "got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn output_focus_placement_center_overrides_non_center_top_level() {
+        let toml_str = r#"
+            focus_placement = "top"
+
+            [[outputs]]
+            name = "eDP-1"
+            focus_placement = "center"
+        "#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert_eq!(config.focus_placement, FocusPlacement::Top);
+        assert_eq!(
+            config.output_configs[0].focus_placement,
+            Some(FocusPlacement::Center)
+        );
+    }
+
+    #[test]
+    fn output_focus_placement_absent_inherits_top_level() {
+        let toml_str = r#"
+            [[outputs]]
+            name = "eDP-1"
+        "#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert_eq!(config.output_configs[0].focus_placement, None);
+    }
+
+    #[test]
+    fn invalid_output_focus_placement_keeps_other_fields_and_warns() {
+        let toml_str = r#"
+            [[outputs]]
+            name = "eDP-1"
+            scale = 2.0
+            mode = "1920x1080"
+            focus_placement = "diagonal"
+        "#;
+        let (config, warnings) = Config::from_toml_collect(toml_str).unwrap();
+        assert_eq!(config.output_configs.len(), 1);
+        let oc = &config.output_configs[0];
+        assert_eq!(oc.scale, Some(2.0));
+        assert_eq!(oc.mode, OutputMode::Size(1920, 1080));
+        assert_eq!(oc.focus_placement, None);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("focus_placement") && w.contains("diagonal")),
+            "got: {warnings:?}"
+        );
     }
 
     #[test]

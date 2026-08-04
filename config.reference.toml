@@ -22,7 +22,9 @@
 # focus_follows_mouse = false
 
 # # Where new windows spawn when no window rule positions them:
-# #   "center"  — viewport center; camera animates to the new window.
+# #   "center"           — under the focus_placement point (the viewport center
+# #                        unless you changed it); camera animates to the new
+# #                        window.
 # #   "cursor"           — centered on the cursor (clamped to the active output's
 # #                        usable area); camera stays put unless zoomed out and
 # #                        zoom.reset_on_new_window is true.
@@ -36,6 +38,39 @@
 # #                        clicked empty canvas to clear focus, or when no valid
 # #                        placement was found.
 # window_placement = "center"
+
+# # Where a centering navigation parks the focused window in the viewport. One of
+# # "center" (default), "top", "bottom", "left", "right", "top-left",
+# # "top-right", "bottom-left", "bottom-right". Handy on a widescreen, where
+# # centering wastes both flanks, or a vertical panel, where it wastes both ends.
+# #
+# # An edge or corner puts the window's visual frame a snap.gap in from the
+# # usable area — the same inset fill-window stops at, so a placed window and a
+# # filled one share an edge. That gap is canvas px, so it shrinks as you zoom
+# # out: 12.0 renders as 4.8 screen px at zoom 0.4.
+# #
+# # A window too big to fit on an axis with its two gutters centers on that axis
+# # rather than hanging off screen; the other axis still places, so a tall window
+# # under "top-left" still goes left.
+# #
+# # It applies wherever the camera actually moves to a window — center-window,
+# # focus-center, center-nearest, Alt-Tab, click-to-navigate, activation, a newly
+# # mapped window, the window focus follows when one closes (see
+# # auto_navigate_on_close) and `driftwm msg focus`. Focusing a window that is
+# # already fully on screen doesn't pan at all, so this places windows on
+# # centering navigations rather than holding one against the edge
+# # continuously. Fullscreen, pinned and fit windows lock or
+# # fill the viewport and ignore it, as does a filled window returning to the
+# # view it was filled in.
+# #
+# # Because the spawn point follows it too (see window_placement above), this
+# # also shifts where a new window lands on the *canvas* — the position
+# # `msg move` reports and the session file stores. Under window_placement =
+# # "auto" that only applies to the fallback: a spawn that finds a slot next to
+# # the anchor still goes there.
+# #
+# # Overridable per monitor — see the Outputs section.
+# focus_placement = "center"
 
 # # Commands to run at startup (after WAYLAND_DISPLAY is set).
 # # Each entry is passed to sh -c, so full shell syntax works (pipes, &&, env vars).
@@ -188,17 +223,21 @@
                               # requests focus
                               # (false = keep current zoom, pan only)
 # interact_min = 0.0          # zoom (1.0 = 100%) below which a window is too
-                              # small to touch: left click centers it (a filled
-                              # window returns to its fill view, if that view is
-                              # itself above the threshold), drag anywhere moves
-                              # it, pointer input is suppressed.
+                              # small to touch: left click navigates to it per
+                              # focus_placement (a filled window returns to its
+                              # fill view instead, if that view is itself above
+                              # the threshold), drag anywhere moves it, pointer
+                              # input is suppressed.
                               # 0 disables. Note the reachable minimum zoom is
                               # dynamic (fit * 0.5), so with few windows a low
                               # threshold can be unreachable and thus inert.
 
 [snap]
 # enabled = true               # magnetic edge snapping during window drag
-# gap = 12.0                   # gap between snapped windows (canvas px)
+# gap = 12.0                   # gap left between windows and around the usable
+                               # area, in canvas px — snapping, fill-window,
+                               # fit-window, auto placement and focus_placement
+                               # all measure it
 # distance = 24.0              # activation threshold (screen px from edge)
 # break_force = 32.0           # screen px past snap to break free
 # corners = false              # also align corners (parallel edges line up: top-to-top, left-to-left)
@@ -329,9 +368,9 @@
 # #   grow-window <dir>       — grow focused window by resize_step px, moving its `<dir>` edge outward; the opposite edge stays put
 # #   shrink-window <dir>     — shrink focused window by resize_step px, pulling its `<dir>` edge inward; the opposite edge stays put
 # #   pan-viewport <dir>      — pan camera by pan_step px
-# #   center-window           — center viewport on focused window + reset zoom; a window still filled returns to the camera + zoom it was filled in instead
-# #   focus-center            — focus + center on the window under the pointer + reset zoom; same fill exception
-# #   center-nearest <dir>    — navigate to nearest window in direction
+# #   center-window           — bring the focused window to the focus_placement point + reset zoom; a window still filled returns to the camera + zoom it was filled in instead
+# #   focus-center            — focus the window under the pointer and bring it there too + reset zoom; same fill exception
+# #   center-nearest <dir>    — navigate to nearest window in direction; a window target lands on the focus_placement point, a navigation.anchors target still centers
 # #   cycle-windows forward   — Alt-Tab style window cycling
 # #   cycle-windows backward  — reverse cycle
 # #   home-toggle             — toggle between current position and origin
@@ -677,15 +716,23 @@
 # opacity = 0.5               # 0.0–1.0
 
 # ## Outputs
-# # Per-output configuration. Each [[outputs]] entry matches by connector name.
-# # Find connector names with wlr-randr or check driftwm logs at startup.
-# # Outputs without a matching entry default to scale 1.0.
-# # On the winit backend only `position` applies — mode, scale and transform
-# # belong to the host window.
+# # Per-output configuration — the monitor's hardware setup, plus the handful of
+# # behaviors that are worth varying between a widescreen and a portrait panel.
+# # Each [[outputs]] entry matches by connector name. Find connector names with
+# # wlr-randr or check driftwm logs at startup. Outputs without a matching entry
+# # default to scale 1.0.
+# # On the winit backend only `position` and `focus_placement` apply — mode,
+# # scale and transform belong to the host window.
 # #
 # # `name = "*"` is a wildcard entry: it applies to any connected output that
 # # has no exact-name entry (exact entries always win). A fixed `position` makes
 # # no sense on the wildcard — it's ignored (falls back to "auto").
+# #
+# # An exact-name entry replaces the wildcard entry wholesale — fields do not
+# # merge. So if `name = "*"` sets focus_placement = "right" and an exact
+# # `name = "DP-1"` entry sets only `scale`, DP-1 takes neither the wildcard's
+# # focus_placement nor its hot corners: every field it doesn't name falls back
+# # to the top-level key or the built-in default, never to the wildcard.
 # #
 # # `mode` accepts "preferred", "max", "WxH", or "WxH@Hz". "preferred" (the
 # # default, and the safe choice) uses the monitor's advertised preferred mode.
@@ -696,24 +743,27 @@
 # # (intended for CRTs or forcing non-standard modes; may be rejected by some panels).
 # #
 # # Supported fields:
-# #   name       — connector name, or "*" for the fallback entry (see above);
-# #                required.
-# #   scale      — fractional scale factor (default: 1.0).
-# #   transform  — normal, 90, 180, 270, flipped, flipped-90, flipped-180, or
-# #                flipped-270 (default: normal).
-# #   position   — "auto" (left-to-right placement) or [x, y] in layout coords.
-# #   mode       — "preferred", "max", "WxH", or "WxH@Hz" (see above; default:
-# #                preferred).
-# #   hot_corners — per-output screen-corner action bindings (see below).
+# #   name            — connector name, or "*" for the fallback entry (see
+# #                     above); required.
+# #   scale           — fractional scale factor (default: 1.0).
+# #   transform       — normal, 90, 180, 270, flipped, flipped-90, flipped-180,
+# #                     or flipped-270 (default: normal).
+# #   position        — "auto" (left-to-right placement) or [x, y] in layout
+# #                     coords.
+# #   mode            — "preferred", "max", "WxH", or "WxH@Hz" (see above;
+# #                     default: preferred).
+# #   focus_placement — where a centering navigation parks the focused window
+# #                     on THIS monitor; the same nine values as the top-level
+# #                     key (see General), which it overrides.
+# #   hot_corners     — per-output screen-corner action bindings (see below).
 # #
 # # Hot-corners bind any keyboard action to a screen corner. The action fires
 # # when the cursor enters that corner of THIS output (per-monitor setting),
 # # and re-arms when the cursor leaves. The whole `[[outputs]]` block can be
 # # omitted if you don't need any hot corners on a particular monitor.
 # # A `name = "*"` entry's hot corners apply to any output without an
-# # exact-name `[[outputs]]` entry; an exact entry replaces the wildcard
-# # wholesale (fields don't merge), so an exact entry with no `hot_corners`
-# # table gets none.
+# # exact-name `[[outputs]]` entry; per the wholesale-replacement rule above, an
+# # exact entry with no `hot_corners` table gets none.
 # #
 # # Corner actions: any action from the [keybindings] Actions list. Pass
 # # "none" to leave a corner unbound.
@@ -730,6 +780,7 @@
 # # name = "HDMI-A-1"
 # # scale = 1.0
 # # mode = "1920x1080@60"
+# # focus_placement = "right"   # park the active window against this ultrawide's right edge
 # #
 # # [outputs.hot_corners]
 # # threshold = 4         # corner zone size in logical px (default: 4)

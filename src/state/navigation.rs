@@ -38,15 +38,15 @@ const ACTIVATION_ONSCREEN_THRESHOLD: f64 = f64::EPSILON;
 /// never inherits a centering policy it didn't choose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NavZoom {
-    /// Center the window, animating zoom to 1.0 — an intentional navigation to
-    /// a specific window.
+    /// Bring the window to the `focus_placement` point, animating zoom to 1.0 —
+    /// an intentional navigation to a specific window.
     Reset,
-    /// Center the window, leaving the current zoom alone. Directional and
-    /// gesture-driven navigation rides this, where a zoom jump would break the
-    /// direction correspondence.
+    /// Bring the window to the `focus_placement` point, leaving the current zoom
+    /// alone. Directional and gesture-driven navigation rides this, where a zoom
+    /// jump would break the direction correspondence.
     Keep,
     /// A window still in `fill` state returns to the camera *and* zoom its fill
-    /// was computed in, rather than being centered — see `fill_restore_view`.
+    /// was computed in, rather than being placed — see `fill_restore_view`.
     /// When no stored view applies, behaves as [`NavZoom::Reset`].
     RestoreFillElseReset,
 }
@@ -77,15 +77,16 @@ impl NavZoom {
 }
 
 impl DriftWm {
-    /// Navigate the active output's viewport to center on a window: raise,
-    /// focus, animate camera.
+    /// Navigate the active output's viewport to a window: raise, focus, animate
+    /// the camera until the window sits on the `focus_placement` point (the
+    /// usable-area center by default).
     pub fn navigate_to_window(&mut self, window: &Window, zoom: NavZoom) {
         if let Some(output) = self.active_output() {
             self.navigate_to_window_on(window, &output, zoom);
         }
     }
 
-    /// Navigate the active output's viewport to center on a stage element — the
+    /// Navigate the active output's viewport to a stage element — the
     /// element-generic form of `navigate_to_window` / `center_on_suspended`.
     pub fn navigate_to_element(&mut self, element: &StageWindow, zoom: NavZoom) {
         match element {
@@ -148,43 +149,53 @@ impl DriftWm {
             .flatten();
 
         let vc = self.usable_center_screen_on(output);
-        let (target_zoom, anchor_canvas) = if let Some((camera, fill_zoom)) = restored {
-            // The fill rect is only meaningful at the zoom it was computed for,
-            // so `target_zoom` must be `fill_zoom`, not the outgoing zoom.
-            //
-            // Sending the viewport center back through the restored view — the
-            // same `screen_to_canvas` `fill_restore_view` inverted — makes
-            // `set_camera_anchor` derive exactly the saved camera.
-            //
-            // No pending-view sweep here, unlike `fit_window`, which drops
-            // staged and deferred views precisely because it parks its own pan:
-            // `fill_window` never stages a `PendingView`, and `apply_pending_view`
-            // refuses to land once a target is armed or the camera has drifted
-            // from what it staged.
-            (
-                fill_zoom,
-                screen_to_canvas(ScreenPos(vc), camera, fill_zoom).0,
-            )
-        } else {
-            let target_zoom = self.navigation_target_zoom(output, zoom.resets_zoom());
+        // The anchor's screen point is per-branch: a restore replays a past
+        // framing, so `focus_placement` must not re-aim it (a window filled into
+        // the right half would be pushed off screen).
+        let (target_zoom, anchor_canvas, anchor_screen) =
+            if let Some((camera, fill_zoom)) = restored {
+                // The fill rect is only meaningful at the zoom it was computed for,
+                // so `target_zoom` must be `fill_zoom`, not the outgoing zoom.
+                //
+                // Sending the viewport center back through the restored view — the
+                // same `screen_to_canvas` `fill_restore_view` inverted — makes
+                // `set_camera_anchor` derive exactly the saved camera.
+                //
+                // No pending-view sweep here, unlike `fit_window`, which drops
+                // staged and deferred views precisely because it parks its own pan:
+                // `fill_window` never stages a `PendingView`, and `apply_pending_view`
+                // refuses to land once a target is armed or the camera has drifted
+                // from what it staged.
+                (
+                    fill_zoom,
+                    screen_to_canvas(ScreenPos(vc), camera, fill_zoom).0,
+                    vc,
+                )
+            } else {
+                let target_zoom = self.navigation_target_zoom(output, zoom.resets_zoom());
 
-            // An element off the stage has no canvas point to aim at, and the origin
-            // is not a stand-in for one — the adopt's compound remove + replace
-            // leaves a window there for the length of two statements.
-            let Some(window_loc) = self.stage.position_of(window) else {
-                return;
+                // An element off the stage has no canvas point to aim at, and the origin
+                // is not a stand-in for one — the adopt's compound remove + replace
+                // leaves a window there for the length of two statements.
+                let Some(window_loc) = self.stage.position_of(window) else {
+                    return;
+                };
+                // Configured, not committed: the align point is size-derived, so a
+                // navigation riding an unacked configure would otherwise land
+                // mis-aligned by half the size delta.
+                let window_size = super::configured_window_size(window);
+                let window_center = self.window_visual_center(window).unwrap_or_else(|| {
+                    Point::from((
+                        window_loc.x as f64 + window_size.w as f64 / 2.0,
+                        window_loc.y as f64 + window_size.h as f64 / 2.0,
+                    ))
+                });
+                let frame = self.element_chrome(window).frame_size(window_size);
+                let align = self.align_point_on(output, frame, target_zoom);
+                (target_zoom, window_center, align)
             };
-            let window_size = window.geometry().size;
-            let window_center = self.window_visual_center(window).unwrap_or_else(|| {
-                Point::from((
-                    window_loc.x as f64 + window_size.w as f64 / 2.0,
-                    window_loc.y as f64 + window_size.h as f64 / 2.0,
-                ))
-            });
-            (target_zoom, window_center)
-        };
 
-        self.set_camera_anchor(output, anchor_canvas, vc, target_zoom);
+        self.set_camera_anchor(output, anchor_canvas, anchor_screen, target_zoom);
     }
 
     /// The zoom a navigation animates to on `output`: 1.0 when `reset_zoom`

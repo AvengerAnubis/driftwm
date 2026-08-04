@@ -605,6 +605,44 @@ pub enum TitleAlign {
     Center,
 }
 
+/// Where a centering navigation parks the focused window in the viewport.
+///
+/// Deliberately not [`Direction`]'s vocabulary: `[outputs.hot_corners]` already
+/// spells corners `top_left`/`top_right`/…, and every `Direction` in a binding
+/// is *motion* (`nudge-window up` moves a window) where this is a resting
+/// position.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FocusPlacement {
+    #[default]
+    Center,
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl FocusPlacement {
+    /// Per-axis pull in y-down screen space: -1 toward the low edge, 0 centered,
+    /// 1 toward the high edge.
+    pub fn pull(self) -> (i8, i8) {
+        match self {
+            Self::Center => (0, 0),
+            Self::Top => (0, -1),
+            Self::Bottom => (0, 1),
+            Self::Left => (-1, 0),
+            Self::Right => (1, 0),
+            Self::TopLeft => (-1, -1),
+            Self::TopRight => (1, -1),
+            Self::BottomLeft => (-1, 1),
+            Self::BottomRight => (1, 1),
+        }
+    }
+}
+
 // ── Window-rule pattern matching ────────────────────────────────────
 
 /// A match pattern for a window rule field.
@@ -1139,6 +1177,9 @@ pub struct OutputConfig {
     pub position: OutputPosition,
     pub mode: OutputMode,
     pub hot_corners: HotCorners,
+    /// `None` inherits the top-level `focus_placement`; `Some(Center)` means
+    /// this monitor centers despite a non-center global.
+    pub focus_placement: Option<FocusPlacement>,
 }
 
 /// Which corner of the screen to bind a hot-corner action to.
@@ -1312,6 +1353,29 @@ mod tests {
             iso_level5_shift: true,
             ..Default::default()
         }));
+    }
+
+    #[test]
+    fn focus_placement_default_is_center() {
+        assert_eq!(FocusPlacement::default(), FocusPlacement::Center);
+    }
+
+    #[test]
+    fn focus_placement_pull_all_variants() {
+        let cases = [
+            (FocusPlacement::Center, (0, 0)),
+            (FocusPlacement::Top, (0, -1)),
+            (FocusPlacement::Bottom, (0, 1)),
+            (FocusPlacement::Left, (-1, 0)),
+            (FocusPlacement::Right, (1, 0)),
+            (FocusPlacement::TopLeft, (-1, -1)),
+            (FocusPlacement::TopRight, (1, -1)),
+            (FocusPlacement::BottomLeft, (-1, 1)),
+            (FocusPlacement::BottomRight, (1, 1)),
+        ];
+        for (placement, expected) in cases {
+            assert_eq!(placement.pull(), expected, "placement: {placement:?}");
+        }
     }
 
     #[test]

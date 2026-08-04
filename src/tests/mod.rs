@@ -27,6 +27,7 @@ mod config_reload;
 mod configure_sequences;
 mod cycle_windows;
 mod ext_workspace;
+mod focus_placement;
 mod focus_timing;
 mod frame_space;
 mod fullscreen_handoff;
