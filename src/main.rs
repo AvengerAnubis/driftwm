@@ -378,7 +378,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Drives the off-screen frame-callback heartbeat when no rendering is
-    // happening (#141); see send_frame_callbacks_fallback.
+    // happening (#141); see send_frame_callbacks_fallback. Must stay strictly
+    // longer than FRAME_CALLBACK_THROTTLE (995ms), or smithay's `elapsed >
+    // throttle` gate never fires.
     event_loop.handle().insert_source(
         smithay::reexports::calloop::timer::Timer::from_duration(std::time::Duration::from_secs(1)),
         |_, _, data: &mut DriftWm| {
