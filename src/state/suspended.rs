@@ -195,21 +195,9 @@ impl DriftWm {
         target_zoom: f64,
     ) {
         let element = StageWindow::Suspended(s.clone());
-        let loc = self.stage.position_of(&element).unwrap_or_default();
-        let size = s.size.get();
-        let bar = self.window_ssd_bar(&element);
         let vc = self.usable_center_screen_on(output);
-        let target = driftwm::canvas::camera_to_center_window(loc, size, vc, target_zoom, bar);
         let center = self.nav_center(&element);
-        let mut os = crate::state::output_state(output);
-        os.overview_return = None;
-        os.momentum.stop();
-        os.zoom_animation_anchor = Some(crate::state::ZoomAnimationAnchor {
-            canvas: center,
-            screen: vc,
-        });
-        os.camera_target = Some(target);
-        os.zoom_target = Some(target_zoom);
+        self.set_camera_anchor(output, center, vc, target_zoom);
     }
 
     /// Relaunch the app behind a suspended window: resolve its `Exec=`, mint a

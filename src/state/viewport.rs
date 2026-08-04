@@ -168,6 +168,38 @@ impl DriftWm {
         ))
     }
 
+    /// Arm a camera + zoom animation that holds `anchor_canvas` at
+    /// `anchor_screen` on screen.
+    ///
+    /// `camera_target` is *derived* from the anchor pair rather than passed in.
+    /// The zoom tick nulls `camera_target` every frame and lands the camera at
+    /// `anchor.canvas - anchor.screen / zoom` (`viewport_animation.rs`), so the
+    /// anchor is what actually arrives — a separately computed target that
+    /// disagreed would be discarded without failing anything. Deriving it states
+    /// the destination once.
+    pub(crate) fn set_camera_anchor(
+        &mut self,
+        output: &Output,
+        anchor_canvas: Point<f64, Logical>,
+        anchor_screen: Point<f64, Logical>,
+        zoom: f64,
+    ) {
+        let mut os = crate::state::output_state(output);
+        // Disarms a pending zoom-to-fit return, same as a pan: the fit view is
+        // a camera position, not a mode that navigation exits.
+        os.overview_return = None;
+        os.momentum.stop();
+        os.camera_target = Some(Point::from((
+            anchor_canvas.x - anchor_screen.x / zoom,
+            anchor_canvas.y - anchor_screen.y / zoom,
+        )));
+        os.zoom_animation_anchor = Some(crate::state::ZoomAnimationAnchor {
+            canvas: anchor_canvas,
+            screen: anchor_screen,
+        });
+        os.zoom_target = Some(zoom);
+    }
+
     pub fn viewport_center_canvas(&self) -> Point<f64, Logical> {
         let vc = self.usable_center_screen();
         let camera = self.camera();

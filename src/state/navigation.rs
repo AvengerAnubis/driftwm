@@ -16,10 +16,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use super::{
-    DriftWm, PendingClickNavigate, PendingPick, PickTarget, StageWindow, ZoomAnimationAnchor,
-    output_state,
-};
+use super::{DriftWm, PendingClickNavigate, PendingPick, PickTarget, StageWindow, output_state};
 
 /// Max pointer travel (screen px) between press and release for a click to
 /// still count as a click rather than a drag. Beyond it, no auto-navigate — a
@@ -151,19 +148,13 @@ impl DriftWm {
             .flatten();
 
         let vc = self.usable_center_screen_on(output);
-        let (target, target_zoom, anchor_canvas) = if let Some((camera, fill_zoom)) = restored {
+        let (target_zoom, anchor_canvas) = if let Some((camera, fill_zoom)) = restored {
             // The fill rect is only meaningful at the zoom it was computed for,
             // so `target_zoom` must be `fill_zoom`, not the outgoing zoom.
             //
-            // The anchor, not `camera_target`, is what actually lands the
-            // camera: the zoom tick nulls `camera_target` every frame and on
-            // completion writes `anchor.canvas - anchor.screen / zoom`
-            // (`viewport_animation.rs`). Sending the viewport center back
-            // through the restored view — the same `screen_to_canvas`
-            // `fill_restore_view` inverted — makes the two agree by
-            // construction, so setting both is one target stated twice rather
-            // than two rivals; don't "simplify" either away, neither would fail
-            // loudly.
+            // Sending the viewport center back through the restored view — the
+            // same `screen_to_canvas` `fill_restore_view` inverted — makes
+            // `set_camera_anchor` derive exactly the saved camera.
             //
             // No pending-view sweep here, unlike `fit_window`, which drops
             // staged and deferred views precisely because it parks its own pan:
@@ -171,7 +162,6 @@ impl DriftWm {
             // refuses to land once a target is armed or the camera has drifted
             // from what it staged.
             (
-                camera,
                 fill_zoom,
                 screen_to_canvas(ScreenPos(vc), camera, fill_zoom).0,
             )
@@ -185,35 +175,16 @@ impl DriftWm {
                 return;
             };
             let window_size = window.geometry().size;
-            let bar = self.window_ssd_bar(window);
-            let target = driftwm::canvas::camera_to_center_window(
-                window_loc,
-                window_size,
-                vc,
-                target_zoom,
-                bar,
-            );
-
             let window_center = self.window_visual_center(window).unwrap_or_else(|| {
                 Point::from((
                     window_loc.x as f64 + window_size.w as f64 / 2.0,
                     window_loc.y as f64 + window_size.h as f64 / 2.0,
                 ))
             });
-            (target, target_zoom, window_center)
+            (target_zoom, window_center)
         };
 
-        let mut os = output_state(output);
-        // Disarms a pending zoom-to-fit return, same as a pan: the fit view is
-        // a camera position, not a mode that navigation exits.
-        os.overview_return = None;
-        os.momentum.stop();
-        os.zoom_animation_anchor = Some(ZoomAnimationAnchor {
-            canvas: anchor_canvas,
-            screen: vc,
-        });
-        os.camera_target = Some(target);
-        os.zoom_target = Some(target_zoom);
+        self.set_camera_anchor(output, anchor_canvas, vc, target_zoom);
     }
 
     /// The zoom a navigation animates to on `output`: 1.0 when `reset_zoom`
