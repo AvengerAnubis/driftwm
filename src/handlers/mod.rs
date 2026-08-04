@@ -1130,9 +1130,25 @@ driftwm::delegate_output_management!(DriftWm);
 use crate::state::SessionLock;
 use smithay::delegate_session_lock;
 use smithay::wayland::session_lock::{
-    LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker,
+    LockSurface, LockSurfaceData, SessionLockHandler, SessionLockManagerState, SessionLocker,
 };
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Tracks the lock role on a `wl_surface` for the pre-commit hook in
+/// `handlers::compositor`, which has to recognise an orphaned lock surface from
+/// state shape alone — `ext_session_lock_surface_v1` has no destroy seam a
+/// handler could hook.
+pub(crate) struct LockRoleMarker {
+    /// driftwm answered this role's creation with a configure. Rules out the
+    /// two roles `new_surface` returns early on: those stay live and unconfigured
+    /// forever, and must keep getting smithay's real error on a live proxy.
+    pub configured: AtomicBool,
+    /// The hook has already found this role orphaned. A latch, because the
+    /// repair writes the very `last_acked` whose absence identified the orphan
+    /// — without it the second orphaned commit reads as a live role again.
+    pub orphaned: AtomicBool,
+}
 
 impl SessionLockHandler for DriftWm {
     fn lock_state(&mut self) -> &mut SessionLockManagerState {
@@ -1400,6 +1416,29 @@ impl SessionLockHandler for DriftWm {
     }
 
     fn new_surface(&mut self, surface: LockSurface, wl_output: WlOutput) {
+        // Before the early returns below: a `wl_surface` whose previous lock role
+        // was neutralised must not carry that verdict, nor the synthetic
+        // `last_acked` the hook wrote, into the role being taken now — the
+        // synthetic would tell the new role's first commit it had already acked,
+        // masking a genuine violation. `None` is what a role starts on either
+        // way — first-ever or after smithay's `destroyed` reset. Above the early
+        // returns because a role driftwm declines is exactly a role that must
+        // keep getting smithay's real errors.
+        smithay::wayland::compositor::with_states(surface.wl_surface(), |states| {
+            states
+                .data_map
+                .insert_if_missing_threadsafe(|| LockRoleMarker {
+                    configured: AtomicBool::new(false),
+                    orphaned: AtomicBool::new(false),
+                });
+            let marker = states.data_map.get::<LockRoleMarker>().unwrap();
+            marker.configured.store(false, Ordering::Relaxed);
+            marker.orphaned.store(false, Ordering::Relaxed);
+            if let Some(attributes) = states.data_map.get::<LockSurfaceData>() {
+                attributes.lock().unwrap().last_acked = None;
+            }
+        });
+
         // Only the client that holds the lock may put a surface on it. smithay's
         // own guard is `locked_outputs`, which compares `wl_output` *resources*
         // — per-client objects — so it never fires across clients: without this,
@@ -1423,6 +1462,14 @@ impl SessionLockHandler for DriftWm {
             state.size = Some((output_size.w as u32, output_size.h as u32).into());
         });
         surface.send_configure();
+        smithay::wayland::compositor::with_states(surface.wl_surface(), |states| {
+            states
+                .data_map
+                .get::<LockRoleMarker>()
+                .unwrap()
+                .configured
+                .store(true, Ordering::Relaxed);
+        });
         self.lock_surfaces.insert(output, surface);
     }
 }

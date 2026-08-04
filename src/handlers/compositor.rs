@@ -1,13 +1,16 @@
 use std::cell::RefCell;
+use std::sync::atomic::Ordering;
 
 use crate::decorations::DecorationKey;
 use crate::grabs::{ResizeState, has_left, has_top};
+use crate::handlers::LockRoleMarker;
 use crate::handlers::layer_shell::LayerDestroyedMarker;
 use crate::state::{ClientState, DriftWm, FocusTarget, PendingRecenter, StageWindow};
 use driftwm::window_ext::WindowExt;
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::desktop::layer_map_for_output;
-use smithay::utils::{Logical, Point, Rectangle};
+use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER};
+use smithay::wayland::session_lock::{LockSurfaceConfigure, LockSurfaceData, LockSurfaceState};
 use smithay::wayland::shell::wlr_layer::{Anchor, LayerSurfaceCachedState, LayerSurfaceData};
 use smithay::{
     delegate_compositor, delegate_shm,
@@ -127,6 +130,8 @@ impl CompositorHandler for DriftWm {
                         }
                     }
                 }
+
+                neutralise_orphaned_lock_commit(states);
             });
         });
 
@@ -886,6 +891,102 @@ fn ensure_initial_configure(
             });
         if !initial_configure_sent {
             toplevel.send_configure();
+        }
+    }
+}
+
+/// Defuse a commit that lands on a destroyed `ext_session_lock_surface_v1`.
+///
+/// smithay registers its lock validation hook at `get_lock_surface` and never
+/// removes it, while the role's `destroyed` resets `last_acked` and leaves the
+/// dead proxy in the attributes — so every later commit on that `wl_surface`
+/// fails the hook's first, unconditional check and posts on an object that is
+/// already gone, which kills the client without ever reaching the wire. A
+/// toolkit that resets a surface's role (`attach(nullptr); commit()`) walks
+/// into this on an ordinary unlock.
+///
+/// There is no destroy seam to mark, so the orphan is recognised from state
+/// shape: for a role driftwm configured, `pending_configures` empty *and*
+/// `last_acked` unset is reachable only through `destroyed` — live-and-unacked
+/// still holds the configure we sent, live-and-acked holds the ack.
+///
+/// One residual: a client that calls `get_lock_surface` twice on one
+/// `wl_surface` gets two live roles over shared attributes (`give_role` accepts
+/// a repeat of the same role, and smithay's duplicate-output guard compares
+/// per-client `wl_output` resources, so a second binding dodges it). Destroying
+/// the *stale* proxy then runs the reset on attributes the *current* role is
+/// using, and we latch this surface as orphaned while its role is live. The
+/// role's proxy is unreachable from here — `LockSurfaceAttributes::surface` is
+/// `pub(crate)` and `LockSurface` keeps its handle private — so liveness can't
+/// be tested to rule it out. Once the latch trips, every later commit on that
+/// surface — live role or not — also has its pending buffer taken below, so a
+/// live lock surface freezes at its last frame (the buffer itself is still
+/// released, so the client doesn't stall on it). It fails safe: the session
+/// stays locked, nothing leaks, no client is killed. Getting there needs a
+/// client-side protocol violation smithay declines to reject.
+fn neutralise_orphaned_lock_commit(states: &smithay::wayland::compositor::SurfaceData) {
+    let Some(marker) = states.data_map.get::<LockRoleMarker>() else {
+        return;
+    };
+    if !marker.configured.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(attributes) = states.data_map.get::<LockSurfaceData>() else {
+        return;
+    };
+
+    let mut attributes = attributes.lock().unwrap();
+    let orphaned = marker.orphaned.load(Ordering::Relaxed)
+        || (attributes.pending_configures.is_empty() && attributes.last_acked.is_none());
+    if !orphaned {
+        return;
+    }
+    marker.orphaned.store(true, Ordering::Relaxed);
+
+    // Answer the fatal first check. The serial is arbitrary — a configure that
+    // was never sent can never be acked, since `ack_configure` only matches
+    // against `pending_configures`.
+    if attributes.last_acked.is_none() {
+        attributes.last_acked = Some(LockSurfaceConfigure {
+            state: LockSurfaceState::default(),
+            serial: SERIAL_COUNTER.next_serial(),
+        });
+    }
+    drop(attributes);
+
+    // Both buffer assignments can be fatal past that check: `Removed` posts
+    // `NullBuffer` outright — unlike layer shell, which reads it as an unmap —
+    // and a `NewBuffer` with readable dimensions fails the dimensions check
+    // against the sizeless synthetic configure above. `None` is the only
+    // assignment the hook lets through unconditionally, so take the buffer
+    // whatever it is.
+    //
+    // Chained, not bound to a variable: holding this guard while we lock the
+    // renderer state below would take the two locks in the reverse order
+    // on_commit_buffer_handler uses.
+    let discarded = states
+        .cached_state
+        .get::<SurfaceAttributes>()
+        .pending()
+        .buffer
+        .take();
+    if let Some(BufferAssignment::NewBuffer(buffer)) = discarded {
+        // Nothing else releases what we discard here: release-on-replace lives
+        // in SurfaceAttributes' merge_into, which runs on the cache merge, not
+        // on a hook write.
+        //
+        // Skip the buffer the renderer is still holding, but for a different
+        // reason than the layer branch above: `None` never drives
+        // RendererSurfaceState::reset, so nothing releases it now. It goes back
+        // on the `wl_surface`'s destruction or on the next role's first mapped
+        // frame, both of which drop the renderer's last reference. Releasing it
+        // here instead would double-release a buffer the client re-attached.
+        let held_by_renderer = states
+            .data_map
+            .get::<RendererSurfaceStateUserData>()
+            .is_some_and(|data| data.lock().unwrap().buffer().is_some_and(|b| b == buffer));
+        if !held_by_renderer {
+            buffer.release();
         }
     }
 }
