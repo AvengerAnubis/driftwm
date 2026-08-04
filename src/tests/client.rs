@@ -16,6 +16,7 @@ use smithay::reexports::calloop::EventLoop;
 
 use calloop_wayland_source::WaylandSource;
 use wayland_client::backend::Backend;
+use wayland_client::backend::protocol::ProtocolError;
 use wayland_client::globals::Global;
 use wayland_client::protocol::wl_buffer::{self, WlBuffer};
 use wayland_client::protocol::wl_callback::{self, WlCallback};
@@ -426,6 +427,41 @@ impl Client {
         result.unwrap();
     }
 
+    /// Push queued requests to the compositor without reading anything back —
+    /// for a scenario whose next server-side step is expected to kill this
+    /// client, where `Fixture::roundtrip` would dispatch it and panic.
+    pub fn flush(&self) {
+        self.connection.flush().unwrap();
+    }
+
+    /// The protocol error the compositor posted on this client, if any — reads
+    /// it without panicking, unlike [`Self::dispatch`] (and so
+    /// `Fixture::roundtrip`).
+    ///
+    /// Only catches errors posted on a *live* object: one posted on a destroyed
+    /// proxy is never serialized, and reads as a bare socket close (`Io(_)`,
+    /// which maps to `None` here) instead.
+    ///
+    /// Leaves this client's `WaylandSource` errored but still registered in the
+    /// fixture's outer loop, so any later `Fixture::roundtrip`/`dispatch` — even
+    /// for a different client — panics on it. Call `Fixture::kill_client`
+    /// first.
+    pub fn protocol_error(&mut self) -> Option<ProtocolError> {
+        let result = self.event_loop.dispatch(Duration::ZERO, &mut self.state);
+        let error = self.connection.protocol_error();
+        // A dispatch failure that isn't a caught protocol error would
+        // otherwise vanish behind this `None`, leaving a caller's panic with
+        // nothing but its `why` string and no clue what dispatch actually saw.
+        if error.is_none()
+            && let Err(err) = result
+        {
+            eprintln!(
+                "Client::protocol_error: dispatch failed with no protocol error latched: {err}"
+            );
+        }
+        error
+    }
+
     pub fn send_sync(&self) -> Arc<SyncData> {
         let data = Arc::new(SyncData::default());
         self.display.sync(&self.qh, data.clone());
@@ -548,8 +584,40 @@ impl Client {
         self.state.destroy_lock_object();
     }
 
+    /// Unlock the session over the wire
+    /// (`ext_session_lock_v1.unlock_and_destroy`), the way a lock screen ends a
+    /// lock it confirmed. Prefer this to calling `DriftWm::unlock` directly:
+    /// only the request clears smithay's own `locked_outputs`.
+    ///
+    /// Like [`Self::destroy_lock_object`], the destroyed proxy stays `last()` in
+    /// `session_locks`, so any lock accessor called on this client afterwards
+    /// silently uses the dead object. The lock surfaces made on it are still
+    /// reachable through [`Self::lock_surface`].
+    pub fn unlock_session(&mut self) {
+        self.state.unlock_session();
+    }
+
+    /// Take a fresh `ext_session_lock_surface_v1` on a `wl_surface` that already
+    /// carried one, on this client's most recent [`Lock`] — a lock screen
+    /// re-locking on the surfaces it kept. The tracked entry is swapped over to
+    /// the new role and moved onto that lock, so both [`Self::lock_surface`] and
+    /// [`Self::last_lock_surface`] return it.
+    pub fn retake_lock_surface(
+        &mut self,
+        surface: &WlSurface,
+        output: &WlOutput,
+    ) -> &mut LockSurface {
+        self.state.retake_lock_surface(surface, output)
+    }
+
     pub fn lock_surface(&mut self, surface: &WlSurface) -> &mut LockSurface {
         self.state.lock_surface(surface)
+    }
+
+    /// The lock surface most recently created on this client's most recent
+    /// [`Lock`] — the handle back to one a helper made on the caller's behalf.
+    pub fn last_lock_surface(&mut self) -> &mut LockSurface {
+        self.state.last_lock_surface()
     }
 }
 
@@ -812,6 +880,46 @@ impl State {
         lock.surfaces.last_mut().unwrap()
     }
 
+    /// The role is swapped in place and the entry moved onto the current lock,
+    /// as [`Self::recreate_layer`] does: a second entry for one `wl_surface`
+    /// would shadow the first in [`Self::lock_surface`], handing later helpers
+    /// the dead role proxy, and a second `wp_viewport` on it is a protocol
+    /// error. Destroying the old proxy here is inert when the caller already
+    /// did it — which the orphan scenarios must, since they commit in between.
+    ///
+    /// Must be called on a freshly created lock, after an unlock — not a
+    /// second surface on the *same* still-locked lock. `get_lock_surface`'s
+    /// `DuplicateOutput` guard (`session_lock/lock.rs:59-62`) checks
+    /// `locked_outputs`, which still holds this client's cached `wl_output`
+    /// binding from the first surface, and [`Client::output`] hands back that
+    /// same binding — so a same-lock retake trips the guard and kills the
+    /// client.
+    pub fn retake_lock_surface(
+        &mut self,
+        surface: &WlSurface,
+        output: &WlOutput,
+    ) -> &mut LockSurface {
+        let lock = self.session_locks.last().unwrap().lock.clone();
+        let (index, position) = self
+            .session_locks
+            .iter()
+            .enumerate()
+            .find_map(|(index, l)| {
+                let position = l.surfaces.iter().position(|s| s.surface == *surface)?;
+                Some((index, position))
+            })
+            .unwrap();
+        let mut entry = self.session_locks[index].surfaces.remove(position);
+
+        entry.lock_surface.destroy();
+        entry.lock_surface = lock.get_lock_surface(surface, output, &self.qh, ());
+        entry.configures_received.clear();
+
+        let lock = self.session_locks.last_mut().unwrap();
+        lock.surfaces.push(entry);
+        lock.surfaces.last_mut().unwrap()
+    }
+
     pub fn lock_surface(&mut self, surface: &WlSurface) -> &mut LockSurface {
         self.session_locks
             .iter_mut()
@@ -820,8 +928,21 @@ impl State {
             .unwrap()
     }
 
+    pub fn last_lock_surface(&mut self) -> &mut LockSurface {
+        self.session_locks
+            .last_mut()
+            .unwrap()
+            .surfaces
+            .last_mut()
+            .unwrap()
+    }
+
     pub fn destroy_lock_object(&mut self) {
         self.session_locks.last().unwrap().lock.destroy();
+    }
+
+    pub fn unlock_session(&mut self) {
+        self.session_locks.last().unwrap().lock.unlock_and_destroy();
     }
 }
 
@@ -1070,6 +1191,16 @@ impl LockSurface {
     pub fn attach_new_buffer(&self) {
         let buffer = self.spbm.create_u32_rgba_buffer(0, 0, 0, 0, &self.qh, ());
         self.surface.attach(Some(&buffer), 0, 0);
+    }
+
+    pub fn attach_null(&self) {
+        self.surface.attach(None, 0, 0);
+    }
+
+    /// Destroy the `ext_session_lock_surface_v1` role, leaving the `wl_surface`
+    /// alive — what a toolkit resetting the surface's role does.
+    pub fn destroy_role(&self) {
+        self.lock_surface.destroy();
     }
 
     /// Scale the 1×1 buffer to `(w, h)` via `wp_viewport`, matching a

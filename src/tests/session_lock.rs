@@ -21,6 +21,7 @@ use smithay::utils::Point;
 
 use smithay::wayland::input_method::InputMethodKeyboardGrab;
 use smithay::wayland::session_lock::SessionLockHandler;
+use wayland_protocols::ext::session_lock::v1::client::ext_session_lock_surface_v1;
 
 use crate::state::session_lock::PENDING_LOCK_DEADLINE;
 use crate::state::{SessionLock, StageWindow};
@@ -1707,5 +1708,417 @@ fn confirmed_dark_output_is_excluded_but_a_pending_dpms_off_output_is_still_awai
         f.state().is_awaiting_lock_frame(&dimming),
         "an output whose DPMS-off is still pending (not yet drained) must \
          stay in the wait set — the panel may still be lit"
+    );
+}
+
+/// Lock, confirm, and unlock over the wire (`unlock_and_destroy`) — stopping
+/// short of the lock surfaces' own destroy, which a real lock screen sends an
+/// event-loop turn later, so commits can land in between.
+fn confirm_and_unlock(f: &mut Fixture, id: ClientId, output: &Output) {
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    confirm_lock(f, id, output);
+
+    f.client(id).unlock_session();
+    f.roundtrip(id);
+    assert!(
+        !f.state().session_lock.is_locked(),
+        "precondition: the session is unlocked before the role is torn down"
+    );
+}
+
+/// The full teardown a real lock screen runs: [`confirm_and_unlock`], then the
+/// role's own destroy with its `wl_surface` kept — what leaves smithay's
+/// never-removed pre-commit hook pointing at a dead proxy. The stale role stays
+/// the client's `last_lock_surface`, ready to be committed on.
+fn orphan_the_role(f: &mut Fixture, id: ClientId, output: &Output) {
+    confirm_and_unlock(f, id, output);
+
+    f.client(id).last_lock_surface().destroy_role();
+    f.double_roundtrip(id);
+}
+
+/// Push the commit the compositor is expected to reject and assert on the error
+/// it posts back. Both the interface and the code, since the codes collide
+/// across the interfaces in play — `commit_before_first_ack` and
+/// `invalid_destroy` are both 0.
+///
+/// The error kills `id`, and its `WaylandSource` stays errored in the fixture's
+/// outer loop, where the next `Fixture::roundtrip` — for any client at all —
+/// would fire its callback and panic. So the client is unregistered here.
+fn expect_lock_surface_error(
+    f: &mut Fixture,
+    id: ClientId,
+    expected: ext_session_lock_surface_v1::Error,
+    why: &str,
+) {
+    f.client(id).flush();
+    f.pump(10);
+
+    let error = f
+        .client(id)
+        .protocol_error()
+        .unwrap_or_else(|| panic!("{why}"));
+    assert_eq!(
+        error.object_interface, "ext_session_lock_surface_v1",
+        "{why}"
+    );
+    assert_eq!(error.code, expected as u32, "{why}, got: {}", error.message);
+
+    f.kill_client(id);
+}
+
+/// The teardown a real lock screen runs: `unlock_and_destroy`, then — an
+/// event-loop turn later — the lock surfaces' own destroy, then a commit on the
+/// `wl_surface` it kept. smithay adds a pre-commit hook when the
+/// `ext_session_lock_surface_v1` role is created and never removes it, and the
+/// role's `destroyed` resets `last_acked` to `None` while leaving the dead
+/// proxy in the attributes. So the hook's first and unconditional check fails
+/// on every later commit and posts `commit_before_first_ack` on an object that
+/// is already gone.
+///
+/// Without the fix, this doesn't fail on a caught protocol error —
+/// `post_error` on a destroyed proxy is never serialized (its id is already
+/// gone from the wire's object map), so the client only sees the socket EOF.
+/// That surfaces as `Client::dispatch`'s `result.unwrap()`
+/// (`src/tests/client.rs`) panicking with a bare `Broken pipe (os error 32)` —
+/// not a `protocol_error()`, which maps `Io(_)` to `None` and so never sees it
+/// either way. Don't assert on it.
+#[test]
+fn an_orphaned_lock_commit_does_not_kill_the_client() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    orphan_the_role(&mut f, id, &output);
+
+    f.client(id).last_lock_surface().commit();
+    f.double_roundtrip(id);
+
+    // The client survives: map an unrelated plain toplevel afterwards and
+    // confirm it actually reaches the compositor, not just that the call
+    // returned.
+    map_window(&mut f, id, "still-alive", (400, 300));
+    assert!(
+        window_by_app_id(&mut f, "still-alive").is_some(),
+        "the client must survive the orphaned lock-surface commit"
+    );
+}
+
+/// The same teardown with the null-buffer attach Qt ≥ 6.9 emits when it resets
+/// a surface's role (`attach(nullptr); commit();`). This one has a second way
+/// to die even once the ack check is answered: an orphaned commit carrying
+/// `BufferAssignment::Removed` trips the hook's `null_buffer` error instead.
+/// See [`an_orphaned_lock_commit_does_not_kill_the_client`] for why the failure
+/// arrives as a `Broken pipe` panic rather than a protocol error.
+#[test]
+fn an_orphaned_lock_commit_with_a_null_buffer_does_not_kill_the_client() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    orphan_the_role(&mut f, id, &output);
+
+    let lock_surface = f.client(id).last_lock_surface();
+    lock_surface.attach_null();
+    lock_surface.commit();
+    f.double_roundtrip(id);
+
+    map_window(&mut f, id, "still-alive", (400, 300));
+    assert!(
+        window_by_app_id(&mut f, "still-alive").is_some(),
+        "the client must survive the orphaned lock-surface commit that detaches \
+         its buffer"
+    );
+}
+
+/// The same teardown again, this time with a buffer still attached — the frame
+/// a client had queued when it decided to drop the role. The buffer is what
+/// carries the commit past the hook's `None` arm into the dimensions check, so
+/// it exercises a different tail of the hook than the two above.
+/// See [`an_orphaned_lock_commit_does_not_kill_the_client`] for why the failure
+/// arrives as a `Broken pipe` panic rather than a protocol error.
+#[test]
+fn an_orphaned_lock_commit_with_a_buffer_does_not_kill_the_client() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    orphan_the_role(&mut f, id, &output);
+
+    let lock_surface = f.client(id).last_lock_surface();
+    lock_surface.set_size(1920, 1080);
+    lock_surface.attach_new_buffer();
+    lock_surface.commit();
+    f.double_roundtrip(id);
+
+    map_window(&mut f, id, "still-alive", (400, 300));
+    assert!(
+        window_by_app_id(&mut f, "still-alive").is_some(),
+        "the client must survive the orphaned lock-surface commit that carries a \
+         buffer"
+    );
+}
+
+/// Answering the first orphaned commit erases the shape that identified it: a
+/// written `last_acked` reads exactly like a live, acked role. Nothing stops a
+/// client committing on the surface again — Qt's role reset detaches the buffer
+/// and commits, and a repaint loop may keep going — and a second commit read as
+/// live walks into the null-buffer check instead. So the verdict has to be
+/// remembered, not re-derived.
+/// See [`an_orphaned_lock_commit_does_not_kill_the_client`] for why the failure
+/// arrives as a `Broken pipe` panic rather than a protocol error.
+#[test]
+fn a_second_orphaned_lock_commit_does_not_kill_the_client_either() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    orphan_the_role(&mut f, id, &output);
+
+    f.client(id).last_lock_surface().commit();
+    f.double_roundtrip(id);
+
+    let lock_surface = f.client(id).last_lock_surface();
+    lock_surface.attach_null();
+    lock_surface.commit();
+    f.double_roundtrip(id);
+
+    map_window(&mut f, id, "still-alive", (400, 300));
+    assert!(
+        window_by_app_id(&mut f, "still-alive").is_some(),
+        "the client must survive a second orphaned commit, whose state no longer \
+         looks orphaned"
+    );
+}
+
+/// The unlock is incidental: what kills the client is the destroyed role plus
+/// the hook smithay left behind, and a lock screen that retires one prompt for
+/// another does that mid-lock, while driftwm still owns the entry. This is why
+/// the orphan has to be recognised from the state a destroyed role leaves —
+/// no disown site of driftwm's own observes this one at all.
+/// See [`an_orphaned_lock_commit_does_not_kill_the_client`] for why the failure
+/// arrives as a `Broken pipe` panic rather than a protocol error.
+#[test]
+fn an_orphaned_lock_commit_mid_lock_does_not_kill_the_client() {
+    let mut f = Fixture::new();
+    // The session is still locked at teardown, so `lock_surfaces` never drains.
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    confirm_lock(&mut f, id, &output);
+    assert!(
+        f.state().session_lock.is_locked(),
+        "precondition: the session stays locked across the role's destroy"
+    );
+
+    f.client(id).last_lock_surface().destroy_role();
+    f.double_roundtrip(id);
+
+    f.client(id).last_lock_surface().commit();
+    f.double_roundtrip(id);
+
+    // The client survives: the roundtrips inside `map_window` are the probe —
+    // they panic on the socket a killed client leaves behind. Where the toplevel
+    // ends up is a separate policy question, and asserting it here would fail
+    // this test for an unrelated reason.
+    map_window(&mut f, id, "still-alive", (400, 300));
+}
+
+/// The suppression has to stay narrow. A role driftwm configured and the client
+/// has not acked is *live* — committing on it is a real protocol violation, and
+/// smithay must be left to punish it. Only the shape a destroyed role leaves
+/// behind may be neutralised, and this one still holds the configure it was
+/// sent.
+///
+/// Unlike the orphan scenarios, the error here lands on a live proxy, so it is
+/// serialized and decodable — but it still kills the client, and every dispatch
+/// of it from then on panics. Hence [`expect_lock_surface_error`] instead of a
+/// roundtrip.
+#[test]
+fn a_live_lock_role_still_errors_on_a_commit_before_its_first_ack() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    let wl_output = f.client(id).output(&output.name());
+    f.client(id).create_lock_surface(&wl_output);
+    f.roundtrip(id);
+
+    f.client(id).last_lock_surface().commit();
+    expect_lock_surface_error(
+        &mut f,
+        id,
+        ext_session_lock_surface_v1::Error::CommitBeforeFirstAck,
+        "a live lock role must still be told it committed before acking its \
+         first configure",
+    );
+}
+
+/// The shape a destroyed role leaves — no pending configure and no ack — is
+/// also the shape of a role driftwm declined to configure: `new_surface`
+/// returns early for a client that does not hold the lock, and smithay's own
+/// initial configure is a no-op with no server-pending state behind it. That
+/// role is live, so its commits must still reach the client as real errors —
+/// which is the whole job of the gate's "driftwm configured this" half.
+#[test]
+fn a_lock_role_driftwm_declined_to_configure_still_errors_on_a_commit() {
+    let mut f = Fixture::new();
+    // The incumbent's lock is still up at teardown, so `lock_surfaces` never
+    // drains.
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    let incumbent = f.add_client();
+    let refused = f.add_client();
+
+    f.client(incumbent).lock_session();
+    f.roundtrip(incumbent);
+    confirm_lock(&mut f, incumbent, &output);
+
+    f.client(refused).lock_session();
+    f.roundtrip(refused);
+    let wl_output = f.client(refused).output(&output.name());
+    f.client(refused).create_lock_surface(&wl_output);
+    f.roundtrip(refused);
+    assert!(
+        f.client(refused)
+            .last_lock_surface()
+            .configures_received
+            .is_empty(),
+        "precondition: driftwm declined to configure the refused client's role"
+    );
+
+    f.client(refused).last_lock_surface().commit();
+    expect_lock_surface_error(
+        &mut f,
+        refused,
+        ext_session_lock_surface_v1::Error::CommitBeforeFirstAck,
+        "an unconfigured but live role must still get smithay's real error",
+    );
+}
+
+/// Between `unlock_and_destroy` and the role's own destroy the role is
+/// genuinely alive, and commits on it must keep being validated — a marker set
+/// at unlock would have swallowed them. Shown with a buffer that contradicts
+/// the acked configure, which only a live, unsuppressed role rejects.
+#[test]
+fn a_lock_commit_between_unlock_and_role_destroy_is_still_validated() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    confirm_and_unlock(&mut f, id, &output);
+
+    let lock_surface = f.client(id).last_lock_surface();
+    lock_surface.set_size(640, 480);
+    lock_surface.attach_new_buffer();
+    lock_surface.commit();
+    expect_lock_surface_error(
+        &mut f,
+        id,
+        ext_session_lock_surface_v1::Error::DimensionsMismatch,
+        "the still-live role must reject a buffer that contradicts its acked size",
+    );
+}
+
+/// The repair's own poison: answering the orphaned commit means writing a
+/// `last_acked` the client never acked, and `get_lock_surface` only repoints
+/// the role's proxy — it resets nothing. Left in place, that synthetic would
+/// tell the *next* role's first commit it had already acked, masking a genuine
+/// violation and feeding the state that decides whether to configure at all.
+#[test]
+fn a_lock_role_retaken_after_an_orphaned_commit_is_configured_and_validated_afresh() {
+    let mut f = Fixture::new();
+    let output = f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    orphan_the_role(&mut f, id, &output);
+
+    // The commit that writes the synthetic ack.
+    f.client(id).last_lock_surface().commit();
+    f.double_roundtrip(id);
+
+    let surface = f.client(id).last_lock_surface().surface.clone();
+    f.client(id).lock_session();
+    f.roundtrip(id);
+    let wl_output = f.client(id).output(&output.name());
+    f.client(id).retake_lock_surface(&surface, &wl_output);
+    f.double_roundtrip(id);
+
+    assert_eq!(
+        f.client(id)
+            .last_lock_surface()
+            .configures_received
+            .last()
+            .map(|(_, size)| *size),
+        Some((1920, 1080)),
+        "the retaken role must get an initial configure in its own right"
+    );
+
+    f.client(id).last_lock_surface().commit();
+    expect_lock_surface_error(
+        &mut f,
+        id,
+        ext_session_lock_surface_v1::Error::CommitBeforeFirstAck,
+        "the synthetic ack that answered the orphaned commit must not survive \
+         into the next role, where it would mask a genuine commit-before-ack",
+    );
+}
+
+/// "driftwm configured this" is a verdict on the *role*, and a `wl_surface`
+/// outlives its roles — so the two can disagree. A lock screen that loses the
+/// session between one lock and the next brings its old surfaces to a lock
+/// driftwm refuses: the surface's previous role was configured, the role it
+/// takes now is declined and stays live and unconfigured forever, and its
+/// commits are real violations the client has to be told about. That is why the
+/// verdict is cleared as the new role is taken, above the early return that
+/// declines it — a reset placed after the return would never run on exactly the
+/// role that needs it.
+#[test]
+fn a_declined_lock_role_inherits_no_configured_verdict_from_the_role_before_it() {
+    let mut f = Fixture::new();
+    // The incumbent's lock is still up at teardown, so `lock_surfaces` never
+    // drains.
+    f.skip_baseline_check();
+    let output = f.add_output(1, (1920, 1080));
+    let refused = f.add_client();
+    let incumbent = f.add_client();
+
+    // The refused client's first lock is its own, and its role is configured.
+    orphan_the_role(&mut f, refused, &output);
+    let surface = f.client(refused).last_lock_surface().surface.clone();
+
+    // Someone else takes the session while it is down.
+    f.client(incumbent).lock_session();
+    f.roundtrip(incumbent);
+    confirm_lock(&mut f, incumbent, &output);
+
+    // Refused, but it puts a lock surface on its refused lock anyway — on the
+    // same `wl_surface` as before.
+    f.client(refused).lock_session();
+    f.roundtrip(refused);
+    let wl_output = f.client(refused).output(&output.name());
+    f.client(refused).retake_lock_surface(&surface, &wl_output);
+    f.double_roundtrip(refused);
+    assert!(
+        f.client(refused)
+            .last_lock_surface()
+            .configures_received
+            .is_empty(),
+        "precondition: driftwm declined to configure the refused client's role"
+    );
+
+    f.client(refused).last_lock_surface().commit();
+    expect_lock_surface_error(
+        &mut f,
+        refused,
+        ext_session_lock_surface_v1::Error::CommitBeforeFirstAck,
+        "a declined role must get smithay's real error even on a `wl_surface` \
+         whose previous role driftwm did configure",
     );
 }
