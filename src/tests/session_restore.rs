@@ -1201,11 +1201,11 @@ fn steady_state_flush_writes_live_windows() {
     let saved = session::read(&path);
     assert_eq!(saved.entries.len(), 2);
     assert_eq!(saved.entries[0].app_id, "alpha");
-    assert_eq!(saved.entries[0].position, [700, -662]);
-    assert_eq!(saved.entries[0].size, [400, 275]);
+    assert_eq!(saved.entries[0].position, [700, -650]);
+    assert_eq!(saved.entries[0].size, [400, 300]);
     assert_eq!(saved.entries[1].app_id, "beta");
-    assert_eq!(saved.entries[1].position, [-200, -212]);
-    assert_eq!(saved.entries[1].size, [200, 175]);
+    assert_eq!(saved.entries[1].position, [-200, -200]);
+    assert_eq!(saved.entries[1].size, [200, 200]);
     assert!(saved.entries.iter().all(|e| e.origin == Origin::Quit));
 
     // The flush is a true steady-state write: the file loads back into a fresh
@@ -1253,7 +1253,54 @@ fn closing_a_live_window_drops_it_from_the_steady_state_file() {
     let saved = session::read(&path);
     assert_eq!(saved.entries.len(), 1);
     assert_eq!(saved.entries[0].app_id, "alpha");
-    assert_eq!(saved.entries[0].position, [700, -662]);
+    assert_eq!(saved.entries[0].position, [700, -650]);
+}
+
+/// The IPC `resize` verb (and the grow/shrink steps behind it) settles on the
+/// client's answering commit, which arms the session-store debounce like a grab
+/// resize's settle does — a crash after `msg resize` restores the new size, not
+/// the pre-resize one.
+#[test]
+fn ipc_resize_of_a_live_window_persists_at_steady_state() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let mut f = Fixture::with_config(config_restore(true));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &cache, &["alpha"]);
+    f.state().session_store.path = Some(path.clone());
+
+    let id = f.add_client();
+    let surface = map_at(&mut f, id, "alpha", (400, 300), (500, 500));
+    f.state().session_store_write_now();
+    assert_eq!(session::read(&path).entries[0].size, [400, 300]);
+
+    assert_eq!(
+        crate::ipc::dispatch(
+            crate::ipc::protocol::Request::Resize {
+                window: None,
+                to: Some((600, 500)),
+            },
+            f.state(),
+        ),
+        Ok(crate::ipc::protocol::Response::Size {
+            width: 600,
+            height: 500,
+        })
+    );
+    // Deliver the configure the request queued before adopting it, or the
+    // client takes the stale map-time configure (an empty size) for the new one.
+    f.roundtrip(id);
+    super::adopt_last_configure(&mut f, id, &surface);
+    f.dispatch();
+
+    // The answering commit armed the debounce; flush straight through and the
+    // new size is what a crash would restore.
+    f.state().session_store_write_now();
+    let saved = session::read(&path);
+    assert_eq!(saved.entries.len(), 1);
+    assert_eq!(saved.entries[0].size, [600, 500]);
 }
 
 /// The `csd` flag round-trips through session.json: a CSD window suspends to a
