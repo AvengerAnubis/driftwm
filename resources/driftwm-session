@@ -3,7 +3,9 @@
 # Re-execs through a login shell to pick up /etc/profile, ~/.profile and PAM
 # env vars, then runs driftwm. When systemd user manager is available it starts
 # driftwm as a user service for cgroup isolation and journald logging; otherwise
-# it falls back to running driftwm directly (e.g. on runit-based distros).
+# it falls back to running driftwm directly (e.g. on runit-based distros), whose
+# stderr would otherwise vanish on a TTY — that path logs to
+# `$XDG_STATE_HOME/driftwm/session.log` instead.
 
 if [ -z "$_DRIFTWM_WRAPPER" ]; then
     export _DRIFTWM_WRAPPER=1
@@ -40,7 +42,21 @@ if [ "$has_systemd" -eq 1 ]; then
 
     systemctl --user unset-environment WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP
 else
-    # No systemd user manager — run compositor directly (runit, OpenRC, etc.).
-    # Environment is already set up via the login-shell re-exec above.
-    exec driftwm --backend udev
+    # No systemd user manager — start dbus session bus so pipewire's
+    # D-Bus API and portals work (runit, OpenRC, etc.). Services like
+    # pipewire/wireplumber are started by the compositor's autostart
+    # config, inheriting the session bus from dbus-run-session.
+    #
+    # A bare exec from a TTY leaves stderr unreadable, so capture the
+    # compositor's trace log to a file next to session.json. The previous
+    # session's log is rotated to `session.log.1` first — protocol-error
+    # disconnects (the `disconnected:` line in `state/mod.rs`) survive a
+    # restart there.
+    LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/driftwm"
+    LOG_FILE="$LOG_DIR/session.log"
+    mkdir -p "$LOG_DIR"
+    if [ -f "$LOG_FILE" ]; then
+        mv -f "$LOG_FILE" "$LOG_DIR/session.log.1"
+    fi
+    exec dbus-run-session driftwm --backend udev >>"$LOG_FILE" 2>&1
 fi
