@@ -196,6 +196,18 @@ Default: `true`
 
 ignore trackpad input shortly after a key press (palm rejection)
 
+### `enable`
+
+Default: `true`
+
+false turns the trackpad off entirely. A set-trackpad press overrides this until the compositor restarts, or until a saved config changes the resulting on/off state.
+
+### `disable_on_external_mouse`
+
+Default: `false`
+
+turn the trackpad off while an external mouse is connected
+
 ## `[input.mouse]`
 
 ### `accel_speed`
@@ -705,7 +717,7 @@ Actions:
 - `toggle-pin-to-screen` — pin/unpin the focused window to the screen (ignores pan/zoom, floats above)
 - `reload-config` — hot-reload config file
 - `toggle-cursor-pan` — toggle cursor edge-pan (see [navigation.edge_pan])
-- `set-trackpad on|off|toggle` — set the built-in trackpad enabled/disabled, or toggle (libinput send-events mode)
+- `set-trackpad on|off|toggle` — enable/disable every trackpad for the rest of the session (see [input.trackpad] enable)
 - `quit` — exit the compositor
 - `send-to-output <dir>` — move focused window to adjacent output
 - `send-cursor-to-output <dir>` — move the cursor to adjacent output
@@ -801,8 +813,8 @@ Directions: up, down, left, right, up-left, up-right, down-left, down-right
 **Example: set-trackpad (unbound by default)**
 
 ```toml
-"mod+f10" = "set-trackpad toggle"   # toggle the built-in trackpad on/off (e.g. with an external mouse attached)
-"mod+shift+f10" = "set-trackpad off"   # force the trackpad off (e.g. for per-window rules)
+"mod+f10" = "set-trackpad toggle"   # flip the trackpad between on and off
+"mod+shift+f10" = "set-trackpad off"   # turn it off whatever the current state
 ```
 
 ## `[mouse]`

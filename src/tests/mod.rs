@@ -50,6 +50,7 @@ mod soak;
 mod stand_in_parity;
 mod suspend_flows;
 mod suspended;
+mod trackpad_send_events;
 mod window_animation;
 mod window_opening;
 mod window_rules;

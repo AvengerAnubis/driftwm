@@ -782,6 +782,16 @@ impl Config {
                 // `"none"` means "use the libinput device default", same as unset.
                 click_method: t.click_method.clone().filter(|m| m.as_str() != "none"),
                 disable_while_typing: t.disable_while_typing.unwrap_or(true),
+                // `enable = false` wins: a trackpad the user turned off outright
+                // shouldn't come back the moment the mouse is unplugged.
+                send_events: match (
+                    t.enable.unwrap_or(true),
+                    t.disable_on_external_mouse.unwrap_or(false),
+                ) {
+                    (false, _) => SendEvents::Disabled,
+                    (true, true) => SendEvents::DisabledOnExternalMouse,
+                    (true, false) => SendEvents::Enabled,
+                },
             }
         };
 

@@ -153,6 +153,17 @@ impl DriftWm {
         }
 
         if new_config.trackpad != self.config.trackpad {
+            // Config is a seed, same rule as the bookmarks below, and like them
+            // this diffs resolved values: an edit that changes the on/off
+            // outcome re-asserts over a runtime `set-trackpad` override, while
+            // any other trackpad edit leaves it alone. Without the second half,
+            // saving an unrelated line would silently re-enable a trackpad the
+            // user turned off. An edit that resolves to the same mode — say
+            // spelling out the default `enable = true` — is not a change and
+            // won't clear the override.
+            if new_config.trackpad.send_events != self.config.trackpad.send_events {
+                self.trackpad_send_events = None;
+            }
             self.config.trackpad = new_config.trackpad.clone();
             let devices = self.input_devices.clone();
             for mut device in devices {

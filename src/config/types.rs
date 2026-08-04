@@ -419,6 +419,15 @@ pub enum AccelProfile {
     Adaptive,
 }
 
+/// Whether the trackpad delivers events at all, resolved from the `enable` and
+/// `disable_on_external_mouse` config fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendEvents {
+    Enabled,
+    Disabled,
+    DisabledOnExternalMouse,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrackpadSettings {
     pub tap_to_click: bool,
@@ -428,6 +437,7 @@ pub struct TrackpadSettings {
     pub accel_profile: AccelProfile,
     pub click_method: Option<String>,
     pub disable_while_typing: bool,
+    pub send_events: SendEvents,
 }
 
 impl Default for TrackpadSettings {
@@ -440,6 +450,7 @@ impl Default for TrackpadSettings {
             accel_profile: AccelProfile::Adaptive,
             click_method: None,
             disable_while_typing: true,
+            send_events: SendEvents::Enabled,
         }
     }
 }

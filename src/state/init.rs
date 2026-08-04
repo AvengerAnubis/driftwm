@@ -382,6 +382,7 @@ impl DriftWm {
             momentum_deadline: None,
             session: None,
             input_devices: Vec::new(),
+            trackpad_send_events: None,
             state_file_cameras: HashMap::new(),
             state_file_last_write: Instant::now(),
             active_layout: String::new(),

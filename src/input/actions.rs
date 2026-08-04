@@ -7,7 +7,7 @@ use smithay::{
 use crate::state::window_animation::{AnimSpace, ContentPolicy, GeometryRole};
 use crate::state::{DriftWm, HomeReturn, StageWindow};
 use driftwm::canvas::{self};
-use driftwm::config::{Action, LayoutSwitch, Modifiers, TrackpadState};
+use driftwm::config::{Action, LayoutSwitch, Modifiers, SendEvents, TrackpadState};
 use driftwm::window_ext::WindowExt;
 
 /// Use the focused window as the cone-search origin only when it's fully
@@ -792,41 +792,28 @@ impl DriftWm {
         self.refresh_pointer_focus();
     }
 
-    /// Set every connected trackpad's libinput send-events mode — enabled,
-    /// disabled, or toggled from its current state. The set state survives a
-    /// config reload — hotplug/reload configuration (`configure_libinput_device`)
-    /// never touches send-events mode.
+    /// Override `[input.trackpad]`'s send-events mode for the rest of the
+    /// session and push it to every connected trackpad. Tracking the intent
+    /// rather than each device's current mode keeps two trackpads from drifting
+    /// apart under one keybinding, and lets a hotplugged one come up in the
+    /// state the user last asked for.
     fn set_trackpad(&mut self, state: &TrackpadState) {
-        let mut found = false;
-        for device in &self.input_devices {
-            if device.config_tap_finger_count() == 0 {
-                continue;
-            }
-            found = true;
-            let target = match state {
-                TrackpadState::On => smithay::reexports::input::SendEventsMode::ENABLED,
-                TrackpadState::Off => smithay::reexports::input::SendEventsMode::DISABLED,
-                TrackpadState::Toggle => {
-                    // Only a true DISABLED state toggles back on.
-                    // DISABLED_ON_EXTERNAL_MOUSE reads as "not disabled", so a
-                    // toggle press goes fully off from there too.
-                    if device
-                        .config_send_events_mode()
-                        .contains(smithay::reexports::input::SendEventsMode::DISABLED)
-                    {
-                        smithay::reexports::input::SendEventsMode::ENABLED
-                    } else {
-                        smithay::reexports::input::SendEventsMode::DISABLED
-                    }
-                }
-            };
-            if let Err(e) = device.config_send_events_set_mode(target) {
-                tracing::warn!("Failed to set send_events mode on {}: {e:?}", device.name());
-            }
-        }
-        if !found {
-            tracing::info!("set-trackpad: no trackpad connected (wanted {state:?})");
-        }
+        let target = match state {
+            TrackpadState::On => SendEvents::Enabled,
+            TrackpadState::Off => SendEvents::Disabled,
+            // Only a true Disabled toggles back on. From
+            // DisabledOnExternalMouse the trackpad is live whenever no mouse
+            // is attached, so a press means "off" — with a mouse attached
+            // that first press is a no-op and it takes two to reach on.
+            // libinput reports the configured mode, not whether it's
+            // suppressed right now, so intent-tracking can't do better.
+            TrackpadState::Toggle => match self.effective_send_events() {
+                SendEvents::Disabled => SendEvents::Enabled,
+                _ => SendEvents::Disabled,
+            },
+        };
+        self.trackpad_send_events = Some(target);
+        self.apply_trackpad_send_events();
     }
 
     /// If an overview-return is pending, animate back to it and return true.

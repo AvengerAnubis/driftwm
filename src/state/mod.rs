@@ -882,6 +882,13 @@ pub struct DriftWm {
     pub session: Option<LibSeatSession>,
     pub input_devices: Vec<smithay::reexports::input::Device>,
 
+    /// Runtime trackpad send-events override set by
+    /// [`Action::SetTrackpad`](driftwm::config::Action::SetTrackpad). `None`
+    /// follows `[input.trackpad]`. Config is a seed: reload clears this only
+    /// when the resolved mode changed, so an unrelated edit can't silently
+    /// re-enable a trackpad the user turned off.
+    pub trackpad_send_events: Option<driftwm::config::SendEvents>,
+
     pub state_file_cameras: HashMap<String, (Point<f64, Logical>, f64)>,
     pub state_file_last_write: Instant,
     /// Active XKB layout name (e.g. "English (US)"), updated on key events.

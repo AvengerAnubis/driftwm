@@ -84,6 +84,8 @@ pub(super) struct TrackpadConfig {
     pub accel_profile: Option<String>,
     pub click_method: Option<String>,
     pub disable_while_typing: Option<bool>,
+    pub enable: Option<bool>,
+    pub disable_on_external_mouse: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
