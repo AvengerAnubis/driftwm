@@ -411,14 +411,19 @@ impl Client {
         }
     }
 
+    /// Checks for a protocol error before unwrapping the dispatch result:
+    /// calloop's wayland source usually maps a dispatch-step
+    /// `WaylandError::Protocol` to a bare `EPROTO`, which would otherwise panic
+    /// before revealing the interface, code and message the compositor
+    /// actually posted.
     pub fn dispatch(&mut self) {
-        self.event_loop
-            .dispatch(Duration::ZERO, &mut self.state)
-            .unwrap();
+        let result = self.event_loop.dispatch(Duration::ZERO, &mut self.state);
 
         if let Some(error) = self.connection.protocol_error() {
             panic!("{error}");
         }
+
+        result.unwrap();
     }
 
     pub fn send_sync(&self) -> Arc<SyncData> {
