@@ -33,7 +33,9 @@ use crate::state::{StageWindow, SuspendedId};
 
 use super::client::ClientId;
 use super::real::TempDir;
-use super::{Fixture, end_grab, map_window, motion, window_by_app_id};
+use super::{
+    Fixture, end_grab, map_window, motion, tick_until_settled, ticks_to_settle, window_by_app_id,
+};
 
 const TICK: Duration = Duration::from_millis(16);
 const MAX_TICKS: usize = 600;
@@ -123,25 +125,6 @@ fn seed_resize_capture(f: &mut Fixture, id: ElementId) {
         1,
         "the seeded capture is in the map, so the drop below has something to do"
     );
-}
-
-/// Drive real-time ticks until every window animation prunes, panicking on
-/// non-convergence. Only valid for entries that actually settle (position-only,
-/// resolved requests, open) — an entry holding an outstanding request would spin
-/// to the panic, which is the point of `PAST_HOLD` elsewhere.
-fn tick_until_settled(f: &mut Fixture) {
-    ticks_to_settle(f);
-}
-
-/// As [`tick_until_settled`], returning how many ticks convergence took.
-fn ticks_to_settle(f: &mut Fixture) -> usize {
-    for n in 0..MAX_TICKS {
-        if !f.state().window_animations.is_active() {
-            return n;
-        }
-        f.state().tick_window_animations(TICK);
-    }
-    panic!("window animations did not converge within {MAX_TICKS} ticks");
 }
 
 /// Put a suspended "myapp" stand-in into the pending-relaunch state (the

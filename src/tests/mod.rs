@@ -91,6 +91,25 @@ fn config(toml: &str) -> Config {
     Config::from_toml(toml).unwrap()
 }
 
+/// Drive real-time ticks until every window animation prunes, panicking on
+/// non-convergence. Only valid for entries that actually settle (position-only,
+/// resolved requests, open) — an entry holding an outstanding request would spin
+/// to the panic, which is the point of `PAST_HOLD` elsewhere.
+fn tick_until_settled(f: &mut Fixture) {
+    ticks_to_settle(f);
+}
+
+/// As [`tick_until_settled`], returning how many ticks convergence took.
+fn ticks_to_settle(f: &mut Fixture) -> usize {
+    for n in 0..MAX_TICKS {
+        if !f.state().window_animations.is_active() {
+            return n;
+        }
+        f.state().tick_window_animations(TICK);
+    }
+    panic!("window animations did not converge within {MAX_TICKS} ticks");
+}
+
 /// Deliver one pointer motion at canvas-space `loc`, routed through whatever
 /// grab is live.
 fn motion(f: &mut Fixture, loc: Point<f64, Logical>) {
