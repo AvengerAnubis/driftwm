@@ -357,6 +357,9 @@ impl PointerGrab<DriftWm> for ResizeGrab {
                 // hands back a view move this grab held off — the stand-in arm's
                 // disarm does that for itself.
                 data.flush_deferred_views();
+                // The settled size (and the commit-time reposition that follows
+                // it) is durable — persist it on the session-store debounce.
+                data.session_store_mark_dirty();
             }
             ClusterMember::Suspended(id) => {
                 data.disarm_interactive_move(id);

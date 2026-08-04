@@ -455,9 +455,12 @@ impl PointerGrab<DriftWm> for MoveGrab {
         // Both arms armed `interactive_move` at grab install (guarding relaunch
         // adoption and animation starts); balance it here.
         data.disarm_interactive_move(&self.target);
-        // A stand-in's settled position (including a cross-output teleport) is
-        // durable — persist it on the session-store debounce.
-        if matches!(self.target, ClusterMember::Suspended(_)) {
+        // A settled position (including a cross-output teleport) is durable —
+        // persist it on the session-store debounce, live or stand-in alike.
+        if matches!(
+            self.target,
+            ClusterMember::Client(_) | ClusterMember::Suspended(_)
+        ) {
             data.session_store_mark_dirty();
         }
         // A pick-mode promote is the only move that sets grab_cursor (title-bar

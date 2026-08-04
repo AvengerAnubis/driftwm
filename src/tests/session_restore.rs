@@ -1,6 +1,9 @@
 //! Durable session store + restore: the quit-serialize round-trip, origin
 //! filtering with carry-forward when `restore_windows` is off, fresh-boot camera
-//! seeding, and the immediate write on create/dismiss. The fixture drives the
+//! seeding, and the immediate write on create/dismiss. The steady-state flush —
+//! the debounced write a create/close/move/resize arms — records live windows
+//! too, so a crash (or a logout that dispatches client teardown before the final
+//! serialize) leaves the current canvas in the file. The fixture drives the
 //! same `serialize_session_on_shutdown` the main.rs choke point calls; the
 //! post-`run()` wiring itself (Quit + signalfd both reaching it) is hardware
 //! smoke, not covered here.
@@ -1167,6 +1170,90 @@ fn create_and_dismiss_write_immediately() {
         after_dismiss.entries.is_empty(),
         "dismiss wrote through at once"
     );
+}
+
+/// A steady-state flush records live windows, not just suspended stand-ins:
+/// the crash-recovery contract. A SIGKILL — or a logout that dispatches client
+/// teardown before the shutdown serialize — lands with the current canvas in
+/// the file instead of an empty rewrite that erases the prior session. The
+/// fixture has no timer loop, so drive the debounce through the immediate-write
+/// entry, which runs the same flush.
+#[test]
+fn steady_state_flush_writes_live_windows() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let mut f = Fixture::with_config(config_restore(true));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &cache, &["alpha", "beta"]);
+    f.state().session_store.path = Some(path.clone());
+
+    let a = f.add_client();
+    map_at(&mut f, a, "alpha", (400, 300), (500, 500));
+    let b = f.add_client();
+    map_at(&mut f, b, "beta", (200, 200), (-300, 100));
+
+    f.state().session_store_write_now();
+
+    // Both live windows, in z-order, as quit records at their shrunken-body
+    // rects — the same entries the shutdown serialize writes.
+    let saved = session::read(&path);
+    assert_eq!(saved.entries.len(), 2);
+    assert_eq!(saved.entries[0].app_id, "alpha");
+    assert_eq!(saved.entries[0].position, [700, -662]);
+    assert_eq!(saved.entries[0].size, [400, 275]);
+    assert_eq!(saved.entries[1].app_id, "beta");
+    assert_eq!(saved.entries[1].position, [-200, -212]);
+    assert_eq!(saved.entries[1].size, [200, 175]);
+    assert!(saved.entries.iter().all(|e| e.origin == Origin::Quit));
+
+    // The flush is a true steady-state write: the file loads back into a fresh
+    // compositor, so a crash mid-session recovers the canvas.
+    let mut f = Fixture::with_config(config_restore(true));
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(restored.len(), 2);
+    assert_eq!(restored[0].0.identity.app_id, "alpha");
+    assert_eq!(restored[0].1, Point::from((500, 525)));
+    for (s, _) in restored {
+        f.state().dismiss_suspended(s.id);
+    }
+}
+
+/// Closing a live window drops it from the steady-state file: the teardown
+/// arms the same debounce as a create, so a crash after a manual close cannot
+/// resurrect a window the user already dismissed.
+#[test]
+fn closing_a_live_window_drops_it_from_the_steady_state_file() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let mut f = Fixture::with_config(config_restore(true));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &cache, &["alpha", "beta"]);
+    f.state().session_store.path = Some(path.clone());
+
+    let a = f.add_client();
+    map_at(&mut f, a, "alpha", (400, 300), (500, 500));
+    let b = f.add_client();
+    let b_surface = map_at(&mut f, b, "beta", (200, 200), (-300, 100));
+    f.state().session_store_write_now();
+    assert_eq!(session::read(&path).entries.len(), 2);
+
+    // The user closes beta; the client teardown unmaps it and arms the debounce.
+    f.client(b).window(&b_surface).destroy();
+    f.roundtrip(b);
+    f.dispatch();
+    f.state().session_store_write_now();
+
+    let saved = session::read(&path);
+    assert_eq!(saved.entries.len(), 1);
+    assert_eq!(saved.entries[0].app_id, "alpha");
+    assert_eq!(saved.entries[0].position, [700, -662]);
 }
 
 /// The `csd` flag round-trips through session.json: a CSD window suspends to a
