@@ -1303,18 +1303,6 @@ impl DriftWm {
         let mut pos = pointer.current_location();
         let source = event.source();
 
-        // Scroll over an opaque suspended window is swallowed: there's no client
-        // to forward it to, and it must not pan/zoom the canvas beneath.
-        if matches!(
-            self.decoration_under(pos),
-            Some((DecoTarget::Suspended(_), _))
-        ) {
-            let frame = AxisFrame::new(Event::time_msec(&event));
-            pointer.axis(self, frame);
-            pointer.frame(self);
-            return;
-        }
-
         // Discrete wheel-notch bindings (wheel-up / wheel-down) run any
         // action once per notch — volume on mod+shift+scroll and the like.
         // Wheel sources only: finger and continuous scrolling have no
@@ -1495,7 +1483,21 @@ impl DriftWm {
             return;
         }
 
-        // No binding matched — forward scroll to the client
+        // No binding matched — forward scroll to the client, unless the pointer
+        // sits on an opaque suspended window: there's no client to forward to,
+        // and an unbound scroll must not pan/zoom the canvas beneath. The
+        // swallow lives at the tail, not ahead of the binding lookup, so a
+        // bound scroll (an `anywhere` alt+wheel zoom, mod+wheel pan) still
+        // fires over a stand-in like over any window.
+        if matches!(
+            self.decoration_under(pos),
+            Some((DecoTarget::Suspended(_), _))
+        ) {
+            let frame = AxisFrame::new(Event::time_msec(&event));
+            pointer.axis(self, frame);
+            pointer.frame(self);
+            return;
+        }
         let frame = build_client_axis_frame::<I>(&event);
         pointer.axis(self, frame);
         pointer.frame(self);
