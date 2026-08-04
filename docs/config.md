@@ -705,6 +705,7 @@ Actions:
 - `toggle-pin-to-screen` — pin/unpin the focused window to the screen (ignores pan/zoom, floats above)
 - `reload-config` — hot-reload config file
 - `toggle-cursor-pan` — toggle cursor edge-pan (see [navigation.edge_pan])
+- `set-trackpad on|off|toggle` — set the built-in trackpad enabled/disabled, or toggle (libinput send-events mode)
 - `quit` — exit the compositor
 - `send-to-output <dir>` — move focused window to adjacent output
 - `send-cursor-to-output <dir>` — move the cursor to adjacent output
@@ -795,6 +796,13 @@ Directions: up, down, left, right, up-left, up-right, down-left, down-right
 
 ```toml
 "mod+s" = "suspend-window"
+```
+
+**Example: set-trackpad (unbound by default)**
+
+```toml
+"mod+f10" = "set-trackpad toggle"   # toggle the built-in trackpad on/off (e.g. with an external mouse attached)
+"mod+shift+f10" = "set-trackpad off"   # force the trackpad off (e.g. for per-window rules)
 ```
 
 ## `[mouse]`

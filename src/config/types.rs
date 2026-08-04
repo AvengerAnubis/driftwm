@@ -78,7 +78,19 @@ pub enum Action {
     SwitchLayout(LayoutSwitch),
     ReloadConfig,
     ToggleCursorPan,
+    SetTrackpad(TrackpadState),
     Quit,
+}
+
+/// Desired trackpad send-events state, as set by `set-trackpad`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrackpadState {
+    /// Flip between enabled and disabled.
+    Toggle,
+    /// Force the trackpad enabled.
+    On,
+    /// Force the trackpad disabled.
+    Off,
 }
 
 impl Action {
@@ -105,6 +117,7 @@ impl Action {
                 | Action::ReloadConfig
                 | Action::SwitchLayout(_)
                 | Action::ToggleCursorPan
+                | Action::SetTrackpad(_)
                 | Action::SendToOutput(_)
         )
     }
@@ -1251,6 +1264,7 @@ mod tests {
         assert!(Action::ReloadConfig.runs_during_fullscreen());
         assert!(Action::SwitchLayout(LayoutSwitch::Next).runs_during_fullscreen());
         assert!(Action::ToggleCursorPan.runs_during_fullscreen());
+        assert!(Action::SetTrackpad(TrackpadState::Toggle).runs_during_fullscreen());
         assert!(Action::SendToOutput(Direction::Right).runs_during_fullscreen());
         assert!(!Action::CloseWindow.runs_during_fullscreen());
         assert!(!Action::ZoomIn.runs_during_fullscreen());
