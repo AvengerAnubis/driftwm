@@ -469,6 +469,23 @@ impl Client {
         data
     }
 
+    /// Request `wl_surface.frame()` on `surface` and commit it — a request only
+    /// moves from pending to current double-buffered state on commit. Reuses
+    /// the `wl_display.sync` dispatch (`Dispatch<WlCallback, Arc<SyncData>>`)
+    /// since it's the same `wl_callback::Event::Done`.
+    ///
+    /// The commit runs a full commit cycle server-side (marks the output
+    /// dirty, re-arranges the layer map, re-runs keyboard focus for a layer
+    /// surface) — not inert, so probing focus/animation state around a `frame`
+    /// call means probing it across that.
+    pub fn frame(&self, surface: &WlSurface) -> Arc<SyncData> {
+        let data = Arc::new(SyncData::default());
+        surface.frame(&self.qh, data.clone());
+        surface.commit();
+        self.connection.flush().unwrap();
+        data
+    }
+
     pub fn create_window(&mut self) -> &mut Window {
         self.state.create_window()
     }

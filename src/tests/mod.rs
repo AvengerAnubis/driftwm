@@ -38,6 +38,7 @@ mod hover_focus;
 mod input_dispatch;
 mod interact_min;
 mod layer_destroy_focus;
+mod layer_frame_gating;
 mod opacity;
 mod pinned_phantom;
 mod popups;
