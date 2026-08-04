@@ -152,24 +152,19 @@ impl DriftWm {
             }
         }
 
-        if new_config.trackpad != self.config.trackpad {
-            // Config is a seed, same rule as the bookmarks below, and like them
-            // this diffs resolved values: an edit that changes the on/off
-            // outcome re-asserts over a runtime `set-trackpad` override, while
-            // any other trackpad edit leaves it alone. Without the second half,
-            // saving an unrelated line would silently re-enable a trackpad the
-            // user turned off. An edit that resolves to the same mode — say
-            // spelling out the default `enable = true` — is not a change and
-            // won't clear the override.
-            if new_config.trackpad.send_events != self.config.trackpad.send_events {
-                self.trackpad_send_events = None;
-            }
-            self.config.trackpad = new_config.trackpad.clone();
-            let devices = self.input_devices.clone();
-            for mut device in devices {
-                self.configure_libinput_device(&mut device);
-            }
-            tracing::info!("Config reload: trackpad settings applied to all devices");
+        // Decided here because the diff needs the old config.
+        let devices_need_config = new_config.trackpad != self.config.trackpad
+            || new_config.mouse_device != self.config.mouse_device;
+
+        // Config is a seed, same rule as the bookmarks below, and like them
+        // this diffs resolved values: an edit that changes the on/off outcome
+        // re-asserts over a runtime `set-trackpad` override, while any other
+        // trackpad edit leaves it alone. Without the second half, saving an
+        // unrelated line would silently re-enable a trackpad the user turned
+        // off. An edit that resolves to the same mode — say spelling out the
+        // default `enable = true` — is not a change and won't clear it.
+        if new_config.trackpad.send_events != self.config.trackpad.send_events {
+            self.trackpad_send_events = None;
         }
 
         // child_env auto-rebuilds via `Config::from_raw`; process env
@@ -210,6 +205,17 @@ impl DriftWm {
         }
 
         self.config = new_config;
+
+        // Must stay below the swap: `configure_mouse` and `configure_trackpad`
+        // read `self.config`, so running this any earlier applies the settings
+        // being replaced.
+        if devices_need_config {
+            let devices = self.input_devices.clone();
+            for mut device in devices {
+                self.configure_libinput_device(&mut device);
+            }
+            tracing::info!("Config reload: input settings applied to all devices");
+        }
 
         // Invalidate every SSD title bar's cached width so `update()`
         // rebuilds with the new font/height/colors.
