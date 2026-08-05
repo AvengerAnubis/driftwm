@@ -71,6 +71,10 @@ impl XdgShellHandler for DriftWm {
         self.map_window(window.clone(), pos.into(), false);
         self.raise_window(&window, false);
         self.enforce_below_windows();
+        // A new live window must land in the durable session: the debounced
+        // flush now records live windows, so a crash or SIGKILL after this
+        // point restores it instead of a shutdown race deciding its fate.
+        self.session_store_mark_dirty();
         // Don't focus here: a pre-buffer wl_keyboard.enter is unusable, and
         // set_focus is a no-op when the target is unchanged, so focusing now
         // would trap the client unfocused (the on-commit re-focus does nothing).
@@ -392,6 +396,9 @@ impl XdgShellHandler for DriftWm {
                 self.snapshot_closing_window(window, &wl_surface, fs_output.as_ref(), false);
             }
             self.unmap_window(window);
+            // The window left the stage; the durable record must follow, or a
+            // stale flush could re-save a window the user closed minutes ago.
+            self.session_store_mark_dirty();
             // The window may have sat under the cursor; re-target pointer focus
             // now that it's gone so clicks don't fall into the destroyed surface.
             self.refresh_pointer_focus();

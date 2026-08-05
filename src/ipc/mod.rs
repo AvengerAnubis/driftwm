@@ -626,6 +626,9 @@ fn cmd_move(window: Option<WindowSelector>, to: Option<(i32, i32)>, state: &mut 
             // focus; a selector can reach any window.
             let activate = state.focused_window().as_ref() == Some(&window);
             state.map_window_to_rule_point(&window, x, y, activate);
+            // The new position is durable — persist it on the session-store
+            // debounce, matching the stand-in arm above.
+            state.session_store_mark_dirty();
             Ok(Response::Position { x, y })
         }
     }

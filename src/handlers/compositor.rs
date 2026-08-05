@@ -836,6 +836,9 @@ impl CompositorHandler for DriftWm {
                             // the body size the client hasn't acked yet, so it
                             // establishes a stable rect on its next settle.
                             self.refresh_stable_snap_rect(&StageWindow::Client(window.clone()));
+                            // The resize settled: its size — and any top/left reposition above
+                            // — is durable, so persist it on the session-store debounce.
+                            self.session_store_mark_dirty();
                             // Scale+fade the window in. A window opening straight
                             // into fullscreen/fit runs both in this same commit,
                             // so this entry is never drawn: the geometry entry
@@ -1151,7 +1154,22 @@ impl DriftWm {
                 initial_screen_pos,
                 last_committed_size,
             } => (edges, initial_screen_pos, last_committed_size),
-            ResizeState::Idle => return,
+            ResizeState::Idle => {
+                // A step/IPC resize (`msg resize`, grow/shrink) never arms
+                // `ResizeState` — it writes a `PendingResize` and a plain sized
+                // configure — so its answering commit is the only seam where the
+                // durable size actually lands. Mark it like the grab path's
+                // settle does, so a crash after the request restores the new
+                // size, not the pre-resize one.
+                if self
+                    .pending_resizes
+                    .get(&surface.id())
+                    .is_some_and(|r| r.is_live(window))
+                {
+                    self.session_store_mark_dirty();
+                }
+                return;
+            }
         };
 
         let current_geo = window.geometry();
